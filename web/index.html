@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f172a">
+  <title>Eigen Cloud</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <section id="login" class="login" hidden>
+    <form id="loginForm" class="card">
+      <h1>Eigen Cloud</h1>
+      <p class="muted">Mail · Agenda · Foto's</p>
+      <input type="password" id="password" placeholder="Wachtwoord" autocomplete="current-password" required>
+      <button class="primary">Inloggen</button>
+      <p id="loginError" class="error"></p>
+    </form>
+  </section>
+
+  <div id="app" hidden>
+    <header class="topbar">
+      <nav class="tabs">
+        <button data-tab="mail" class="active">✉️ <span>Mail</span></button>
+        <button data-tab="agenda">📅 <span>Agenda</span></button>
+        <button data-tab="fotos">🖼️ <span>Foto's</span></button>
+      </nav>
+      <button id="logout" class="ghost" title="Uitloggen">⎋</button>
+    </header>
+
+    <!-- MAIL -->
+    <main id="tab-mail" class="tab">
+      <aside class="side">
+        <button id="compose" class="primary block">+ Nieuw bericht</button>
+        <ul id="folders" class="navlist"></ul>
+        <h4>Labels</h4>
+        <ul id="labels" class="navlist"></ul>
+      </aside>
+      <section class="list-pane">
+        <form id="mailSearch" class="search"><input type="search" id="mailQ" placeholder="Zoeken in mail"></form>
+        <ul id="messages" class="messages"></ul>
+        <button id="moreMail" class="ghost block" hidden>Meer laden</button>
+      </section>
+      <section id="reader" class="reader empty"><p class="muted">Selecteer een bericht</p></section>
+    </main>
+
+    <!-- AGENDA -->
+    <main id="tab-agenda" class="tab" hidden>
+      <div class="cal-head">
+        <button id="calPrev" class="ghost">‹</button>
+        <h2 id="calTitle"></h2>
+        <button id="calNext" class="ghost">›</button>
+        <button id="calToday" class="ghost">Vandaag</button>
+        <span class="grow"></span>
+        <button id="newEvent" class="primary">+ Afspraak</button>
+      </div>
+      <div class="cal-grid" id="calGrid"></div>
+      <div id="dayList" class="day-list"></div>
+    </main>
+
+    <!-- FOTO'S -->
+    <main id="tab-fotos" class="tab" hidden>
+      <div class="photo-head">
+        <select id="photoFilter">
+          <option value="">Alle foto's</option>
+          <option value="favorites">★ Favorieten</option>
+          <option value="videos">Video's</option>
+        </select>
+        <select id="albumFilter"><option value="">Geen album</option></select>
+        <span class="grow"></span>
+        <label class="primary upload">⬆ Uploaden<input type="file" id="uploadInput" multiple accept="image/*,video/*" hidden></label>
+      </div>
+      <p id="uploadStatus" class="muted"></p>
+      <div id="photoGrid" class="photo-grid"></div>
+      <div id="photoSentinel"></div>
+    </main>
+  </div>
+
+  <!-- Dialogen -->
+  <dialog id="composeDlg" class="dlg">
+    <form id="composeForm" method="dialog">
+      <h3>Nieuw bericht</h3>
+      <input name="to" placeholder="Aan (komma's tussen adressen)" required>
+      <input name="cc" placeholder="Cc">
+      <input name="subject" placeholder="Onderwerp">
+      <textarea name="text" rows="12" placeholder="Bericht"></textarea>
+      <input type="file" name="files" multiple>
+      <input type="hidden" name="replyToId">
+      <p class="error" id="composeError"></p>
+      <div class="row"><button value="cancel" formnovalidate class="ghost">Annuleren</button><button id="sendBtn" class="primary" value="send">Versturen</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="eventDlg" class="dlg">
+    <form id="eventForm" method="dialog">
+      <h3 id="eventDlgTitle">Afspraak</h3>
+      <input name="title" placeholder="Titel" required>
+      <label class="check"><input type="checkbox" name="all_day"> Hele dag</label>
+      <div class="row"><label>Start<input type="datetime-local" name="start" required></label><label>Eind<input type="datetime-local" name="end" required></label></div>
+      <input name="location" placeholder="Locatie">
+      <textarea name="description" rows="3" placeholder="Beschrijving"></textarea>
+      <div class="row">
+        <label>Herhalen<select name="rrule">
+          <option value="">Niet</option><option value="FREQ=DAILY">Dagelijks</option><option value="FREQ=WEEKLY">Wekelijks</option>
+          <option value="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR">Werkdagen</option><option value="FREQ=MONTHLY">Maandelijks</option><option value="FREQ=YEARLY">Jaarlijks</option>
+        </select></label>
+        <label>Agenda<select name="calendar_id" id="calSelect"></select></label>
+      </div>
+      <label>Herinnering<select name="reminder_min"><option value="">Geen</option><option value="10">10 min vooraf</option><option value="30">30 min vooraf</option><option value="60">1 uur vooraf</option><option value="1440">1 dag vooraf</option></select></label>
+      <input type="hidden" name="id"><input type="hidden" name="occurrence">
+      <div class="row">
+        <button value="delete" id="deleteEvent" class="ghost danger" formnovalidate hidden>Verwijderen</button>
+        <span class="grow"></span>
+        <button value="cancel" formnovalidate class="ghost">Annuleren</button><button value="save" class="primary">Opslaan</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="photoDlg" class="viewer">
+    <div class="viewer-bar">
+      <button id="pvPrev" class="ghost">‹</button><span id="pvInfo" class="grow"></span>
+      <button id="pvFav" class="ghost">☆</button><a id="pvDownload" class="ghost btn">⬇</a><button id="pvDelete" class="ghost danger">🗑</button>
+      <button id="pvNext" class="ghost">›</button><button id="pvClose" class="ghost">✕</button>
+    </div>
+    <div id="pvMedia" class="viewer-media"></div>
+  </dialog>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>

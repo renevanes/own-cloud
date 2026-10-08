@@ -1,0 +1,13 @@
+# Web-app op cloud.<domein>; Caddy regelt HTTPS automatisch.
+cloud.{$DOMAIN} {
+	encode zstd gzip
+	request_body {
+		max_size 8GB
+	}
+	reverse_proxy app:3000
+}
+
+# Alleen nodig zodat Caddy een certificaat haalt voor de mailserver (STARTTLS).
+mail.{$DOMAIN} {
+	respond "eigen-cloud mail" 200
+}
