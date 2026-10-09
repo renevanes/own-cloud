@@ -4,6 +4,7 @@ import path from "node:path";
 import { simpleParser, type AddressObject, type ParsedMail } from "mailparser";
 import { db } from "../db.js";
 import { paths } from "../config.js";
+import { blobWritten, relData } from "../blobs.js";
 
 export type Folder = "inbox" | "sent" | "archive" | "trash" | "spam" | "drafts";
 
@@ -59,41 +60,51 @@ export async function storeRawMessage(raw: Buffer, opts: StoreOptions = {}): Pro
   const from = addrs(m.from)[0];
   const date = m.date?.getTime() ?? Date.now();
 
+  // Bijlagen eerst naar schijf, daarna alles in één transactie in de database.
+  const atts = m.attachments.map((att) => {
+    const aSha = crypto.createHash("sha256").update(att.content).digest("hex");
+    const aPath = path.join(paths.mailAttachments, aSha.slice(0, 2), aSha);
+    fs.mkdirSync(path.dirname(aPath), { recursive: true });
+    if (!fs.existsSync(aPath)) fs.writeFileSync(aPath, att.content);
+    return { filename: att.filename ?? "bijlage", mime: att.contentType, size: att.size, rel: relData(aPath) };
+  });
+
   const insert = db.prepare(`
     INSERT INTO messages (message_id, thread_key, folder, labels, from_addr, from_name, to_addrs, cc_addrs,
                           subject, snippet, body_text, body_html, date, is_read, is_starred, raw_path, size)
     VALUES (@message_id, @thread_key, @folder, @labels, @from_addr, @from_name, @to_addrs, @cc_addrs,
             @subject, @snippet, @body_text, @body_html, @date, @is_read, @is_starred, @raw_path, @size)`);
-
-  const id = Number(
-    insert.run({
-      message_id: m.messageId ?? null,
-      thread_key: threadKey(m),
-      folder: opts.folder ?? "inbox",
-      labels: JSON.stringify(opts.labels ?? []),
-      from_addr: from?.address ?? null,
-      from_name: from?.name ?? null,
-      to_addrs: JSON.stringify(addrs(m.to)),
-      cc_addrs: JSON.stringify(addrs(m.cc)),
-      subject: m.subject ?? "(geen onderwerp)",
-      snippet: snippetOf(m.text),
-      body_text: m.text ?? null,
-      body_html: typeof m.html === "string" ? m.html : null,
-      date,
-      is_read: opts.isRead ? 1 : 0,
-      is_starred: opts.isStarred ? 1 : 0,
-      raw_path: rawPath,
-      size: raw.length,
-    }).lastInsertRowid,
-  );
-
   const addAtt = db.prepare("INSERT INTO attachments (message_id, filename, mime, size, path) VALUES (?, ?, ?, ?, ?)");
-  for (const att of m.attachments) {
-    const aSha = crypto.createHash("sha256").update(att.content).digest("hex");
-    const aPath = path.join(paths.mailAttachments, aSha.slice(0, 2), aSha);
-    fs.mkdirSync(path.dirname(aPath), { recursive: true });
-    if (!fs.existsSync(aPath)) fs.writeFileSync(aPath, att.content);
-    addAtt.run(id, att.filename ?? "bijlage", att.contentType, att.size, aPath);
-  }
-  return id;
+  const rawRel = relData(rawPath);
+  const tk = threadKey(m);
+
+  return db.transaction(() => {
+    const id = Number(
+      insert.run({
+        message_id: m.messageId ?? null,
+        thread_key: tk,
+        folder: opts.folder ?? "inbox",
+        labels: JSON.stringify(opts.labels ?? []),
+        from_addr: from?.address ?? null,
+        from_name: from?.name ?? null,
+        to_addrs: JSON.stringify(addrs(m.to)),
+        cc_addrs: JSON.stringify(addrs(m.cc)),
+        subject: m.subject ?? "(geen onderwerp)",
+        snippet: snippetOf(m.text),
+        body_text: m.text ?? null,
+        body_html: typeof m.html === "string" ? m.html : null,
+        date,
+        is_read: opts.isRead ? 1 : 0,
+        is_starred: opts.isStarred ? 1 : 0,
+        raw_path: rawRel,
+        size: raw.length,
+      }).lastInsertRowid,
+    );
+    blobWritten(rawRel);
+    for (const a of atts) {
+      addAtt.run(id, a.filename, a.mime, a.size, a.rel);
+      blobWritten(a.rel);
+    }
+    return id;
+  })();
 }

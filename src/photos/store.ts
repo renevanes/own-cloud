@@ -7,6 +7,7 @@ import sharp from "sharp";
 import exifr from "exifr";
 import { db } from "../db.js";
 import { paths } from "../config.js";
+import { blobWritten, relData } from "../blobs.js";
 
 const run = promisify(execFile);
 
@@ -103,12 +104,18 @@ export async function addPhotoFromFile(src: string, meta: PhotoMeta = {}, opts: 
   const thumb = await makeThumb(dest, thumbPath, isVideo);
 
   const camera = [exif?.Make, exif?.Model].filter(Boolean).join(" ") || null;
-  const r = db.prepare(`INSERT INTO photos (sha256, filename, mime, size, width, height, taken_at, lat, lon, camera, description, is_video, is_favorite, path, thumb_path, added)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-    sha, filename, MIME[ext] ?? "application/octet-stream", fs.statSync(dest).size, thumb.width ?? null, thumb.height ?? null, Math.round(takenAt),
-    meta.lat ?? (exif?.latitude as number | undefined) ?? null, meta.lon ?? (exif?.longitude as number | undefined) ?? null,
-    camera, meta.description ?? null, isVideo ? 1 : 0, meta.favorite ? 1 : 0, dest, thumb.ok ? thumbPath : null, Date.now());
-  const id = Number(r.lastInsertRowid);
+  const destRel = relData(dest);
+  const thumbRel = thumb.ok ? relData(thumbPath) : null;
+  const id = db.transaction(() => {
+    const r = db.prepare(`INSERT INTO photos (sha256, filename, mime, size, width, height, taken_at, lat, lon, camera, description, is_video, is_favorite, path, thumb_path, added)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      sha, filename, MIME[ext] ?? "application/octet-stream", fs.statSync(dest).size, thumb.width ?? null, thumb.height ?? null, Math.round(takenAt),
+      meta.lat ?? (exif?.latitude as number | undefined) ?? null, meta.lon ?? (exif?.longitude as number | undefined) ?? null,
+      camera, meta.description ?? null, isVideo ? 1 : 0, meta.favorite ? 1 : 0, destRel, thumbRel, Date.now());
+    blobWritten(destRel);
+    if (thumbRel) blobWritten(thumbRel);
+    return Number(r.lastInsertRowid);
+  })();
   addToAlbums(id, meta.albums);
   return { id, duplicate: false };
 }

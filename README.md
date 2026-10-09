@@ -88,8 +88,12 @@ sqlite3 data/eigen-cloud.sqlite ".backup data/backup.sqlite"
 npm install
 npm run set-password
 npm run dev          # http://localhost:3000, SMTP op poort 2525
-npm test             # 10 tests: SMTP, versturen+DKIM, imports, zomertijd, foto's
+npm test             # 33 tests: mail, agenda, foto's, imports, versleuteling, replicatie, providers, end-to-end cluster
 ```
+
+## Meerdere servers, verhuizen en slapen
+
+Zie **[CLUSTER.md](CLUSTER.md)**: Eigen Cloud als cluster over meerdere Europese aanbieders, met failover, zelfherstel, versleutelde back-ups (ook naar een tijdstip), verhuizen, en slapen/wekken.
 
 ## Nog niet ingebouwd (logische volgende stappen)
 

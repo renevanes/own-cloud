@@ -3,6 +3,8 @@ import type { FastifyInstance } from "fastify";
 import { db } from "../db.js";
 import { requireAuth } from "../auth.js";
 import { sendMail } from "./send.js";
+import { ensureLocal } from "../blobs.js";
+import { isNotLeader } from "../cluster/fence.js";
 
 const FOLDERS = ["inbox", "sent", "archive", "trash", "spam", "drafts"] as const;
 
@@ -47,7 +49,7 @@ export function mailRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>("/api/mail/messages/:id", async (req, reply) => {
     const msg = db.prepare("SELECT * FROM messages WHERE id = ?").get(req.params.id) as Record<string, unknown> | undefined;
     if (!msg) return reply.code(404).send({ error: "Niet gevonden" });
-    db.prepare("UPDATE messages SET is_read = 1 WHERE id = ?").run(req.params.id);
+    try { db.prepare("UPDATE messages SET is_read = 1 WHERE id = ? AND is_read = 0").run(req.params.id); } catch (e) { if (!isNotLeader(e)) throw e; }
     const attachments = db.prepare("SELECT id, filename, mime, size FROM attachments WHERE message_id = ?").all(req.params.id);
     const thread = db.prepare(`SELECT ${LIST_COLS} FROM messages WHERE thread_key = ? ORDER BY date`).all(msg.thread_key);
     delete msg.raw_path;
@@ -78,17 +80,20 @@ export function mailRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>("/api/mail/attachments/:id", async (req, reply) => {
     const a = db.prepare("SELECT filename, mime, path FROM attachments WHERE id = ?").get(req.params.id) as { filename: string; mime: string; path: string } | undefined;
     if (!a) return reply.code(404).send({ error: "Niet gevonden" });
+    const file = await ensureLocal(a.path);
+    if (!file) return reply.code(404).send({ error: "Bestand (nog) niet beschikbaar" });
     reply.header("Content-Type", a.mime || "application/octet-stream");
     reply.header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(a.filename)}`);
-    return reply.send(fs.createReadStream(a.path));
+    return reply.send(fs.createReadStream(file));
   });
 
   app.get<{ Params: { id: string } }>("/api/mail/messages/:id/raw", async (req, reply) => {
     const m = db.prepare("SELECT raw_path FROM messages WHERE id = ?").get(req.params.id) as { raw_path: string } | undefined;
-    if (!m?.raw_path) return reply.code(404).send({ error: "Niet gevonden" });
+    const file = m?.raw_path ? await ensureLocal(m.raw_path) : null;
+    if (!file) return reply.code(404).send({ error: "Niet gevonden" });
     reply.header("Content-Type", "message/rfc822");
     reply.header("Content-Disposition", `attachment; filename="bericht-${req.params.id}.eml"`);
-    return reply.send(fs.createReadStream(m.raw_path));
+    return reply.send(fs.createReadStream(file));
   });
 
   app.post<{

@@ -4,13 +4,15 @@ import Fastify from "fastify";
 import cookie from "@fastify/cookie";
 import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
-import { config } from "./config.js";
 import "./db.js";
 import { authRoutes } from "./auth.js";
 import { mailRoutes } from "./mail/routes.js";
 import { calendarRoutes } from "./calendar/routes.js";
 import { photoRoutes } from "./photos/routes.js";
-import { startSmtpServer } from "./mail/smtp.js";
+import { runtime } from "./cluster/runtime.js";
+import { proxyTo } from "./cluster/proxy.js";
+import { isNotLeader } from "./cluster/fence.js";
+import { clusterRoutes } from "./cluster/routes.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -20,7 +22,25 @@ export async function buildApp() {
   await app.register(multipart, { limits: { fileSize: 8 * 1024 * 1024 * 1024, files: 500 } });
   await app.register(fastifyStatic, { root: path.resolve(here, "../web"), prefix: "/" });
 
-  app.addHook("onSend", async (_req, reply) => {
+  // Cluster: API-verzoeken op een niet-leider gaan door naar de leider.
+  app.addHook("onRequest", async (req, reply) => {
+    if (!runtime.enabled || req.headers["x-eigen-proxied"]) return;
+    const url = req.url;
+    if (!(url.startsWith("/api/") || url.startsWith("/ical/")) || url.startsWith("/api/cluster/local")) return;
+    const target = runtime.leaderApiUrl();
+    if (target) return proxyTo(target, runtime.apiServername, req, reply);
+  });
+
+  app.setErrorHandler((err, _req, reply) => {
+    if (isNotLeader(err)) return reply.code(503).header("retry-after", "3").send({ error: "Even geduld: het cluster wisselt van leider. Probeer het zo opnieuw." });
+    const code = (err as { statusCode?: number }).statusCode ?? 500;
+    if (code >= 500) console.error(err);
+    return reply.code(code).send({ error: (err as Error).message });
+  });
+
+  app.addHook("onSend", async (req, reply) => {
+    // Schrijfactie pas bevestigen als hij ook op een tweede data-node staat (max. 3 s wachten).
+    if (runtime.enabled && req.method !== "GET" && req.method !== "HEAD" && reply.statusCode < 400 && runtime.isLeader()) await runtime.waitDurable();
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("Referrer-Policy", "no-referrer");
     reply.header("X-Frame-Options", "SAMEORIGIN");
@@ -30,13 +50,8 @@ export async function buildApp() {
   calendarRoutes(app);
   await app.register(async (s) => mailRoutes(s));
   await app.register(async (s) => photoRoutes(s));
+  await app.register(async (s) => clusterRoutes(s));
   app.get("/healthz", async () => ({ ok: true }));
   return app;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  const app = await buildApp();
-  await app.listen({ port: config.httpPort, host: "0.0.0.0" });
-  console.log(`🌐 Web/API op http://localhost:${config.httpPort}`);
-  if (process.env.DISABLE_SMTP !== "1") startSmtpServer();
-}

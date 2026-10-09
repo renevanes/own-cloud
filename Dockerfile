@@ -15,5 +15,5 @@ COPY package.json ./
 COPY web ./web
 ENV NODE_ENV=production DATA_DIR=/data
 VOLUME /data
-EXPOSE 3000 2525
-CMD ["node", "dist/server.js"]
+EXPOSE 3000 2525 7946
+CMD ["node", "dist/main.js"]

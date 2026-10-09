@@ -25,6 +25,7 @@
         <button data-tab="mail" class="active">✉️ <span>Mail</span></button>
         <button data-tab="agenda">📅 <span>Agenda</span></button>
         <button data-tab="fotos">🖼️ <span>Foto's</span></button>
+        <button data-tab="nodes" hidden>🐌 <span>Waar draai ik</span></button>
       </nav>
       <button id="logout" class="ghost" title="Uitloggen">⎋</button>
     </header>
@@ -75,7 +76,53 @@
       <div id="photoGrid" class="photo-grid"></div>
       <div id="photoSentinel"></div>
     </main>
+
+    <!-- NODES -->
+    <main id="tab-nodes" class="tab" hidden>
+      <section class="nodes-head">
+        <div id="clusterSummary" class="summary"></div>
+        <div class="row-actions">
+          <button class="primary" id="addData">+ Data-node</button>
+          <button class="ghost" id="addWitness">+ Witness</button>
+          <button class="ghost" id="runDrill">🧯 Brandoefening</button>
+          <button class="ghost" id="runSnapshot">📸 Snapshot</button>
+          <button class="ghost danger" id="sleepCluster">😴 Slapen</button>
+        </div>
+      </section>
+      <div id="nodeCards" class="node-cards"></div>
+      <div class="nodes-cols">
+        <section>
+          <h3>Opslag</h3>
+          <div id="storeList" class="store-list"></div>
+          <h3>Beleid</h3>
+          <form id="policyForm" class="policy">
+            <label class="check"><input type="checkbox" name="autoHeal"> Zelfherstel (vervangen en aanvullen)</label>
+            <div class="row">
+              <label>Data-nodes<input type="number" name="minDataNodes" min="1" max="5"></label>
+              <label>Witnesses<input type="number" name="witnesses" min="0" max="3"></label>
+              <label>Vervangen na (min)<input type="number" name="autoReplaceAfterMin" min="1" step="1"></label>
+            </div>
+            <button class="ghost">Opslaan</button>
+          </form>
+          <h3>Jobs</h3>
+          <ul id="jobList" class="log"></ul>
+        </section>
+        <section>
+          <h3>Gebeurtenissen</h3>
+          <ul id="eventList" class="log"></ul>
+        </section>
+      </div>
+    </main>
   </div>
+
+  <dialog id="placeDlg" class="dlg">
+    <form id="placeForm" method="dialog">
+      <h3 id="placeTitle">Waar?</h3>
+      <select name="placement" id="placeSelect"></select>
+      <p class="muted" id="placeHint"></p>
+      <div class="row"><span class="grow"></span><button value="cancel" formnovalidate class="ghost">Annuleren</button><button value="ok" class="primary">Starten</button></div>
+    </form>
+  </dialog>
 
   <!-- Dialogen -->
   <dialog id="composeDlg" class="dlg">

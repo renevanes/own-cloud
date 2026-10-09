@@ -2,6 +2,8 @@ import fs from "node:fs";
 import { SMTPServer } from "smtp-server";
 import { config } from "../config.js";
 import { storeRawMessage } from "./store.js";
+import { runtime } from "../cluster/runtime.js";
+import { isNotLeader } from "../cluster/fence.js";
 
 /**
  * Ontvangt inkomende mail (MX) voor de geconfigureerde domeinen.
@@ -24,6 +26,11 @@ export function startSmtpServer() {
     logger: false,
 
     onRcptTo(address, _session, cb) {
+      if (runtime.sleeping()) {
+        const err = new Error("Tijdelijk niet beschikbaar, probeer later opnieuw") as Error & { responseCode: number };
+        err.responseCode = 451;
+        return cb(err);
+      }
       const domain = address.address.split("@")[1]?.toLowerCase();
       if (!domain || !config.mailDomains.includes(domain)) {
         const err = new Error("Relay niet toegestaan") as Error & { responseCode: number };
@@ -44,7 +51,19 @@ export function startSmtpServer() {
         }
         try {
           const header = `Received: from ${session.clientHostname} ([${session.remoteAddress}]) by ${config.hostname}; ${new Date().toUTCString()}\r\n`;
-          await storeRawMessage(Buffer.concat([Buffer.from(header), ...chunks]), { folder: "inbox" });
+          const raw = Buffer.concat([Buffer.from(header), ...chunks]);
+          if (runtime.enabled && !runtime.isLeader()) {
+            // Secundaire MX: veilig op schijf, wordt doorgegeven aan de leider.
+            runtime.spool(raw);
+            return cb();
+          }
+          try {
+            await storeRawMessage(raw, { folder: "inbox" });
+            if (runtime.enabled) await runtime.waitDurable();
+          } catch (e) {
+            if (!runtime.enabled || !isNotLeader(e)) throw e;
+            runtime.spool(raw);
+          }
           cb();
         } catch (e) {
           console.error("Opslaan inkomende mail mislukt:", e);

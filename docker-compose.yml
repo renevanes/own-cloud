@@ -3,11 +3,14 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    environment:
+      - CLUSTER_PORT=7946
     volumes:
       - ./data:/data
       - caddy_data:/caddy:ro          # certificaten van Caddy voor STARTTLS
     ports:
       - "25:2525"                     # inkomende mail
+      - "7946:7946"                   # cluster (versleuteld, alleen nodig in clustermodus)
     expose:
       - "3000"
 

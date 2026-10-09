@@ -29,6 +29,7 @@ function showLogin() { $("#app").hidden = true; $("#login").hidden = false; $("#
 async function boot() {
   try { await api("/api/me"); } catch { return showLogin(); }
   $("#login").hidden = true; $("#app").hidden = false;
+  api("/api/cluster/status").then((c) => { if (c.enabled) $('[data-tab="nodes"]').hidden = false; }).catch(() => {});
   switchTab(location.hash.slice(1) || "mail");
 }
 $("#loginForm").addEventListener("submit", async (e) => {
@@ -41,11 +42,11 @@ $("#logout").onclick = async () => { await api("/api/logout", { method: "POST" }
 // ───────────── Tabs ─────────────
 const loaded = {};
 function switchTab(tab) {
-  if (!["mail", "agenda", "fotos"].includes(tab)) tab = "mail";
+  if (!["mail", "agenda", "fotos", "nodes"].includes(tab)) tab = "mail";
   $$(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   $$(".tab").forEach((t) => (t.hidden = t.id !== "tab-" + tab));
   history.replaceState(null, "", "#" + tab);
-  if (!loaded[tab]) { loaded[tab] = true; ({ mail: initMail, agenda: initAgenda, fotos: initPhotos })[tab](); }
+  if (!loaded[tab]) { loaded[tab] = true; ({ mail: initMail, agenda: initAgenda, fotos: initPhotos, nodes: initNodes })[tab](); }
 }
 $$(".tabs button").forEach((b) => (b.onclick = () => switchTab(b.dataset.tab)));
 
@@ -394,3 +395,91 @@ async function initPhotos() {
 }
 
 boot();
+
+// ═════════════ WAAR DRAAI IK (cluster) ═════════════
+const FLAGS = { NL: "🇳🇱", DE: "🇩🇪", FI: "🇫🇮", FR: "🇫🇷", PL: "🇵🇱", SE: "🇸🇪", ES: "🇪🇸", AT: "🇦🇹", CH: "🇨🇭", BE: "🇧🇪", DK: "🇩🇰", NO: "🇳🇴", IT: "🇮🇹" };
+const STATUS_NL = { provisioning: "wordt aangemaakt", syncing: "synchroniseert", ready: "actief", removing: "wordt verwijderd", removed: "verwijderd", failed: "mislukt" };
+const ago = (ms) => { if (!ms) return "nooit"; const s = Math.round((Date.now() - ms) / 1000); return s < 5 ? "nu" : s < 90 ? `${s} s geleden` : s < 5400 ? `${Math.round(s / 60)} min geleden` : `${Math.round(s / 3600)} u geleden`; };
+const eur = (n) => n == null ? "" : "€ " + Number(n).toFixed(2).replace(".", ",");
+let cluster = null;
+
+async function loadCluster() {
+  cluster = await api("/api/cluster/status");
+  if (!cluster.enabled) return;
+  const c = cluster;
+  const active = c.nodes.filter((n) => n.status !== "removed");
+  const countries = [...new Set(active.map((n) => n.country).filter(Boolean))];
+  $("#clusterSummary").innerHTML = [
+    `<span class="pill ${c.sleeping ? "warn" : "ok"}">${c.sleeping ? "😴 slaapt" : "🐌 wakker"}</span>`,
+    `<span class="pill">Leider <b>${esc(c.leader)}</b> · term ${c.term}</span>`,
+    `<span class="pill">${active.filter((n) => n.kind === "data").length} data · ${active.filter((n) => n.kind === "witness").length} witness</span>`,
+    `<span class="pill">${countries.map((x) => FLAGS[x] || x).join(" ")} ${countries.length} ${countries.length === 1 ? "land" : "landen"}</span>`,
+    `<span class="pill">${eur(c.monthlyCost)} / maand</span>`,
+    c.blobQueue ? `<span class="pill warn">${c.blobQueue} bestanden wachten op upload</span>` : "",
+  ].join("");
+
+  $("#nodeCards").innerHTML = active.map((n) => {
+    const stale = n.status === "ready" && !n.isSelf && n.lastContact && Date.now() - n.lastContact > 15000;
+    return `<div class="node ${n.isLeader ? "leader" : ""} ${stale ? "down" : ""}">
+      <div class="top"><span class="flag">${FLAGS[n.country] || "🖥️"}</span><span class="name">${esc(n.id)}</span>
+        <span class="badge ${n.kind}">${n.kind === "data" ? "data" : "witness"}</span>${n.isLeader ? '<span class="badge">👑 leider</span>' : ""}</div>
+      <div class="meta"><span class="dot ${stale ? "stale" : n.status}"></span>${STATUS_NL[n.status] || n.status}${stale ? " · onbereikbaar" : ""}<br>
+        ${esc(n.provider)}${n.region ? " / " + esc(n.region) : ""}${n.size ? " · " + esc(n.size) : ""}${n.monthly_cost != null ? " · " + eur(n.monthly_cost) : ""}<br>
+        ${n.ipv4 ? esc(n.ipv4) + " · " : ""}contact ${n.isSelf ? "(deze node)" : ago(n.lastContact)}${n.kind === "data" && n.lag != null ? ` · achterstand ${n.lag}` : ""}</div>
+      ${n.status === "ready" ? `<div class="acts"><button class="ghost" data-move="${n.id}">↪ Verhuizen</button><button class="ghost danger" data-remove="${n.id}">✕</button></div>` : ""}
+    </div>`;
+  }).join("");
+
+  $("#storeList").innerHTML = c.stores.map((s) => `<div class="store"><span>${FLAGS[s.country] || "🗄️"} <b>${esc(s.name)}</b> · ${s.purpose === "backup" ? "back-up (alleen toevoegen)" : "replica"}</span>
+    <span class="${s.uploadedSeq != null && c.lastSeq - s.uploadedSeq > 50 ? "error" : "muted"}">${s.uploadedSeq == null ? "?" : c.lastSeq - s.uploadedSeq === 0 ? "✓ bij" : `${c.lastSeq - s.uploadedSeq} achter`}</span></div>`).join("");
+
+  const f = $("#policyForm");
+  if (document.activeElement?.form !== f) {
+    f.elements.autoHeal.checked = !!c.policy.autoHeal;
+    for (const k of ["minDataNodes", "witnesses", "autoReplaceAfterMin"]) f.elements[k].value = c.policy[k];
+  }
+  $("#jobList").innerHTML = c.jobs.map((j) => `<li class="${j.status === "failed" ? "error" : ""}"><time>${fmtDate(j.created)}</time><b>${esc(j.type)}</b> · ${esc(j.status)}${j.error ? " — " + esc(j.error) : ""}</li>`).join("") || `<li class="muted">Geen jobs</li>`;
+  $("#eventList").innerHTML = c.events.map((e) => `<li class="${e.level}"><time>${fmtDate(e.ts)}</time>${esc(e.message)}</li>`).join("");
+}
+
+function choosePlacement(title, kind) {
+  return new Promise((resolve) => {
+    const opts = cluster.policy.placement.filter((p) => !p.kind || p.kind === kind);
+    if (!opts.length) { alert("Er staan nog geen plaatsingsopties in het beleid (cluster-configuratie)."); return resolve(null); }
+    $("#placeTitle").textContent = title;
+    $("#placeSelect").innerHTML = `<option value="auto">Automatisch (spreiden over aanbieders en landen)</option>` +
+      opts.map((p, i) => `<option value="${i}">${FLAGS[p.country] || ""} ${esc(p.provider)} / ${esc(p.region)} · ${esc(p.size)}</option>`).join("");
+    $("#placeHint").textContent = "De nieuwe server haalt zelf de versleutelde data op en sluit aan. Dat duurt meestal een paar minuten.";
+    const dlg = $("#placeDlg");
+    dlg.onclose = () => resolve(dlg.returnValue === "ok" ? ($("#placeSelect").value === "auto" ? "auto" : opts[Number($("#placeSelect").value)]) : null);
+    dlg.showModal();
+  });
+}
+
+async function startJob(type, params = {}) {
+  try { await api("/api/cluster/jobs", { method: "POST", body: { type, params } }); await loadCluster(); }
+  catch (e) { alert(e.message); }
+}
+
+async function initNodes() {
+  $("#addData").onclick = async () => { const p = await choosePlacement("Nieuwe data-node", "data"); if (p) startJob("spawn", { kind: "data", ...(p === "auto" ? {} : p) }); };
+  $("#addWitness").onclick = async () => { const p = await choosePlacement("Nieuwe witness", "witness"); if (p) startJob("spawn", { kind: "witness", ...(p === "auto" ? {} : p) }); };
+  $("#runDrill").onclick = () => startJob("drill");
+  $("#runSnapshot").onclick = () => startJob("snapshot");
+  $("#sleepCluster").onclick = () => {
+    if (confirm("Cluster laten slapen?\n\nAlles wordt versleuteld weggeschreven en daarna worden ALLE servers verwijderd. Je betaalt dan alleen nog voor opslag.\nWekken doe je met: eigen wake")) startJob("sleep");
+  };
+  $("#nodeCards").onclick = async (e) => {
+    const mv = e.target.closest("[data-move]")?.dataset.move, rm = e.target.closest("[data-remove]")?.dataset.remove;
+    if (mv) { const n = cluster.nodes.find((x) => x.id === mv); const p = await choosePlacement(`${mv} verhuizen naar…`, n.kind); if (p) startJob("move", { nodeId: mv, ...(p === "auto" ? {} : { to: p }) }); }
+    if (rm && confirm(`${rm} verwijderen? Het beleid maakt eventueel automatisch een vervanger.`)) startJob("remove", { nodeId: rm });
+  };
+  $("#policyForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    await api("/api/cluster/policy", { method: "PUT", body: { autoHeal: f.elements.autoHeal.checked, minDataNodes: Number(f.elements.minDataNodes.value), witnesses: Number(f.elements.witnesses.value), autoReplaceAfterMin: Number(f.elements.autoReplaceAfterMin.value) } });
+    loadCluster();
+  };
+  await loadCluster();
+  setInterval(() => { if (!$("#tab-nodes").hidden) loadCluster().catch(() => {}); }, 3000);
+}

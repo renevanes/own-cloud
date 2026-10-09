@@ -6,6 +6,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { db } from "../db.js";
 import { requireAuth } from "../auth.js";
 import { addPhotoFromFile, isMediaFile } from "./store.js";
+import { ensureLocal } from "../blobs.js";
 
 interface PhotoRow { id: number; path: string; thumb_path: string | null; mime: string; filename: string; size: number }
 
@@ -31,11 +32,12 @@ export function photoRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireAuth);
 
   /** Tijdlijn, nieuwste eerst. Pagineren met ?before=<taken_at>&beforeId=<id>. */
-  app.get<{ Querystring: { before?: string; beforeId?: string; limit?: string; album?: string; favorites?: string; videos?: string; q?: string } }>("/api/photos", async (req) => {
+  app.get<{ Querystring: { before?: string; beforeId?: string; limit?: string; album?: string; favorites?: string; videos?: string; q?: string; trash?: string } }>("/api/photos", async (req) => {
     const q = req.query;
     const limit = Math.min(Number(q.limit ?? 120), 500);
     const where: string[] = [];
     const params: unknown[] = [];
+    where.push(q.trash ? "deleted_at IS NOT NULL" : "deleted_at IS NULL");
     if (q.before) { where.push("(taken_at < ? OR (taken_at = ? AND id < ?))"); params.push(Number(q.before), Number(q.before), Number(q.beforeId ?? 1e15)); }
     if (q.album) { where.push("id IN (SELECT photo_id FROM album_photos WHERE album_id = ?)"); params.push(Number(q.album)); }
     if (q.favorites) where.push("is_favorite = 1");
@@ -46,7 +48,7 @@ export function photoRoutes(app: FastifyInstance) {
 
   /** Aantallen per maand, voor een scrubber/jaaroverzicht. */
   app.get("/api/photos/summary", async () =>
-    db.prepare("SELECT strftime('%Y-%m', taken_at / 1000, 'unixepoch') AS month, COUNT(*) AS count FROM photos GROUP BY month ORDER BY month DESC").all());
+    db.prepare("SELECT strftime('%Y-%m', taken_at / 1000, 'unixepoch') AS month, COUNT(*) AS count FROM photos WHERE deleted_at IS NULL GROUP BY month ORDER BY month DESC").all());
 
   app.get<{ Params: { id: string } }>("/api/photos/:id", async (req, reply) => {
     const p = db.prepare(`SELECT ${LIST_COLS}, size FROM photos WHERE id = ?`).get(req.params.id);
@@ -57,15 +59,17 @@ export function photoRoutes(app: FastifyInstance) {
 
   app.get<{ Params: { id: string } }>("/api/photos/:id/thumb", async (req, reply) => {
     const p = db.prepare("SELECT thumb_path FROM photos WHERE id = ?").get(req.params.id) as PhotoRow | undefined;
-    if (!p?.thumb_path || !fs.existsSync(p.thumb_path)) return reply.code(404).send();
-    return sendFileRange(req, reply, p.thumb_path, "image/webp");
+    const file = p?.thumb_path ? await ensureLocal(p.thumb_path) : null;
+    if (!file) return reply.code(404).send();
+    return sendFileRange(req, reply, file, "image/webp");
   });
 
   app.get<{ Params: { id: string }; Querystring: { download?: string } }>("/api/photos/:id/original", async (req, reply) => {
     const p = db.prepare("SELECT path, mime, filename FROM photos WHERE id = ?").get(req.params.id) as PhotoRow | undefined;
-    if (!p) return reply.code(404).send();
+    const file = p ? await ensureLocal(p.path) : null;
+    if (!p || !file) return reply.code(404).send();
     if (req.query.download) reply.header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(p.filename)}`);
-    return sendFileRange(req, reply, p.path, p.mime);
+    return sendFileRange(req, reply, file, p.mime);
   });
 
   /** Upload (multipart, meerdere bestanden). */
@@ -94,6 +98,11 @@ export function photoRoutes(app: FastifyInstance) {
     return results;
   });
 
+  app.post<{ Params: { id: string } }>("/api/photos/:id/restore", async (req) => {
+    db.prepare("UPDATE photos SET deleted_at = NULL WHERE id = ?").run(req.params.id);
+    return { ok: true };
+  });
+
   app.patch<{ Params: { id: string }; Body: { is_favorite?: boolean; description?: string; taken_at?: number } }>("/api/photos/:id", async (req) => {
     const b = req.body ?? {};
     db.prepare("UPDATE photos SET is_favorite = COALESCE(?, is_favorite), description = COALESCE(?, description), taken_at = COALESCE(?, taken_at) WHERE id = ?")
@@ -102,12 +111,10 @@ export function photoRoutes(app: FastifyInstance) {
   });
 
   app.delete<{ Params: { id: string } }>("/api/photos/:id", async (req, reply) => {
-    const p = db.prepare("SELECT path, thumb_path FROM photos WHERE id = ?").get(req.params.id) as PhotoRow | undefined;
-    if (!p) return reply.code(404).send();
-    db.prepare("DELETE FROM photos WHERE id = ?").run(req.params.id);
-    fs.rmSync(p.path, { force: true });
-    if (p.thumb_path) fs.rmSync(p.thumb_path, { force: true });
-    return { ok: true };
+    // Zacht verwijderen: na 30 dagen definitief (zie purgeDeletedPhotos).
+    const r = db.prepare("UPDATE photos SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL").run(Date.now(), req.params.id);
+    if (!r.changes) return reply.code(404).send();
+    return { ok: true, trash: true };
   });
 
   // ── Albums ──

@@ -52,6 +52,12 @@ CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
   INSERT INTO messages_fts(rowid, subject, from_addr, from_name, body_text)
   VALUES (new.id, new.subject, new.from_addr, new.from_name, new.body_text);
 END;
+CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE OF subject, from_addr, from_name, body_text ON messages BEGIN
+  INSERT INTO messages_fts(messages_fts, rowid, subject, from_addr, from_name, body_text)
+  VALUES ('delete', old.id, old.subject, old.from_addr, old.from_name, old.body_text);
+  INSERT INTO messages_fts(rowid, subject, from_addr, from_name, body_text)
+  VALUES (new.id, new.subject, new.from_addr, new.from_name, new.body_text);
+END;
 CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
   INSERT INTO messages_fts(messages_fts, rowid, subject, from_addr, from_name, body_text)
   VALUES ('delete', old.id, old.subject, old.from_addr, old.from_name, old.body_text);
@@ -100,7 +106,8 @@ CREATE TABLE IF NOT EXISTS photos (
   is_favorite INTEGER NOT NULL DEFAULT 0,
   path        TEXT NOT NULL,
   thumb_path  TEXT,
-  added       INTEGER NOT NULL
+  added       INTEGER NOT NULL,
+  deleted_at  INTEGER                   -- prullenbak (zacht verwijderd)
 );
 CREATE INDEX IF NOT EXISTS photos_taken ON photos(taken_at DESC);
 
@@ -115,8 +122,56 @@ CREATE TABLE IF NOT EXISTS album_photos (
 );
 `);
 
-if (!db.prepare("SELECT 1 FROM calendars LIMIT 1").get()) {
-  db.prepare("INSERT INTO calendars (name, color) VALUES (?, ?)").run("Persoonlijk", "#3b82f6");
+// Migratie oudere databases
+const photoCols = (db.prepare("PRAGMA table_info(photos)").all() as { name: string }[]).map((c) => c.name);
+if (!photoCols.includes("deleted_at")) db.exec("ALTER TABLE photos ADD COLUMN deleted_at INTEGER");
+
+// ───────────── Cluster-register (gerepliceerd) ─────────────
+db.exec(`
+CREATE TABLE IF NOT EXISTS nodes (
+  id          TEXT PRIMARY KEY,
+  name        TEXT,
+  kind        TEXT NOT NULL,                -- data | witness
+  provider    TEXT NOT NULL,
+  region      TEXT,
+  country     TEXT,
+  size        TEXT,
+  server_id   TEXT,
+  ipv4        TEXT,
+  ipv6        TEXT,
+  cluster_url TEXT,
+  api_url     TEXT,
+  status      TEXT NOT NULL,                -- provisioning | syncing | ready | removing | removed | failed
+  join_token_hash TEXT,
+  monthly_cost REAL,
+  created     INTEGER NOT NULL,
+  updated     INTEGER NOT NULL,
+  last_error  TEXT
+);
+CREATE TABLE IF NOT EXISTS cluster_jobs (
+  id       TEXT PRIMARY KEY,
+  type     TEXT NOT NULL,
+  params   TEXT NOT NULL DEFAULT '{}',
+  state    TEXT NOT NULL DEFAULT '{}',
+  status   TEXT NOT NULL DEFAULT 'pending', -- pending | running | done | failed
+  after    TEXT,                            -- wacht op deze job
+  error    TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  created  INTEGER NOT NULL,
+  updated  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS cluster_events (
+  id      INTEGER PRIMARY KEY,
+  ts      INTEGER NOT NULL,
+  level   TEXT NOT NULL DEFAULT 'info',
+  kind    TEXT NOT NULL,
+  message TEXT NOT NULL,
+  data    TEXT
+);
+`);
+
+if (!db.prepare("SELECT 1 FROM calendars LIMIT 1").get() && process.env.EIGEN_ROLE !== "replica") {
+  try { db.prepare("INSERT INTO calendars (name, color) VALUES (?, ?)").run("Persoonlijk", "#3b82f6"); } catch { /* replica: komt via replicatie */ }
 }
 
 export function getSetting(key: string): string | undefined {
@@ -124,5 +179,6 @@ export function getSetting(key: string): string | undefined {
   return row?.value;
 }
 export function setSetting(key: string, value: string) {
+  if (getSetting(key) === value) return;
   db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }

@@ -4,13 +4,14 @@
   "description": "Eigen alternatief voor Gmail, Agenda en Foto’s",
   "main": "index.js",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "tsx watch src/main.ts",
     "build": "tsc",
-    "start": "node dist/server.js",
+    "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --test --test-concurrency=1 test/*.test.ts",
     "import": "tsx src/import/cli.ts",
-    "set-password": "tsx src/setPassword.ts"
+    "set-password": "tsx src/setPassword.ts",
+    "eigen": "tsx src/cluster/cli.ts"
   },
   "keywords": [],
   "author": "",
@@ -27,7 +28,8 @@
     "nodemailer": "^10.0.16",
     "rrule": "^2.8.1",
     "sharp": "^0.35.5",
-    "smtp-server": "^3.19.17"
+    "smtp-server": "^3.19.17",
+    "undici": "^7.30.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
