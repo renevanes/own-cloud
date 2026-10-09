@@ -1,0 +1,8 @@
+.start { margin-top: 8vh; padding-bottom: 40px; }
+.start .snail { width: 56px; height: 56px; fill: none; stroke: var(--accent); stroke-width: 2.6; stroke-linecap: round; display: block; margin: 0 0 22px; }
+.start h1 { font-size: clamp(28px, 8vw, 40px); }
+.start .lead { margin-bottom: 26px; }
+.start .big { width: 100%; }
+.or { display: flex; align-items: center; gap: 12px; color: var(--muted); margin: 26px 0; }
+.or::before, .or::after { content: ""; flex: 1; border-top: 2.5px dotted var(--trail); }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }

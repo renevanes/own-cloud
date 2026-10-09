@@ -550,6 +550,8 @@ function showSettings(sec) {
   if (sec === "gezondheid") healthData ? renderHealth() : refreshHealthBanner();
   if (sec === "tijdmachine") loadTimeMachine();
   if (sec === "importeren") loadUploads();
+  if (sec === "gmail") loadGmail();
+  if (sec === "telefoon") renderPhone();
 }
 
 function msg(el, text, ok) { el.textContent = text; el.className = "form-msg " + (ok ? "ok" : "err"); }
@@ -560,6 +562,7 @@ async function initSettings() {
   f.elements.mailFrom.value = settings.mailFrom;
   f.elements.alertEmail.value = settings.alertEmail;
   f.elements.spfExtra.value = settings.spfExtra;
+  $("#mailGmailNote").hidden = !settings.gmailSend;
   const r = settings.relay;
   const preset = !r ? "none" : r.host === RELAYS.scaleway.host ? "scaleway" : r.host === RELAYS.brevo.host ? "brevo" : "custom";
   f.elements.preset.value = preset;
@@ -617,6 +620,118 @@ async function initSettings() {
     if (id) { navigator.clipboard?.writeText($("#" + id).value); e.target.textContent = "Gekopieerd"; }
   });
   initImport();
+}
+
+// ═════════════ GMAIL ═════════════
+const GMAIL_HINTS = {
+  uit: "Eigen Cloud werkt los van Gmail.",
+  naast: "Je mail blijft bij Google binnenkomen. Eigen Cloud haalt hem elke minuut op, de eerste keer met je hele archief. Wat je in Gmail leest of een ster geeft, zie je hier ook.",
+  vangnet: "Je mail komt bij Eigen Cloud binnen. Elke nieuwe mail gaat ook naar Gmail, zodat je daar altijd terug kunt.",
+};
+let gmail = null, gmailTimer = null, gmailInit = false;
+
+function gmailVisible() {
+  return !$("#tab-instellingen").hidden && !$('.settings-sec[data-sec="gmail"]').hidden;
+}
+
+function gcalRow(c = { name: "", url: "" }) {
+  const li = document.createElement("div");
+  li.className = "cal-row";
+  li.innerHTML = `<label>Naam<input name="gcalName" value="${esc(c.name)}" placeholder="bijv. Werk"></label>
+    <label>Geheim iCal-adres<input name="gcalUrl" value="${esc(c.url)}" placeholder="https://calendar.google.com/calendar/ical/…/basic.ics" spellcheck="false"></label>
+    <button type="button" class="ghost danger" title="Niet meer volgen" aria-label="Niet meer volgen">✕</button>`;
+  $("button", li).onclick = () => li.remove();
+  $("#gcalRows").append(li);
+}
+
+function applyGmailMode() {
+  const f = $("#gmailForm"), mode = f.elements.mode.value || "uit";
+  $("#gmailModeHint").textContent = GMAIL_HINTS[mode];
+  $$("fieldset[data-show]", f).forEach((fs) => (fs.hidden = !fs.dataset.show.split(" ").includes(mode)));
+}
+
+function fillGmail() {
+  const f = $("#gmailForm");
+  f.elements.mode.value = gmail.mode;
+  f.elements.address.value = gmail.address;
+  f.elements.password.value = "";
+  f.elements.password.placeholder = gmail.hasPassword ? "ongewijzigd" : "16 letters, bijv. abcd efgh ijkl mnop";
+  f.elements.sendViaGmail.checked = gmail.sendViaGmail;
+  f.elements.copySent.checked = gmail.copySent;
+  f.elements.copyToInbox.checked = gmail.copyToInbox;
+  $("#gcalRows").innerHTML = "";
+  gmail.calendars.forEach(gcalRow);
+  if (!gmail.calendars.length) gcalRow();
+  $("#gmailSyncNow").hidden = gmail.mode === "uit";
+  applyGmailMode();
+  renderGmailStatus();
+}
+
+function renderGmailStatus() {
+  const el = $("#gmailStatus"), s = gmail.status;
+  el.hidden = gmail.mode === "uit";
+  if (el.hidden) return;
+  const when = (ms) => (ms ? (new Date(ms).toDateString() === new Date().toDateString() ? fmtTime(ms) : fmtDate(ms) + " " + fmtTime(ms)) : "nog niet");
+  const init = gmail.mode === "naast" && s.initialSync && s.initialSync.total > 0 && s.initialSync.done < s.initialSync.total ? s.initialSync : null;
+  const nf = (n) => Number(n).toLocaleString("nl-NL");
+  const state = s.running ? "Bezig…" : !s.lastRun ? "Wacht op de eerste ronde" : s.error ? "Laatste ronde ging niet goed" : "Alles bijgewerkt";
+  el.className = "gmail-status" + (s.error && !s.running ? " has-error" : "");
+  el.innerHTML = `<div class="phase">${esc(state)}</div>
+    <div class="counters">
+      ${gmail.mode === "naast"
+        ? `<div><b>${nf(s.counts.imported)}</b>mails opgehaald</div><div><b>${nf(s.counts.calendars)}</b>agenda${s.counts.calendars === 1 ? "" : "'s"} gevolgd${s.counts.events ? ` · ${nf(s.counts.events)} afspraken` : ""}</div>`
+        : `<div><b>${nf(s.counts.copied)}</b>mails naar Gmail gekopieerd</div>`}
+      <div><b>${esc(when(s.lastOk))}</b>laatst gelukt</div>
+    </div>
+    ${init ? `<div class="initial"><span>Eerste keer ophalen: ${nf(init.done)} van ${nf(init.total)} berichten</span><span class="bar"><i style="width:${Math.floor((init.done / init.total) * 100)}%"></i></span><small class="muted">Dit gaat in porties door, ook als je deze pagina sluit.</small></div>` : ""}
+    ${s.error ? `<p class="form-msg err">${esc(s.error)}</p>` : ""}`;
+}
+
+async function loadGmail() {
+  if (!gmailInit) initGmail();
+  try { gmail = await api("/api/gmail"); } catch { return; }
+  fillGmail();
+  if (!settings) settings = await api("/api/settings").catch(() => null);
+  $("#gmailIcal").value = settings?.icalUrl ?? "Niet beschikbaar (geen agenda-token ingesteld)";
+  clearInterval(gmailTimer);
+  gmailTimer = setInterval(async () => {
+    if (!gmailVisible()) return clearInterval(gmailTimer);
+    try { gmail.status = (await api("/api/gmail")).status; renderGmailStatus(); } catch { /* volgende keer */ }
+  }, 4000);
+}
+
+function initGmail() {
+  gmailInit = true;
+  const f = $("#gmailForm");
+  $("#gmailMode").onchange = applyGmailMode;
+  $("#gcalAdd").onclick = () => { gcalRow(); $$("#gcalRows input[name=gcalName]").at(-1).focus(); };
+  $("#gmailTest").onclick = async () => {
+    const out = $("#gmailTestMsg");
+    msg(out, "Verbinden met Gmail…", true);
+    try {
+      const r = await api("/api/gmail/test", { method: "POST", body: { address: f.elements.address.value, password: f.elements.password.value || undefined } });
+      msg(out, `Gelukt. In 'Alle e-mail' staan ${r.total.toLocaleString("nl-NL")} berichten.`, true);
+    } catch (err) { msg(out, err.message, false); }
+  };
+  $("#gmailSyncNow").onclick = async () => {
+    try { gmail.status = (await api("/api/gmail/sync", { method: "POST", body: {} })).status; gmail.status.running = true; renderGmailStatus(); }
+    catch (err) { msg($("#gmailMsg"), err.message, false); }
+  };
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const calendars = $$("#gcalRows .cal-row").map((r) => ({ name: $("[name=gcalName]", r).value, url: $("[name=gcalUrl]", r).value })).filter((c) => c.name || c.url);
+    try {
+      gmail = await api("/api/gmail", { method: "PUT", body: {
+        mode: f.elements.mode.value, address: f.elements.address.value, password: f.elements.password.value || undefined,
+        sendViaGmail: f.elements.sendViaGmail.checked, copySent: f.elements.copySent.checked, copyToInbox: f.elements.copyToInbox.checked, calendars,
+      } });
+      fillGmail();
+      msg($("#gmailMsg"), gmail.mode === "uit" ? "Opgeslagen. De koppeling staat uit." : "Opgeslagen. De eerste ronde begint meteen.", true);
+      settings = await api("/api/settings").catch(() => settings);
+      if (settings) $("#mailGmailNote").hidden = !settings.gmailSend;
+      refreshHealthBanner(true);
+    } catch (err) { msg($("#gmailMsg"), err.message, false); }
+  };
 }
 
 // ═════════════ IMPORTEREN ═════════════
@@ -767,4 +882,88 @@ function renderTm() {
       } catch (err) { e.target.disabled = false; e.target.textContent = "Opnieuw proberen"; alert(err.message); }
     }
   };
+}
+
+// ═════════ Android-app: wat alleen op de telefoon kan ═════════
+
+const phone = window.EigenPhone ?? null;
+if (phone) {
+  document.documentElement.classList.add("in-app");
+  window.addEventListener("eigenphone", (e) => {
+    if (e.detail?.type === "update") phoneUpdateMsg = e.detail.error ?? (e.detail.available ? "" : "Je hebt de nieuwste versie.");
+    if (!$("#phoneApp").closest(".settings-sec").hidden) renderPhone();
+  });
+}
+let phoneUpdateMsg = "";
+let phoneAskScope = false;
+
+const when = (ms) => {
+  if (!ms) return "nog niet";
+  const d = new Date(ms), today = new Date().toDateString();
+  const hm = d.toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === today ? `vandaag ${hm}` : `${d.toLocaleDateString("nl-NL", { day: "numeric", month: "short" })} ${hm}`;
+};
+
+function renderPhone() {
+  if (!phone) return;
+  $("#phoneWeb").hidden = true;
+  const box = $("#phoneApp");
+  box.hidden = false;
+  let i;
+  try { i = JSON.parse(phone.info()); } catch { return; }
+  if (!i) return;
+  const b = i.backup, sw = (flag, on, label, sub = "") =>
+    `<label class="switch"><input type="checkbox" data-flag="${flag}" ${on ? "checked" : ""}><span><b>${label}</b>${sub ? `<small>${sub}</small>` : ""}</span></label>`;
+  const backupLine = !b.photos ? "" : b.blocker ? `<p class="phone-state warn">${esc(b.blocker)}${b.pending > 0 ? ` · nog ${b.pending} te gaan` : ""}</p>`
+    : `<p class="phone-state">${b.pending > 0 ? `Nog ${b.pending} te gaan · ` : "Alles staat erin · "}laatste back-up ${when(b.last)}</p>`;
+  box.innerHTML = `
+    ${i.backgroundLogin ? "" : `<p class="note">Log hier één keer in en sluit de app niet af met uitloggen: dan kan de app op de achtergrond je foto's, agenda en mail bijwerken.</p>`}
+    <div class="phone-block">
+      <h3>Foto's en video's</h3>
+      ${phoneAskScope ? `<div class="phone-ask"><p>Wat moet er naar je cloud?</p>
+        <div class="row-actions"><button class="primary" data-scope="all">Alles, ook wat er al op staat</button><button class="ghost" data-scope="now">Alleen nieuwe foto's</button></div></div>`
+      : sw("backupPhotos", b.photos, "Automatisch in je cloud zetten", "Nieuwe foto's gaan binnen een paar minuten naar je cloud. Dubbele worden overgeslagen.")}
+      ${b.photos ? `<div class="phone-sub">
+        ${sw("backupVideos", b.videos, "Ook video's")}
+        ${sw("backupWifiOnly", b.wifiOnly, "Alleen via wifi")}
+        ${sw("backupChargingOnly", b.chargingOnly, "Alleen tijdens opladen")}
+        ${backupLine}
+        <div class="row-actions"><button class="ghost" id="phoneSync">Nu bijwerken</button></div></div>` : ""}
+      <p class="muted"><small>Je kunt ook vanuit de galerij of een andere app <b>Delen → Eigen Cloud</b> kiezen.</small></p>
+    </div>
+    <div class="phone-block">
+      <h3>Agenda</h3>
+      ${sw("calendar", i.calendar.on, "In de agenda-app van je telefoon", "Alleen lezen: afspraken maak en wijzig je hier, de telefoon volgt binnen een kwartier.")}
+      ${i.calendar.on ? `<p class="phone-state${i.calendar.error ? " warn" : ""}">${i.calendar.error ? esc(i.calendar.error) : `${i.calendar.count} afspraken · bijgewerkt ${when(i.calendar.last)}`}</p>` : ""}
+    </div>
+    <div class="phone-block">
+      <h3>Meldingen</h3>
+      ${sw("notifyMail", i.notify.mail, "Nieuwe mail")}
+      ${sw("notifyHealth", i.notify.health, "Als er iets mis is met je cloud")}
+      ${!i.notify.permitted && (i.notify.mail || i.notify.health) ? `<p class="phone-state warn">Meldingen staan uit voor deze app in de instellingen van je telefoon.</p>` : ""}
+      <p class="muted"><small>Zonder Google-diensten kijkt de app zelf elk kwartier, en meteen als je hem opent. Een melding kan dus tot een kwartier later komen.</small></p>
+    </div>
+    <div class="phone-block">
+      <h3>Beheer</h3>
+      <p>${i.console ? "Je servers, opslag en back-ups: starten, laten slapen, wakker maken." : "Zelf een Eigen Cloud opzetten bij Hetzner, Scaleway of UpCloud, of deze cloud beheren met je herstelsleutel."}</p>
+      <div class="row-actions"><button class="ghost" id="phoneConsole">Beheer openen</button></div>
+    </div>
+    <div class="phone-block">
+      <h3>App</h3>
+      <p>Versie ${esc(i.version)}${i.updates.status.available ? ` · <b>versie ${esc(i.updates.status.available)} is beschikbaar</b>` : ""}</p>
+      ${sw("updates", i.updates.on, "Melden als er een nieuwe versie is", "De app komt van GitHub, niet uit de Play Store.")}
+      <div class="row-actions">${i.updates.status.available ? `<button class="primary" id="phoneInstall">Bijwerken</button>` : ""}<button class="ghost" id="phoneCheck">Zoeken naar nieuwe versie</button></div>
+      ${phoneUpdateMsg ? `<p class="phone-state">${esc(phoneUpdateMsg)}</p>` : ""}
+      <p><button class="link danger" id="phoneForget">Deze telefoon loskoppelen</button></p>
+    </div>`;
+  box.querySelectorAll("[data-flag]").forEach((el) => el.onchange = () => {
+    if (el.dataset.flag === "backupPhotos" && el.checked && !b.last && !phoneAskScope) { phoneAskScope = true; return renderPhone(); }
+    phone.set(el.dataset.flag, el.checked);
+  });
+  box.querySelectorAll("[data-scope]").forEach((el) => el.onclick = () => { phoneAskScope = false; phone.backupFrom(el.dataset.scope); phone.set("backupPhotos", true); });
+  $("#phoneSync")?.addEventListener("click", (e) => { phone.syncNow(); e.target.textContent = "Bezig…"; e.target.disabled = true; setTimeout(renderPhone, 4000); });
+  $("#phoneConsole").onclick = () => phone.openConsole();
+  $("#phoneCheck").onclick = (e) => { e.target.textContent = "Bezig…"; e.target.disabled = true; phoneUpdateMsg = ""; phone.checkUpdate(); };
+  $("#phoneInstall")?.addEventListener("click", () => phone.installUpdate());
+  $("#phoneForget").onclick = () => { if (confirm("Deze telefoon loskoppelen?\n\nDe app vergeet het adres en je inlog. Je cloud zelf blijft gewoon bestaan.")) phone.forget(); };
 }

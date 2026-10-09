@@ -123,7 +123,8 @@ export class S3Store implements ObjectStore {
   }
 
   private url(key: string, query: Record<string, string> = {}) {
-    const k = (this.config.prefix ? this.config.prefix.replace(/\/$/, "") + "/" : "") + key;
+    // Lege sleutel = bucket-niveau (list, bucket aanmaken/instellen): daar hoort het voorvoegsel niet in het pad.
+    const k = key && this.config.prefix ? this.config.prefix.replace(/\/$/, "") + "/" + key : key;
     const pathStyle = this.config.pathStyle !== false;
     const host = pathStyle ? this.endpoint.host : `${this.config.bucket}.${this.endpoint.host}`;
     const p = (pathStyle ? `/${this.config.bucket}` : "") + (k ? "/" + encKey(k) : pathStyle ? "" : "/");
@@ -159,8 +160,10 @@ export class S3Store implements ObjectStore {
   }
 
   async put(key: string, body: Buffer | Readable, size?: number) {
-    if (!Buffer.isBuffer(body) && size === undefined) body = await toBuffer(body);
-    const r = await this.req("PUT", key, {}, body, size);
+    // Buckets met object-lock (back-upopslag) eisen Content-MD5; daarvoor moet de inhoud in het geheugen.
+    if (!Buffer.isBuffer(body) && (size === undefined || this.purpose === "backup")) body = await toBuffer(body);
+    const extra: Record<string, string> = Buffer.isBuffer(body) ? { "content-md5": crypto.createHash("md5").update(body).digest("base64") } : {};
+    const r = await this.req("PUT", key, {}, body, size, extra);
     const text = await r.body.text();
     if (r.statusCode >= 300) throw new Error(`${this.name}: PUT ${key} → ${r.statusCode} ${text.slice(0, 200)}`);
   }

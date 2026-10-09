@@ -1,0 +1,10 @@
+// Eigen Cloud voor Android. Bouwen: gradle :app:assembleRelease (zie README-android.md)
+pluginManagement {
+    repositories { google(); mavenCentral(); gradlePluginPortal() }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories { google(); mavenCentral() }
+}
+rootProject.name = "eigen-cloud"
+include ":app"

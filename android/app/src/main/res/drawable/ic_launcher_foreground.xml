@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- De slak van Eigen Cloud: een spiraalhuisje op een spoor (zelfde vorm als het logo in de console). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <group android:translateX="30" android:translateY="30" android:scaleX="1.5" android:scaleY="1.5">
+        <path android:pathData="M17,15m-9,0a9,9 0,1 1,18 0a9,9 0,1 1,-18 0"
+            android:strokeColor="#FFFFFF" android:strokeWidth="3" android:fillColor="#00000000" />
+        <path android:pathData="M17,15a4,4 0,1 1,4 -4"
+            android:strokeColor="#FFFFFF" android:strokeWidth="3" android:strokeLineCap="round" android:fillColor="#00000000" />
+        <path android:pathData="M3,26h26"
+            android:strokeColor="#FFFFFF" android:strokeWidth="3" android:strokeLineCap="round" />
+    </group>
+</vector>

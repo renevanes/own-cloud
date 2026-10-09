@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Eigen" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">#3f6f4a</item>
+        <item name="android:colorPrimaryDark">#f3f5f2</item>
+        <item name="android:colorAccent">#3f6f4a</item>
+        <item name="android:statusBarColor">#f3f5f2</item>
+        <item name="android:navigationBarColor">#f3f5f2</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">@color/bg</item>
+    </style>
+    <color name="bg">#f3f5f2</color>
+    <color name="moss">#3f6f4a</color>
+</resources>

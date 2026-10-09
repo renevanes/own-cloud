@@ -4,7 +4,13 @@ import fs from "node:fs";
 import tls from "node:tls";
 import { config } from "./config.js";
 import { db, getSetting, setSetting } from "./db.js";
-import { mailSettings } from "./mail/send.js";
+import { mailSettings, ownAddress } from "./mail/send.js";
+
+/** Gmail-koppeling: "naast" = proefperiode, mail komt nog bij Google binnen. */
+export function gmailMode(): "uit" | "naast" | "vangnet" {
+  const m = getSetting("gmail_mode");
+  return m === "naast" || m === "vangnet" ? m : "uit";
+}
 
 /**
  * Gezondheidscontroles met automatisch herstel. Werkt op een losse server en in een cluster;
@@ -62,7 +68,7 @@ export interface ClusterInfo {
 }
 
 export function domain(): string | null {
-  const from = mailSettings().from;
+  const from = ownAddress();
   const d = from.split("@")[1] ?? config.mailDomains[0];
   return d && d !== "example.nl" ? d.toLowerCase() : null;
 }
@@ -102,12 +108,16 @@ export function expectedRecords(info: Pick<ClusterInfo, "ips4" | "ips6">): DnsRe
       recs.push({ sub, type: "AAAA", values: info.ips6, ttl: 300 });
     }
   }
-  recs.push({ sub: "", type: "MX", values: [`10 mail.${d}.`], ttl: 3600 });
-  const extra = (getSetting("spf_extra") ?? "").trim();
+  const trial = gmailMode() === "naast";
+  // Proefperiode naast Gmail: de MX blijft bij Google, dus die raken we niet aan.
+  if (!trial) recs.push({ sub: "", type: "MX", values: [`10 mail.${d}.`], ttl: 3600 });
+  let extra = (getSetting("spf_extra") ?? "").trim();
+  // Tijdens de proefperiode mag Google ook namens je domein blijven versturen.
+  if (trial && !extra.includes("_spf.google.com")) extra = `${extra} include:_spf.google.com`.trim();
   recs.push({ sub: "", type: "TXT", values: [txt(`v=spf1 a:mail.${d}${extra ? " " + extra : ""} -all`)], ttl: 3600 });
   const pub = dkimPublic();
   if (pub) recs.push({ sub: `${dkimSelector()}._domainkey`, type: "TXT", values: [txt(`v=DKIM1; k=rsa; p=${pub}`)], ttl: 3600 });
-  const rua = getSetting("alert_email") || mailSettings().from;
+  const rua = getSetting("alert_email") || ownAddress();
   recs.push({ sub: "_dmarc", type: "TXT", values: [txt(`v=DMARC1; p=quarantine; rua=mailto:${rua}`)], ttl: 3600 });
   return recs;
 }
@@ -134,6 +144,7 @@ export async function runChecks(cluster: ClusterInfo | null): Promise<Check[]> {
   const checks: Check[] = [];
   const d = domain();
   const auto = !!cluster?.dnsAutomatic;
+  const trial = gmailMode() === "naast";
   const dnsFix = auto ? { action: "dns:publish", label: "DNS-records bijwerken" } : undefined;
   const expected = expectedRecords(cluster ?? { ips4: [], ips6: [] });
   const manualFor = (sub: string, type: string) => expected.filter((r) => r.sub === sub && r.type === type).flatMap((r) => r.values.map((v) => ({ name: fqdn(sub), type, value: v })));
@@ -144,9 +155,16 @@ export async function runChecks(cluster: ClusterInfo | null): Promise<Check[]> {
     // MX
     const mx = await net.resolver.resolveMx(d).catch(() => []);
     const mxOk = mx.some((m) => m.exchange.replace(/\.$/, "").toLowerCase() === `mail.${d}`);
-    checks.push({ id: "dns.mx", group: "Domein", title: "Mail komt bij jou binnen (MX)", status: mxOk ? "ok" : "fail",
-      detail: mxOk ? `MX wijst naar mail.${d}` : mx.length ? `MX wijst naar ${mx.map((m) => m.exchange).join(", ")}` : "Geen MX-record gevonden",
-      fix: mxOk ? undefined : dnsFix, manual: mxOk || auto ? undefined : manualFor("", "MX") });
+    if (trial) {
+      checks.push({ id: "dns.mx", group: "Domein", title: "Mail komt bij jou binnen (MX)", status: mxOk ? "warn" : "ok",
+        detail: mxOk
+          ? `MX wijst al naar mail.${d}, maar de Gmail-koppeling staat nog op 'naast Gmail'. Ben je overgestapt? Zet de koppeling dan op 'Gmail als vangnet'.`
+          : "Je mail komt nog bij Google binnen en wordt opgehaald (proefperiode)" });
+    } else {
+      checks.push({ id: "dns.mx", group: "Domein", title: "Mail komt bij jou binnen (MX)", status: mxOk ? "ok" : "fail",
+        detail: mxOk ? `MX wijst naar mail.${d}` : mx.length ? `MX wijst naar ${mx.map((m) => m.exchange).join(", ")}` : "Geen MX-record gevonden",
+        fix: mxOk ? undefined : dnsFix, manual: mxOk || auto ? undefined : manualFor("", "MX") });
+    }
 
     // A-records
     for (const sub of ["cloud", "mail"]) {
@@ -162,8 +180,13 @@ export async function runChecks(cluster: ClusterInfo | null): Promise<Check[]> {
     const spf = (await txtOf(d)).find((v) => v.startsWith("v=spf1"));
     // Alleen goed als SPF ónze servers toestaat: expliciet a:mail.<domein>, of 'mx' terwijl de MX naar ons wijst.
     const spfOk = !!spf && (spf.includes(`a:mail.${d}`) || (/ mx( |$)/.test(spf) && mxOk));
-    checks.push({ id: "dns.spf", group: "Mail", title: "Afzender is toegestaan (SPF)", status: spfOk ? "ok" : "fail",
-      detail: spf ? spf : "Geen SPF-record: ontvangers zien je mail sneller als spam", fix: spfOk ? undefined : dnsFix, manual: spfOk || auto ? undefined : manualFor("", "TXT") });
+    if (trial && !spfOk) {
+      checks.push({ id: "dns.spf", group: "Mail", title: "Afzender is toegestaan (SPF)", status: "ok",
+        detail: `${spf ? spf + " — " : ""}tijdens de proefperiode naast Gmail is dit nog niet nodig. Regel het voordat je overstapt.` });
+    } else {
+      checks.push({ id: "dns.spf", group: "Mail", title: "Afzender is toegestaan (SPF)", status: spfOk ? "ok" : "fail",
+        detail: spf ? spf : "Geen SPF-record: ontvangers zien je mail sneller als spam", fix: spfOk ? undefined : dnsFix, manual: spfOk || auto ? undefined : manualFor("", "TXT") });
+    }
 
     // DKIM
     const pub = dkimPublic();
@@ -207,6 +230,10 @@ export async function runChecks(cluster: ClusterInfo | null): Promise<Check[]> {
   const relay = mailSettings().relay;
   checks.push({ id: "mail.relay", group: "Mail", title: "Uitgaande mail", status: relay ? "ok" : "warn",
     detail: relay ? `Via ${relay.replace(/\/\/[^@]*@/, "//")}` : "Rechtstreeks verzenden: werkt alleen als poort 25 open is, en verhuizen kost reputatie. Stel een relay in." });
+
+  // Gmail-koppeling
+  const gmail = gmailCheck();
+  if (gmail) checks.push(gmail);
 
   // Meldingen
   const alert = getSetting("alert_email");
@@ -252,6 +279,23 @@ export async function runChecks(cluster: ClusterInfo | null): Promise<Check[]> {
   checks.push({ id: "cluster.nodes", group: "Servers", title: "Genoeg servers actief", status: nodesOk ? "ok" : cluster.dataReady >= 1 ? "warn" : "fail",
     detail: `${cluster.dataReady}/${cluster.wantData} data, ${cluster.witnessReady}/${cluster.wantWitness} witness${cluster.unreachable.length ? ` — onbereikbaar: ${cluster.unreachable.join(", ")}` : ""}${!nodesOk && cluster.autoHeal ? " · wordt automatisch hersteld" : ""}` });
   return checks;
+}
+
+/** "Gmail-koppeling": in orde als de laatste ronde in het afgelopen kwartier slaagde. */
+export function gmailCheck(now = Date.now()): Check | null {
+  const mode = gmailMode();
+  if (mode === "uit") return null;
+  let st: { lastRun?: number; lastOk?: number; error?: string | null } = {};
+  try { st = JSON.parse(getSetting("gmail_status") ?? "{}"); } catch { /* leeg */ }
+  const base = { id: "gmail", group: "Mail" as const, title: "Gmail-koppeling" };
+  const what = mode === "naast" ? "Mail uit Gmail wordt opgehaald" : "Nieuwe mail wordt naar Gmail gekopieerd";
+  if (!st.lastRun) return { ...base, status: "warn", detail: "Nog niet gestart. Dat gebeurt binnen een minuut na het opslaan." };
+  const ago = st.lastOk ? now - st.lastOk : Infinity;
+  const time = st.lastOk ? new Date(st.lastOk).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Amsterdam" }) : null;
+  if (ago < 15 * 60_000 && !st.error) return { ...base, status: "ok", detail: `${what} · laatst gelukt om ${time}` };
+  const err = st.error ? ` — ${st.error}` : "";
+  return { ...base, status: ago < 60 * 60_000 ? "warn" : "fail",
+    detail: st.lastOk ? `Laatst gelukt om ${time}${err}` : `Nog niet gelukt${err}` };
 }
 
 // ───────── Overzicht, automatisch herstel en meldingen ─────────

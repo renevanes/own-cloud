@@ -1,0 +1,63 @@
+# Android-app: Java-kern testen, APK bouwen en ondertekenen. Bij een tag v* komt de APK in een GitHub Release;
+# de app kijkt daar dagelijks of er een nieuwe versie is.
+#
+# Eenmalig instellen (Settings → Secrets and variables → Actions):
+#   ANDROID_KEYSTORE_BASE64   base64 van je keystore:  keytool -genkeypair -v -keystore eigen.keystore -alias eigen \
+#                             -keyalg RSA -keysize 4096 -validity 10000   en dan  base64 -w0 eigen.keystore
+#   ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
+# Bewaar de keystore ook zelf (bijvoorbeeld bij je herstelblad): zonder dezelfde sleutel kan een nieuwe versie
+# niet over de oude heen worden geïnstalleerd. Zonder secrets wordt de APK met een debug-sleutel ondertekend.
+name: Android
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths: ["android/**", "web-console/**", "web/shared/**", "src/console/catalog.ts", "package.json", ".github/workflows/android.yml"]
+  workflow_dispatch: {}
+permissions:
+  contents: write
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - run: npm ci
+      - run: pipx install "moto[server]"
+      - name: Java-kern (versleuteling, aanbieders, opslag, console) tegen de echte TypeScript-code
+        run: android/core/test.sh
+  apk:
+    needs: core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: "8.9" }
+      - name: Keystore
+        env: { KS: "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" }
+        run: |
+          if [ -n "$KS" ]; then echo "$KS" | base64 -d > "$RUNNER_TEMP/eigen.keystore"; echo "ANDROID_KEYSTORE=$RUNNER_TEMP/eigen.keystore" >> "$GITHUB_ENV"; fi
+      - name: Bouwen (lint + release-APK)
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          EIGEN_UPDATE_REPO: ${{ github.repository }}
+        run: gradle --no-daemon :app:lintRelease :app:assembleRelease
+      - run: |
+          V=$(node -p 'require("./package.json").version')
+          cp android/app/build/outputs/apk/release/app-release.apk "eigen-cloud-$V.apk"
+          sha256sum "eigen-cloud-$V.apk" > "eigen-cloud-$V.apk.sha256"
+      - uses: actions/upload-artifact@v4
+        with: { name: eigen-cloud-apk, path: "eigen-cloud-*.apk*\nandroid/app/build/reports/lint-results-release.html" }
+      - name: Release (alleen bij een versietag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh release create "$GITHUB_REF_NAME" eigen-cloud-*.apk eigen-cloud-*.apk.sha256 --title "Eigen Cloud $GITHUB_REF_NAME" --generate-notes || gh release upload "$GITHUB_REF_NAME" eigen-cloud-*.apk eigen-cloud-*.apk.sha256 --clobber

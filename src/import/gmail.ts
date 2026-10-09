@@ -18,11 +18,21 @@ export function gmailLabelsToOptions(raw: Buffer): StoreOptions {
   const m = /^X-Gmail-Labels:\s*(.*)$/im.exec(head);
   if (!m) return { folder: "inbox", isRead: true };
   const labels = decodeWords(Buffer.from(m[1], "latin1").toString("utf8")).split(",").map((l) => l.trim().replace(/^"|"$/g, "")).filter(Boolean);
-  const has = (...names: string[]) => labels.some((l) => names.includes(l.toLowerCase()));
+  return gmailLabelListToOptions(labels);
+}
+
+/**
+ * Vertaalt Gmail-labels naar map + vlaggen. Werkt met Takeout-namen ("Inbox", "Unread", "Postvak IN")
+ * én met IMAP-systeemlabels ("\Inbox", "\Sent", "\Starred"); bij IMAP komen gelezen/ster uit de vlaggen.
+ */
+export function gmailLabelListToOptions(input: string[]): StoreOptions {
+  const labels = input.map((l) => l.trim()).filter(Boolean);
+  const norm = (l: string) => l.replace(/^\\/, "").toLowerCase();
+  const has = (...names: string[]) => labels.some((l) => names.includes(norm(l)));
 
   let folder: Folder = "archive";
   if (has("trash", "prullenbak")) folder = "trash";
-  else if (has("spam")) folder = "spam";
+  else if (has("spam", "junk")) folder = "spam";
   else if (has("inbox", "postvak in")) folder = "inbox";
   else if (has("drafts", "draft", "concepten")) folder = "drafts";
   else if (has("sent", "verzonden")) folder = "sent";
@@ -30,8 +40,8 @@ export function gmailLabelsToOptions(raw: Buffer): StoreOptions {
   return {
     folder,
     isRead: !has("unread", "ongelezen"),
-    isStarred: has("starred", "met ster"),
-    labels: labels.filter((l) => !SYSTEM_LABELS.has(l.toLowerCase()) && !/^(category|categorie) /i.test(l)),
+    isStarred: has("starred", "met ster", "flagged"),
+    labels: labels.filter((l) => !l.startsWith("\\") && !SYSTEM_LABELS.has(l.toLowerCase()) && !/^(category|categorie) /i.test(l)),
   };
 }
 

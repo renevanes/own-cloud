@@ -1,0 +1,71 @@
+plugins {
+    id "com.android.application"
+}
+
+// Versie komt uit package.json van de cloud, zodat app en servers samen oplopen.
+def pkg = new groovy.json.JsonSlurper().parse(file("../../package.json"))
+def versionParts = pkg.version.tokenize(".").collect { it.toInteger() }
+def ciBuild = (System.getenv("GITHUB_RUN_NUMBER") ?: "0").toInteger()
+
+android {
+    namespace "nl.eigencloud.app"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "nl.eigencloud.app"
+        minSdk 26
+        targetSdk 34
+        versionCode versionParts[0] * 1000000 + versionParts[1] * 10000 + versionParts[2] * 100 + (ciBuild % 100)
+        versionName pkg.version
+        buildConfigField "String", "UPDATE_REPO", "\"${System.getenv("EIGEN_UPDATE_REPO") ?: "renevanes/eigen-cloud"}\""
+    }
+
+    buildFeatures { buildConfig true }
+
+    // De Java-kern (setup, aanbieders, versleuteling) staat los, zodat hij ook zonder Android te testen is.
+    sourceSets {
+        main {
+            java.srcDirs += "../core/src/main/java"
+            assets.srcDirs += "$buildDir/generated/eigen-assets"
+        }
+    }
+
+    signingConfigs {
+        release {
+            // GitHub Actions zet deze vier variabelen uit de repository-secrets (zie .github/workflows/android.yml).
+            if (System.getenv("ANDROID_KEYSTORE")) {
+                storeFile file(System.getenv("ANDROID_KEYSTORE"))
+                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig System.getenv("ANDROID_KEYSTORE") ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    lint {
+        abortOnError false // eerste builds: lint-rapport bekijken in de Actions-artefacten
+        disable "SetJavaScriptEnabled", "AddJavascriptInterface", "QueryAllPackagesPermission", "GradleDependency", "OldTargetApi"
+    }
+}
+
+// De schermen van de beheerconsole zijn dezelfde als op de computer: kopieer ze uit de repository.
+def copyWeb = tasks.register("copyWebAssets", Sync) {
+    into "$buildDir/generated/eigen-assets/www"
+    from("../../web-console")
+    from("../../web/shared") { into "shared" }
+    from("../../web/fonts") { into "fonts" }
+    from("src/main/www")
+}
+preBuild.dependsOn copyWeb

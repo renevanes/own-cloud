@@ -24,6 +24,7 @@ import { verifyAdminProof } from "./admin.js";
 import { isNotLeader } from "./fence.js";
 import * as health from "../health.js";
 import { place, role } from "./places.js";
+import { gmailHooks, kickGmail } from "../gmail/sync.js";
 
 export interface NodeRow {
   id: string; name: string | null; kind: "data" | "witness"; provider: string; region: string | null; country: string | null; size: string | null;
@@ -111,6 +112,8 @@ export class ClusterService {
     runtime.waitDurable = async () => (this.db ? this.raft.waitDurable(lastSeq(this.db)) : true);
     runtime.spool = (raw) => this.spool(raw);
     runtime.sleeping = () => this.getSetting("cluster_mode") === "sleeping";
+    // Stand van de Gmail-koppeling veranderd: MX wel/niet publiceren.
+    gmailHooks.changed = () => { this.dnsDirty = true; };
   }
 
   private async startRpcServer() {
@@ -257,6 +260,8 @@ export class ClusterService {
       this.healthRunning = true;
       void this.healthRound().catch((e) => console.error("health:", e)).finally(() => { this.healthRunning = false; });
     }
+    // Gmail-koppeling: elke minuut een ronde, zonder de lus op te houden (kickGmail wacht nergens op).
+    if (this.due("gmail", 60_000) && this.getSetting("gmail_mode") && this.getSetting("gmail_mode") !== "uit") void kickGmail();
     if (this.due("drillCheck", 3600e3)) {
       const last = db.prepare("SELECT MAX(ts) AS ts FROM cluster_events WHERE kind = 'drill' AND level = 'info'").get() as { ts: number | null };
       const pending = db.prepare("SELECT 1 FROM cluster_jobs WHERE type = 'drill' AND status IN ('pending','running')").get();

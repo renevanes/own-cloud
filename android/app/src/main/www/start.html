@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Eigen Cloud</title>
+  <link rel="stylesheet" href="/shared/tokens.css">
+  <link rel="stylesheet" href="/console.css">
+  <link rel="stylesheet" href="/start.css">
+</head>
+<body>
+  <main class="center start">
+    <svg class="snail" viewBox="0 0 32 32" aria-hidden="true"><circle cx="17" cy="15" r="9"/><path d="M17 15a4 4 0 1 1 4-4"/><path d="M3 26h26"/></svg>
+
+    <section id="welcome">
+      <h1>Je eigen cloud, in je broekzak.</h1>
+      <p class="lead">Mail, agenda en foto's op servers die jij kiest, in Europa.</p>
+      <form class="fields" id="connect">
+        <label>Adres van je cloud<input name="address" inputmode="url" autocapitalize="off" autocomplete="url" spellcheck="false" placeholder="vanes.nl" required></label>
+        <p class="msg" role="status"></p>
+        <div><button class="btn primary big">Verbinden</button></div>
+      </form>
+      <div class="or"><span>of</span></div>
+      <button class="choice" id="setup"><b>Nieuwe Eigen Cloud opzetten</b><span class="muted">Kies zelf waar hij draait: Hetzner, Scaleway of UpCloud. Alles vanaf deze telefoon, in ongeveer een kwartier.</span></button>
+    </section>
+
+    <section id="offline" hidden>
+      <h1>Je cloud is niet bereikbaar</h1>
+      <p class="lead">Misschien heb je geen internet, of slaapt je cloud. Via Beheer kun je hem wakker maken.</p>
+      <div class="actions">
+        <button class="btn primary" id="retry">Opnieuw proberen</button>
+        <button class="btn" id="manage">Beheer</button>
+      </div>
+      <p><button class="link" id="other">Ander adres gebruiken</button></p>
+    </section>
+  </main>
+  <script src="/start.js"></script>
+</body>
+</html>

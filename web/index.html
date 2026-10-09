@@ -122,6 +122,7 @@
       <nav class="settings-nav" id="settingsNav">
         <a href="#instellingen/gezondheid" data-sec="gezondheid">Gezondheid</a>
         <a href="#instellingen/mail" data-sec="mail">Mail</a>
+        <a href="#instellingen/gmail" data-sec="gmail">Gmail</a>
         <a href="#instellingen/importeren" data-sec="importeren">Importeren uit Google</a>
         <a href="#instellingen/tijdmachine" data-sec="tijdmachine">Tijdmachine</a>
         <a href="#instellingen/telefoon" data-sec="telefoon">Telefoon</a>
@@ -137,6 +138,7 @@
       <section class="settings-sec" data-sec="mail" hidden>
         <header class="sec-head"><h2>Mail</h2><p class="muted">Je adres, uitgaande mail en waar meldingen heen gaan.</p></header>
         <form id="mailForm" class="form">
+          <p class="note" id="mailGmailNote" hidden>Je verstuurt nu via Gmail. Wil je weer je eigen instellingen hieronder gebruiken? Zet dan bij <a href="#instellingen/gmail">Gmail</a> het versturen via Gmail uit.</p>
           <label>Je e-mailadres<input name="mailFrom" type="email" autocomplete="email" required></label>
           <label>Meldingen bij problemen naar<input name="alertEmail" type="email" placeholder="een adres buiten je eigen domein">
             <small>Gebruik een adres dat niet van deze cloud afhangt, zodat een melding ook aankomt als je mail stuk is.</small></label>
@@ -159,6 +161,69 @@
           <p class="form-msg" id="mailMsg" role="status"></p>
           <div class="row-actions"><button class="primary">Opslaan</button><button type="button" class="ghost" id="testMail">Stuur een testbericht</button></div>
         </form>
+      </section>
+
+      <section class="settings-sec" data-sec="gmail" hidden>
+        <header class="sec-head"><h2>Gmail</h2><p class="muted">Probeer Eigen Cloud eerst rustig naast Gmail. Na het overstappen kan Gmail als vangnet blijven meelopen.</p></header>
+        <form id="gmailForm" class="form" autocomplete="off">
+          <div class="seg" id="gmailMode">
+            <label><input type="radio" name="mode" value="uit"> Uit</label>
+            <label><input type="radio" name="mode" value="naast"> Naast Gmail (proefperiode)</label>
+            <label><input type="radio" name="mode" value="vangnet"> Gmail als vangnet</label>
+          </div>
+          <p class="muted mode-hint" id="gmailModeHint"></p>
+
+          <fieldset data-show="naast vangnet">
+            <legend>Je Gmail-account</legend>
+            <label>Gmail-adres<input name="address" type="email" placeholder="jij@gmail.com"></label>
+            <label>App-wachtwoord<input name="password" type="password" autocomplete="new-password" spellcheck="false">
+              <small>Niet je gewone wachtwoord. Maak een app-wachtwoord aan bij <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">Google-account → Beveiliging → App-wachtwoorden</a>. Daarvoor moet verificatie in twee stappen aan staan.</small></label>
+            <div class="row-actions"><button type="button" class="ghost" id="gmailTest">Verbinding testen</button><p class="form-msg" id="gmailTestMsg" role="status"></p></div>
+          </fieldset>
+
+          <fieldset data-show="naast">
+            <legend>Versturen</legend>
+            <label class="check"><input type="checkbox" name="sendViaGmail"> Verstuur ook via Gmail</label>
+            <small>Wat je hier verstuurt, komt dan ook in Verzonden in Gmail, en ontvangers zien je Gmail-adres. Je eigen instellingen komen terug als je dit uitzet.</small>
+          </fieldset>
+
+          <fieldset data-show="naast">
+            <legend>Google Agenda volgen</legend>
+            <small>Open Google Agenda op een computer. Ga naar Instellingen, kies links de agenda en kopieer bij <b>Agenda integreren</b> het <b>geheime adres in iCal-indeling</b>. Wijzigingen in Google komen hier elke minuut binnen. Hier aanpassen kan niet: dat doe je in Google.</small>
+            <div id="gcalRows" class="cal-rows"></div>
+            <div><button type="button" class="ghost" id="gcalAdd">+ Agenda toevoegen</button></div>
+          </fieldset>
+
+          <fieldset data-show="naast">
+            <legend>Foto's</legend>
+            <small>Google laat sinds 2025 geen andere apps meer bij je foto's, dus die kunnen niet doorlopend mee. Haal ze over via <a href="#instellingen/importeren">Importeren uit Google</a>. Bij Google Takeout kun je kiezen voor een export elke 2 maanden; importeer die dan gewoon opnieuw.</small>
+          </fieldset>
+
+          <fieldset data-show="vangnet">
+            <legend>Kopie naar Gmail</legend>
+            <label class="check"><input type="checkbox" name="copyToInbox"> Ook in je Gmail-inbox zetten</label>
+            <small>Anders staat de kopie alleen onder het label 'Eigen Cloud', zodat je Gmail-inbox rustig blijft.</small>
+            <label class="check"><input type="checkbox" name="copySent"> Ook wat je verstuurt</label>
+          </fieldset>
+
+          <fieldset data-show="vangnet">
+            <legend>Agenda in Google zichtbaar houden</legend>
+            <small>Ga in Google Agenda naar <b>Andere agenda's → + → Via URL</b> en plak dit adres. Dan zie je je afspraken ook als Eigen Cloud even niet bereikbaar is.</small>
+            <div class="copyline"><input id="gmailIcal" readonly><button type="button" class="ghost" data-copy="gmailIcal">Kopiëren</button></div>
+          </fieldset>
+
+          <p class="form-msg" id="gmailMsg" role="status"></p>
+          <div class="row-actions"><button class="primary">Opslaan</button><button type="button" class="ghost" id="gmailSyncNow" hidden>Nu bijwerken</button></div>
+        </form>
+
+        <div id="gmailStatus" class="gmail-status" hidden></div>
+
+        <h3>Overstappen</h3>
+        <ol class="howto">
+          <li><b>Naast Gmail proberen.</b> Kies 'Naast Gmail'. Je mail komt nog bij Google binnen en staat ook hier. Gebruik Eigen Cloud zo lang je wilt.</li>
+          <li><b>Je mail naar Eigen Cloud laten komen.</b> Klaar? Kies 'Gmail als vangnet' en sla op. Je MX-record gaat dan naar je eigen server: vanzelf als je DNS gekoppeld is, anders zie je bij <a href="#instellingen/gezondheid">Gezondheid</a> wat je moet aanpassen.</li>
+          <li><b>Gmail als vangnet houden.</b> Nieuwe mail gaat dan ook naar Gmail, en met je agenda-adres in Google Agenda kun je altijd terug.</li>
+        </ol>
       </section>
 
       <section class="settings-sec" data-sec="importeren" hidden>
@@ -185,6 +250,11 @@
 
       <section class="settings-sec" data-sec="telefoon" hidden>
         <header class="sec-head"><h2>Telefoon</h2></header>
+        <div id="phoneApp" class="phone-app" hidden></div>
+        <div id="phoneWeb">
+        <h3>Android-app</h3>
+        <p>Met de app gaan je foto's vanzelf naar je cloud, staat je agenda in de agenda-app van je telefoon en krijg je een melding bij nieuwe mail. Zonder Google-diensten. Je kunt er ook je cloud mee opzetten en beheren.</p>
+        <p><a class="btn primary" href="https://github.com/renevanes/eigen-cloud/releases/latest" target="_blank" rel="noopener">App downloaden (apk)</a></p>
         <div class="phone-grid">
           <div>
             <h3>Agenda op je telefoon</h3>
@@ -194,8 +264,9 @@
           </div>
           <div class="qr" id="icalQr"></div>
         </div>
-        <h3>Als app op je startscherm</h3>
-        <p>Open deze pagina in Chrome op je telefoon en kies in het menu <b>Toevoegen aan startscherm</b>.</p>
+        <h3>Zonder app, op je startscherm</h3>
+        <p>Liever geen app installeren? Open deze pagina in Chrome op je telefoon en kies in het menu <b>Toevoegen aan startscherm</b>.</p>
+        </div>
       </section>
 
       <section class="settings-sec" data-sec="account" hidden>

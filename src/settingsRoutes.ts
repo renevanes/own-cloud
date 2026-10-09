@@ -45,6 +45,8 @@ export function settingsRoutes(app: FastifyInstance) {
       dkim: { selector: health.dkimSelector(), hasKey: !!health.dkimPublic() },
       icalUrl: config.icalToken ? `${publicBase(req)}/ical/${config.icalToken}/agenda.ics` : null,
       cluster: runtime.enabled,
+      // Tijdelijk versturen via Gmail (Instellingen → Gmail): dan is je eigen adres apart bewaard.
+      gmailSend: getSetting("gmail_prev_send") !== undefined ? { ownFrom: getSetting("gmail_own_from") ?? null } : null,
     };
   });
 

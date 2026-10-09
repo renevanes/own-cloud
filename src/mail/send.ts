@@ -26,8 +26,18 @@ export function mailSettings() {
   };
 }
 
+/**
+ * Je eigen adres (met je eigen domein). Verstuur je tijdelijk via Gmail, dan is mail_from het
+ * Gmail-adres; het eigen adres staat dan apart bewaard, zodat DNS en controles bij je domein blijven.
+ */
+export function ownAddress(): string {
+  return getSetting("gmail_own_from") || mailSettings().from;
+}
+
 function dkimOptions() {
   const domainName = mailSettings().from.split("@")[1];
+  // Alleen ondertekenen voor je eigen domein (niet als je via Gmail met je Gmail-adres verstuurt).
+  if (domainName?.toLowerCase() !== ownAddress().split("@")[1]?.toLowerCase()) return undefined;
   const fromDb = getSetting("dkim_private");
   if (fromDb) return { domainName, keySelector: getSetting("dkim_selector") || config.dkimSelector, privateKey: fromDb };
   if (!config.dkimKeyFile || !fs.existsSync(config.dkimKeyFile)) return undefined;

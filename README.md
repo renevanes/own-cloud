@@ -10,7 +10,9 @@ Je eigen vervanger voor Gmail, Google Agenda en Google Foto's, op servers die ji
 | **Overstappen** | Sleep je Google Takeout-zips in de browser: mail (met labels), agenda's en foto's (met Google's metadata en albums) komen er in één keer in. Hervat vanzelf na een verbroken verbinding. |
 | **Gezondheid** | Controleert elk kwartier je DNS, mailbeveiliging (SPF, DKIM, DMARC, reverse DNS), certificaat, back-ups en servers. Repareert wat kan zelf, en mailt je anders wat er moet gebeuren. |
 | **Tijdmachine** | Kies een moment in het verleden en zet per ongeluk verwijderde of veranderde mails, afspraken en foto's terug. |
-| **Beheerconsole** | Installatie-assistent op je eigen computer: kluis met je sleutels, opslag en servers koppelen (met live prijzen), domein, mail, en daarna een overzicht met kaart, wekken, slapen en herstellen. |
+| **Beheerconsole** | Installatie-assistent op je eigen computer of je telefoon: kluis met je sleutels, opslag en servers koppelen (met live prijzen), domein, mail, en daarna een overzicht met kaart, wekken, slapen en herstellen. |
+| **Naast Gmail** | Proefperiode *naast Gmail* (je mail komt nog bij Gmail binnen en wordt elke paar minuten opgehaald) of *Gmail als vangnet* na het overstappen. Instellingen → Gmail. |
+| **Android-app** | Alles van de webapp, plus automatische foto-back-up, je agenda in de agenda-app van je telefoon, meldingen bij nieuwe mail of problemen, *Delen → Eigen Cloud*, en de beheerconsole met vingerafdruk-ontgrendeling. Zonder Google-diensten. Zie [android/README.md](android/README.md). |
 
 Techniek: Node.js 22 + TypeScript, Fastify, SQLite (één bestand, makkelijk te back-uppen), sharp/ffmpeg, Caddy voor automatische HTTPS. Webapp werkt op telefoon en is als app op je startscherm te zetten.
 
@@ -36,6 +38,8 @@ Techniek: Node.js 22 + TypeScript, Fastify, SQLite (één bestand, makkelijk te 
    - **Mail versturen** — relay testen met een testbericht.
    - **Starten** — één klik. Binnen ±10 minuten draait je cloud op drie servers.
 4. Open je cloud, ga naar **Instellingen → Importeren uit Google** en sleep je Takeout-bestanden erin.
+
+**Liever vanaf je telefoon?** Installeer de [Android-app](android/README.md) en kies *Nieuwe Eigen Cloud opzetten*: dezelfde stappen, en je sleutels staan versleuteld op je telefoon (ontgrendelen met vingerafdruk).
 
 Bewaar het bestand `~/.eigen-cloud/kluis.json` gerust in je back-up of synchronisatiemap: het is versleuteld met je wachtwoordzin. Op een andere computer kies je in de console **Ik heb al een Eigen Cloud** en vul je je herstelsleutel en de gegevens van één opslag in.
 
@@ -104,6 +108,7 @@ docker compose run --rm -v $T:/takeout app node dist/import/cli.js fotos  "/take
 
 ### 5. Op je telefoon
 
+- **Android-app:** zie [android/README.md](android/README.md) — met foto-back-up, agenda in je telefoon en meldingen.
 - **Webapp:** open `https://cloud.jouwdomein.nl` in Chrome → menu → *Toevoegen aan startscherm*.
 - **Agenda in je telefoonagenda:** abonneer je op `https://cloud.jouwdomein.nl/ical/<ICAL_TOKEN>/agenda.ics` (bijv. met de app *ICSx⁵*). Afspraken maak je in de webapp; de feed is alleen-lezen.
 - **API voor een eigen app** (bijv. een module in Rene's Tools): `POST /api/login` geeft een `token`; stuur daarna `Authorization: Bearer <token>` mee. Endpoints staan in `src/*/routes.ts`.
@@ -123,8 +128,10 @@ npm install
 npm run set-password
 npm run dev          # http://localhost:3000, SMTP op poort 2525
 npm run beheer       # beheerconsole op http://localhost:4000
-npm test             # 45 tests: mail, agenda, foto's, import, instellingen, gezondheid, versleuteling,
+npm test             # mail, agenda, foto's, import, instellingen, gezondheid, versleuteling, Gmail,
                      # replicatie, aanbieders, cluster end-to-end en de console end-to-end
+android/core/test.sh # Java-kern van de Android-app tegen de TypeScript-code, moto (S3) en een echte cluster-node
+android/compile-check.sh  # app-code compileren tegen de Android-API (zonder Android Studio)
 ```
 
 ## Meerdere servers, verhuizen en slapen
@@ -136,6 +143,7 @@ Zie **[CLUSTER.md](CLUSTER.md)**: Eigen Cloud als cluster over meerdere Europese
 - **Spamfilter** — nu komt alles in de inbox. Volgende stap: SPF/DKIM-controle bij ontvangst en/of Rspamd ervoor zetten.
 - **Live-test bij de aanbieders** — de koppelingen met Hetzner, Scaleway en UpCloud volgen hun API-documentatie maar zijn nog niet tegen echte accounts gedraaid. De console test inloggen en prijzen ophalen meteen bij het koppelen.
 - **IMAP/CalDAV** — nodig als je ook bestaande mail-/agenda-apps wilt gebruiken in plaats van de eigen webapp of app.
-- **Push-meldingen** voor nieuwe mail en agendaherinneringen.
-- **Foto's automatisch uploaden** vanaf je telefoon (past goed als tool in Rene's Tools via de upload-API).
+- **Directe push-meldingen** — de app kijkt nu elk kwartier zelf (zonder Google-diensten). Sneller kan met een eigen push-dienst zoals UnifiedPush/ntfy.
+- **Agenda op de telefoon bewerken** — de telefoonagenda volgt de cloud nu alleen (lezen); wijzigen doe je in de app.
+- **iPhone-app** — nu alleen de webapp op het startscherm.
 - **Gezichten/zoeken op inhoud** in foto's.

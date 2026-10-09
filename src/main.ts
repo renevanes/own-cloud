@@ -106,6 +106,11 @@ async function main() {
         }
       } catch (e) { console.error("health:", e); }
     }, 15 * 60_000).unref();
+    // Gmail-koppeling (als die aan staat): elke minuut een ronde.
+    const { kickGmail } = await import("./gmail/sync.js");
+    const gmailTick = () => { if ((getSetting("gmail_mode") ?? "uit") !== "uit") void kickGmail(); };
+    setInterval(gmailTick, 60_000).unref();
+    setTimeout(gmailTick, 5_000).unref();
     return;
   }
 

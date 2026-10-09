@@ -22,16 +22,52 @@ function placeName(n) {
   return `${o?.name.replace(/ Cloud$/, "") ?? n.provider}${r ? " " + r.city : n.region ? " " + n.region : ""}`;
 }
 
+// In de Android-app is er geen webserver: de console praat via een brug met de Java-kern op de telefoon.
+const NATIVE = window.EigenNative ?? null;
+const DEVICE = NATIVE ? "deze telefoon" : "deze computer";
+const pending = new Map();
+let seq = 0;
+window.__eigenReply = (id, status, text) => {
+  const p = pending.get(id);
+  if (!p) return;
+  pending.delete(id);
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch { /* geen JSON */ }
+  p({ status, ok: status >= 200 && status < 300, json, statusText: "Mislukt" });
+};
+function nativeFetch(method, path, body) {
+  return new Promise((resolve) => { const id = ++seq; pending.set(id, resolve); NATIVE.call(id, method, path, body ? JSON.stringify(body) : ""); });
+}
+
 async function api(path, opts = {}) {
-  const r = await fetch(path, { method: opts.method ?? "GET", headers: opts.body ? { "content-type": "application/json" } : {}, body: opts.body ? JSON.stringify(opts.body) : undefined });
-  const j = r.headers.get("content-type")?.includes("json") ? await r.json() : null;
-  if (r.status === 401 && path !== "/api/unlock") {
+  let r, j;
+  if (NATIVE) {
+    r = await nativeFetch(opts.method ?? "GET", path, opts.body);
+    j = r.json;
+  } else {
+    r = await fetch(path, { method: opts.method ?? "GET", headers: opts.body ? { "content-type": "application/json" } : {}, body: opts.body ? JSON.stringify(opts.body) : undefined });
+    j = r.headers.get("content-type")?.includes("json") ? await r.json() : null;
+  }
+  if (r.status === 401 && path !== "/api/unlock" && path !== "/api/unlock/biometric") {
     // Op slot (verlopen of in een andere browser geopend): slotscherm tonen, niet opnieuw proberen.
     if (state) { state.unlocked = false; clearInterval(timer); $("#lockBtn").hidden = true; renderLock(); }
     throw new Error("De kluis is op slot");
   }
   if (!r.ok) throw new Error(j?.error ?? r.statusText);
   return j;
+}
+
+if (NATIVE) {
+  document.documentElement.classList.add("phone");
+  // Links die op een computer een nieuw tabblad openen, regelt de app zelf.
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest?.("a[href]");
+    if (!a) return;
+    const href = a.getAttribute("href");
+    if (href === "/api/recovery-sheet") { e.preventDefault(); NATIVE.printRecoverySheet(); }
+    else if (a.dataset.cloud !== undefined) { e.preventDefault(); NATIVE.openCloud(a.href); }
+    else if (/^https?:/.test(href)) { e.preventDefault(); NATIVE.openUrl(a.href); }
+  }, true);
 }
 
 let state = null, config = null, timer = null;
@@ -86,26 +122,38 @@ function renderStart() {
     <p class="lead">Mail, agenda en foto's op servers die jij kiest. Deze console helpt je in een paar stappen op weg.</p>
     <div class="choices">
       <button class="choice" id="new"><b>Nieuwe Eigen Cloud maken</b><span class="muted">Ongeveer een kwartier, plus het wachten op een export van Google als je wilt overstappen.</span></button>
-      <button class="choice" id="recover"><b>Ik heb al een Eigen Cloud</b><span class="muted">Op een nieuwe computer, of na een storing: herstellen met je herstelsleutel.</span></button>
+      <button class="choice" id="recover"><b>Ik heb al een Eigen Cloud</b><span class="muted">Op een nieuwe ${NATIVE ? "telefoon" : "computer"}, of na een storing: herstellen met je herstelsleutel.</span></button>
     </div></section>`;
   $("#new").onclick = renderCreate;
   $("#recover").onclick = renderRecover;
 }
 
 function renderLock() {
+  const bio = state?.biometric ?? {};
   root.innerHTML = `<section class="center">
     <h1>Welkom terug</h1>
-    <p class="lead">Ontgrendel de kluis met je wachtwoordzin.</p>
+    <p class="lead">Ontgrendel de kluis met je wachtwoordzin${bio.enrolled ? ", je vingerafdruk of je gezicht" : ""}.</p>
+    ${bio.enrolled ? `<p><button class="btn primary big" id="bio">Ontgrendelen met vingerafdruk</button></p>` : ""}
     <form class="fields" id="f">
-      <label>Wachtwoordzin<input type="password" name="pass" autocomplete="current-password" required autofocus></label>
+      <label>Wachtwoordzin<input type="password" name="pass" autocomplete="current-password" required ${bio.enrolled ? "" : "autofocus"}></label>
+      ${bio.available && !bio.enrolled ? `<label class="check"><input type="checkbox" name="enroll" checked> Voortaan ontgrendelen met vingerafdruk of gezicht</label>` : ""}
       <p class="msg"></p>
-      <div><button class="btn primary">Ontgrendelen</button></div>
+      <div><button class="btn ${bio.enrolled ? "" : "primary"}">Ontgrendelen</button></div>
     </form></section>`;
+  $("#bio")?.addEventListener("click", async (e) => {
+    try { await busy(e.target, () => api("/api/unlock/biometric", { method: "POST" })); boot(); }
+    catch (err) { formMsg($("#f"), err.message); }
+  });
   $("#f").onsubmit = async (e) => {
     e.preventDefault();
-    try { await busy($("button", e.target), () => api("/api/unlock", { method: "POST", body: { passphrase: e.target.pass.value } })); boot(); }
+    try {
+      await busy($("button", e.target), () => api("/api/unlock", { method: "POST", body: { passphrase: e.target.pass.value } }));
+      if (e.target.enroll?.checked) await api("/api/biometric/enroll", { method: "POST" }).catch(() => {});
+      boot();
+    }
     catch (err) { formMsg(e.target, err.message); }
   };
+  if (bio.enrolled && bio.auto) $("#bio").click();
 }
 
 function wizardShell(current, inner) {
@@ -126,7 +174,7 @@ function renderCreate() {
       <label>Wachtwoord om in je cloud in te loggen<input type="password" name="appPassword" minlength="10" autocomplete="new-password" required><small>Minstens 10 tekens. Dit gebruik je dagelijks, ook op je telefoon.</small></label>
       <label>Meldingen bij problemen naar<input type="email" name="alertEmail" placeholder="een adres bij een andere aanbieder"><small>Kies een adres buiten je nieuwe domein, zodat een melding ook aankomt als je mail stuk is.</small></label>
       <h2>Kluis van deze console</h2>
-      <p class="muted" style="margin:0">De console bewaart je sleutels en API-tokens versleuteld op deze computer. Kies een wachtwoordzin die je nergens anders gebruikt, bijvoorbeeld vier losse woorden.</p>
+      <p class="muted" style="margin:0">De console bewaart je sleutels en API-tokens versleuteld op ${DEVICE}. Kies een wachtwoordzin die je nergens anders gebruikt, bijvoorbeeld vier losse woorden.</p>
       <div class="row"><label>Wachtwoordzin<input type="password" name="pass" minlength="12" autocomplete="new-password" required></label>
       <label>Nog een keer<input type="password" name="pass2" minlength="12" autocomplete="new-password" required></label></div>
       <p class="msg"></p>
@@ -173,7 +221,7 @@ function renderRecover() {
       <h2 style="margin:8px 0 0">Een opslag waar je back-ups staan</h2>
       ${storeFields(offers)}
       <label>Bucket<input name="bucket" required></label>
-      <h2 style="margin:8px 0 0">Nieuwe kluis op deze computer</h2>
+      <h2 style="margin:8px 0 0">Nieuwe kluis op ${DEVICE}</h2>
       <label>Wachtwoordzin<input type="password" name="pass" minlength="12" required></label>
       <p class="msg"></p>
       <div><button class="btn primary">Herstellen</button> <button type="button" class="link" id="back">Terug</button></div>
@@ -467,11 +515,11 @@ async function renderDash() {
     $("#side").innerHTML = `
       <h1>${title}</h1><p class="state">${sentence}</p>
       <div class="actions">
-        ${s.state === "awake" && s.appUrl ? `<a class="btn primary" href="${esc(s.appUrl)}" target="_blank" rel="noopener">Open mijn cloud</a>` : ""}
+        ${s.state === "awake" && s.appUrl ? `<a class="btn primary" href="${esc(s.appUrl)}" target="_blank" rel="noopener" data-cloud>Open mijn cloud</a>` : ""}
         ${s.state === "asleep" || s.state === "unreachable" ? `<button class="btn primary" id="wake">Wakker maken</button>` : ""}
         ${s.state === "awake" ? `<button class="btn" id="drillNow">Back-up testen</button><button class="btn" id="sleep">Laten slapen</button>` : ""}
         <a class="btn" href="/api/recovery-sheet" target="_blank" rel="noopener">Herstelblad</a>
-        <a class="btn" href="/api/download-db" download>Database downloaden</a>
+        ${NATIVE ? "" : `<a class="btn" href="/api/download-db" download>Database downloaden</a>`}
         <a class="btn" href="#opslag">Instellingen</a>
       </div>
       ${s.launch && (!s.launch.done || s.state !== "awake") ? `<h2>Opstarten</h2>${launchView(s.launch)}` : ""}

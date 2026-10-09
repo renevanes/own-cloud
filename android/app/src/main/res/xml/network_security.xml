@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  De beheerfuncties praten rechtstreeks met de cluster-poort (http://<ip>:7946) van je eigen servers.
+  Die berichten zijn zelf versleuteld en ondertekend met je herstelsleutel (AES-256-GCM), dus gewoon HTTP is
+  daar veilig. Op een IP-adres kan geen certificaat staan, en IP-adressen kun je hier niet per stuk toestaan.
+  De app zelf opent je cloud alleen via HTTPS (afgedwongen in MainActivity en CloudApi).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
