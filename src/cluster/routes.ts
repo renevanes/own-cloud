@@ -3,6 +3,7 @@ import { requireAuth } from "../auth.js";
 import { lastSeq } from "./changelog.js";
 import { choosePlacement, createJob, type JobType } from "./jobs.js";
 import type { ClusterService } from "./service.js";
+import { place } from "./places.js";
 
 let svc: ClusterService | null = null;
 export function setClusterService(s: ClusterService) {
@@ -26,7 +27,7 @@ export function clusterRoutes(app: FastifyInstance) {
     const nodes = svc.nodes("1=1").filter((n) => n.status !== "removed" || Date.now() - n.updated < 7 * 864e5).map((n) => {
       const p = svc!.raft.peers.get(n.id);
       return {
-        ...n, join_token_hash: undefined,
+        ...n, join_token_hash: undefined, place: place(n),
         isLeader: n.id === st.leaderId,
         isSelf: n.id === svc!.self.id,
         lastContact: n.id === svc!.self.id ? Date.now() : p?.lastContact ?? null,
@@ -50,7 +51,7 @@ export function clusterRoutes(app: FastifyInstance) {
       monthlyCost: nodes.filter((n) => n.status !== "removed" && n.status !== "failed").reduce((a, n) => a + (n.monthly_cost ?? 0), 0),
       nodes,
       jobs: db.prepare("SELECT id, type, params, status, error, created, updated FROM cluster_jobs ORDER BY created DESC LIMIT 20").all(),
-      events: db.prepare("SELECT ts, level, kind, message FROM cluster_events ORDER BY id DESC LIMIT 60").all(),
+      events: db.prepare("SELECT ts, level, kind, message FROM cluster_events WHERE kind != 'job' ORDER BY id DESC LIMIT 60").all(),
     };
   });
 

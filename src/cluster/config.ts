@@ -70,6 +70,8 @@ export interface ClusterConfig {
   image: { url?: string; ref?: string };
   /** Over deze server zelf (aanbieder, server-id) — nodig om zichzelf op te heffen bij slapen. */
   selfInfo?: { provider?: string; region?: string | null; size?: string | null; serverId?: string | null; country?: string | null };
+  /** Eenmalig over te nemen instellingen bij de allereerste start (wachtwoord-hash, meldadres, relay …). */
+  initialSettings?: Record<string, string>;
   /** Extra omgevingsvariabelen voor de app (MAIL_DOMAINS, MAIL_FROM, SMTP_RELAY, …). */
   appEnv: Record<string, string>;
   policy: Policy;

@@ -13,6 +13,9 @@ import { runtime } from "./cluster/runtime.js";
 import { proxyTo } from "./cluster/proxy.js";
 import { isNotLeader } from "./cluster/fence.js";
 import { clusterRoutes } from "./cluster/routes.js";
+import { settingsRoutes } from "./settingsRoutes.js";
+import { importRoutes } from "./import/routes.js";
+import { timeMachineRoutes } from "./cluster/timemachine.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -21,6 +24,7 @@ export async function buildApp() {
   await app.register(cookie);
   await app.register(multipart, { limits: { fileSize: 8 * 1024 * 1024 * 1024, files: 500 } });
   await app.register(fastifyStatic, { root: path.resolve(here, "../web"), prefix: "/" });
+  app.addContentTypeParser("application/octet-stream", { parseAs: "buffer", bodyLimit: 20 * 1024 * 1024 }, (_r, body, done) => done(null, body));
 
   // Cluster: API-verzoeken op een niet-leider gaan door naar de leider.
   app.addHook("onRequest", async (req, reply) => {
@@ -51,6 +55,9 @@ export async function buildApp() {
   await app.register(async (s) => mailRoutes(s));
   await app.register(async (s) => photoRoutes(s));
   await app.register(async (s) => clusterRoutes(s));
+  await app.register(async (s) => settingsRoutes(s));
+  await app.register(async (s) => importRoutes(s));
+  await app.register(async (s) => timeMachineRoutes(s));
   app.get("/healthz", async () => ({ ok: true }));
   return app;
 }

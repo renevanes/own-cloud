@@ -1,19 +1,53 @@
 # Eigen Cloud — mail, agenda en foto's in eigen beheer
 
-Eén eigen server die Gmail, Google Agenda en Google Foto's vervangt. Alles draait op één goedkope VPS, alle data staat in één map (`data/`) die je zelf beheert.
+Je eigen vervanger voor Gmail, Google Agenda en Google Foto's, op servers die jij kiest bij Europese aanbieders. Je cloud bewaakt, herstelt en verhuist zichzelf, en kan gaan slapen als je hem even niet nodig hebt. Alles is te regelen via een gewone webinterface; je hebt geen opdrachtregel nodig.
 
 | Onderdeel | Wat het doet |
 |---|---|
 | **Mail** | Eigen SMTP-server ontvangt mail voor je domein, versturen met DKIM-handtekening (direct of via relay), mappen, Gmail-labels, gesprekken, zoeken (full-text), bijlagen. HTML-mail wordt veilig getoond: geen scripts, externe afbeeldingen standaard geblokkeerd. |
 | **Agenda** | Meerdere agenda's, terugkerende afspraken (blijven goed over zomer-/wintertijd), losse herhaling verwijderen, herinneringen, `.ics` import/export, **privé iCal-feed** om op je telefoon te abonneren. |
 | **Foto's** | Upload (ook slepen), automatische thumbnails, EXIF-datum/camera/GPS, tijdlijn per maand, favorieten, albums, video's met spoelen, ontdubbeling op inhoud. |
-| **Import** | Volledige migratie vanuit Google Takeout: Gmail (`.mbox` met labels/gelezen/ster), Agenda (`.ics` per agenda), Foto's (met Google's JSON-metadata en albums). |
+| **Overstappen** | Sleep je Google Takeout-zips in de browser: mail (met labels), agenda's en foto's (met Google's metadata en albums) komen er in één keer in. Hervat vanzelf na een verbroken verbinding. |
+| **Gezondheid** | Controleert elk kwartier je DNS, mailbeveiliging (SPF, DKIM, DMARC, reverse DNS), certificaat, back-ups en servers. Repareert wat kan zelf, en mailt je anders wat er moet gebeuren. |
+| **Tijdmachine** | Kies een moment in het verleden en zet per ongeluk verwijderde of veranderde mails, afspraken en foto's terug. |
+| **Beheerconsole** | Installatie-assistent op je eigen computer: kluis met je sleutels, opslag en servers koppelen (met live prijzen), domein, mail, en daarna een overzicht met kaart, wekken, slapen en herstellen. |
 
 Techniek: Node.js 22 + TypeScript, Fastify, SQLite (één bestand, makkelijk te back-uppen), sharp/ffmpeg, Caddy voor automatische HTTPS. Webapp werkt op telefoon en is als app op je startscherm te zetten.
 
 ---
 
-## 1. Server bij Hetzner
+## Snel starten
+
+**Wat je nodig hebt**
+- Een eigen domeinnaam (bijvoorbeeld bij een Nederlandse registrar).
+- Een account bij één of meer Europese aanbieders: [Scaleway](https://console.scaleway.com) (Amsterdam), [Hetzner](https://console.hetzner.com) (Duitsland/Finland) of [UpCloud](https://hub.upcloud.com). Bij dezelfde aanbieders koop je ook de opslag voor back-ups.
+- Een gratis account bij [deSEC](https://desec.io) voor DNS (aanbevolen).
+- Optioneel: een mail-relay (Scaleway TEM of Brevo), en een e-mailadres buiten je nieuwe domein voor meldingen.
+
+**Zo start je**
+1. Installeer [Node.js 22](https://nodejs.org) op je computer.
+2. Pak deze map uit. Op Windows dubbelklik je **`beheer.cmd`**; op Mac/Linux draai je `npm install && npm run beheer`.
+3. Je browser opent de beheerconsole. Volg de stappen:
+   - **Jij en je domein** — domein, e-mailadres, inlogwachtwoord, meldadres en een wachtwoordzin voor de kluis.
+   - **Herstelsleutel** — schrijf hem op of druk het herstelblad af.
+   - **Opslag** — koppel een werkkopie en een back-up, bij voorkeur in twee landen. Buckets, versiebeheer en object-lock worden automatisch ingesteld.
+   - **Servers** — koppel aanbieders; je kiest daarna *Alles in Nederland*, *Nederland en Duitsland* of *Spreid over Europa*, met de actuele maandprijs erbij.
+   - **Domein** — de console zet het domein klaar bij deSEC en vertelt welke nameservers je bij je registrar invult.
+   - **Mail versturen** — relay testen met een testbericht.
+   - **Starten** — één klik. Binnen ±10 minuten draait je cloud op drie servers.
+4. Open je cloud, ga naar **Instellingen → Importeren uit Google** en sleep je Takeout-bestanden erin.
+
+Bewaar het bestand `~/.eigen-cloud/kluis.json` gerust in je back-up of synchronisatiemap: het is versleuteld met je wachtwoordzin. Op een andere computer kies je in de console **Ik heb al een Eigen Cloud** en vul je je herstelsleutel en de gegevens van één opslag in.
+
+Meer over hoe het cluster werkt: [CLUSTER.md](CLUSTER.md).
+
+---
+
+## Handmatig: één losse server (voor gevorderden)
+
+Wil je geen cluster maar één server die je zelf beheert, dan kan dat ook. Je mist dan automatische back-ups, de tijdmachine en zelfherstel.
+
+### 1. Server bij Hetzner
 
 1. Maak een Cloud-server: **CX22** of groter, Ubuntu 24.04, locatie Falkenstein/Nürnberg/Helsinki. Voor veel foto's: koppel een **Volume** (bijv. 500 GB) en zet `data/` daarop.
 2. **Poort 25 openzetten:** Hetzner blokkeert uitgaande poort 25 standaard bij nieuwe accounts. Vraag na je eerste betaalde factuur via de Cloud Console een *"Request to unblock port 25"* aan. Tot die tijd: zet `SMTP_RELAY` (bijv. Amazon SES) in `.env`.
@@ -23,7 +57,7 @@ Techniek: Node.js 22 + TypeScript, Fastify, SQLite (één bestand, makkelijk te 
    curl -fsSL https://get.docker.com | sh
    ```
 
-## 2. DNS-records
+### 2. DNS-records
 
 Vervang `jouwdomein.nl` en `1.2.3.4` door je eigen domein en server-IP:
 
@@ -36,7 +70,7 @@ Vervang `jouwdomein.nl` en `1.2.3.4` door je eigen domein en server-IP:
 | TXT | `eigen._domainkey.jouwdomein.nl` | *(output van stap 3 hieronder)* |
 | TXT | `_dmarc.jouwdomein.nl` | `v=DMARC1; p=quarantine; rua=mailto:rene@jouwdomein.nl` |
 
-## 3. Installeren
+### 3. Installeren
 
 ```bash
 git clone <deze repo> eigen-cloud && cd eigen-cloud
@@ -51,7 +85,7 @@ Open `https://cloud.jouwdomein.nl` en log in. Caddy haalt automatisch certificat
 
 Test je mail-setup met [mail-tester.com](https://www.mail-tester.com) — streef naar 10/10.
 
-## 4. Je Google-data verhuizen
+### 4. Je Google-data verhuizen
 
 1. Ga naar [takeout.google.com](https://takeout.google.com), kies **Mail**, **Agenda** en **Google Foto's**, exporteer als `.zip` (kies 50 GB per bestand).
 2. Zet de bestanden op de server (bijv. `scp` naar `~/takeout/`) en pak uit: `unzip '*.zip' -d ~/takeout/uitgepakt`
@@ -68,13 +102,13 @@ docker compose run --rm -v $T:/takeout app node dist/import/cli.js fotos  "/take
 
 4. **Overstappen:** zet daarna de MX-records om (stap 2). Zet in Gmail een doorsturing naar je nieuwe adres voor mensen die nog je oude adres gebruiken.
 
-## 5. Op je telefoon
+### 5. Op je telefoon
 
 - **Webapp:** open `https://cloud.jouwdomein.nl` in Chrome → menu → *Toevoegen aan startscherm*.
 - **Agenda in je telefoonagenda:** abonneer je op `https://cloud.jouwdomein.nl/ical/<ICAL_TOKEN>/agenda.ics` (bijv. met de app *ICSx⁵*). Afspraken maak je in de webapp; de feed is alleen-lezen.
 - **API voor een eigen app** (bijv. een module in Rene's Tools): `POST /api/login` geeft een `token`; stuur daarna `Authorization: Bearer <token>` mee. Endpoints staan in `src/*/routes.ts`.
 
-## 6. Back-ups
+### 6. Back-ups
 
 Alles staat in `data/`. Simpelste aanpak: Hetzner **Storage Box** + dagelijkse `restic`- of `borg`-back-up van `data/`. Maak voor de database een consistente kopie:
 
@@ -88,7 +122,9 @@ sqlite3 data/eigen-cloud.sqlite ".backup data/backup.sqlite"
 npm install
 npm run set-password
 npm run dev          # http://localhost:3000, SMTP op poort 2525
-npm test             # 33 tests: mail, agenda, foto's, imports, versleuteling, replicatie, providers, end-to-end cluster
+npm run beheer       # beheerconsole op http://localhost:4000
+npm test             # 45 tests: mail, agenda, foto's, import, instellingen, gezondheid, versleuteling,
+                     # replicatie, aanbieders, cluster end-to-end en de console end-to-end
 ```
 
 ## Meerdere servers, verhuizen en slapen
@@ -98,6 +134,7 @@ Zie **[CLUSTER.md](CLUSTER.md)**: Eigen Cloud als cluster over meerdere Europese
 ## Nog niet ingebouwd (logische volgende stappen)
 
 - **Spamfilter** — nu komt alles in de inbox. Volgende stap: SPF/DKIM-controle bij ontvangst en/of Rspamd ervoor zetten.
+- **Live-test bij de aanbieders** — de koppelingen met Hetzner, Scaleway en UpCloud volgen hun API-documentatie maar zijn nog niet tegen echte accounts gedraaid. De console test inloggen en prijzen ophalen meteen bij het koppelen.
 - **IMAP/CalDAV** — nodig als je ook bestaande mail-/agenda-apps wilt gebruiken in plaats van de eigen webapp of app.
 - **Push-meldingen** voor nieuwe mail en agendaherinneringen.
 - **Foto's automatisch uploaden** vanaf je telefoon (past goed als tool in Rene's Tools via de upload-API).

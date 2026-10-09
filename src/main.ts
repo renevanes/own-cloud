@@ -42,13 +42,27 @@ async function restoreIfNeeded(cfg: import("./cluster/config.js").ClusterConfig)
     fs.copyFileSync(marker, path.join(dir, "reden.json"));
     console.warn(`📦 Oude database bewaard in ${dir}`);
   }
-  if (fs.existsSync(dbFile)) { fs.rmSync(marker, { force: true }); return; }
-
   const { makeStore } = await import("./cluster/stores.js");
-  const { restoreFromAny } = await import("./cluster/backup.js");
+  const { restoreFromAny, listChain } = await import("./cluster/backup.js");
   const { keysFor } = await import("./cluster/config.js");
   const stores = cfg.stores.map(makeStore);
   const keys = keysFor(cfg);
+
+  if (fs.existsSync(dbFile)) {
+    // Een database zonder replicatiegegevens is nooit "al aanwezig" als er een back-up bestaat (bijv. een leeg bestand).
+    const Database = (await import("better-sqlite3")).default;
+    const d = new Database(dbFile, { readonly: true });
+    const replicated = !!d.prepare("SELECT 1 FROM sqlite_master WHERE name = '_changelog'").get();
+    const hasData = (["messages", "events", "photos"] as const).some((t) => { try { return !!d.prepare(`SELECT 1 FROM ${t} LIMIT 1`).get(); } catch { return false; } });
+    d.close();
+    let backupExists = false;
+    if (!replicated) for (const s of stores) { try { if ((await listChain(s)).snapshots.length) { backupExists = true; break; } } catch { /* */ } }
+    if (replicated || !backupExists) { fs.rmSync(marker, { force: true }); return; }
+    const dir = path.join(DATA_DIR, "orphans", `onvolledig-${Date.now()}`);
+    fs.mkdirSync(dir, { recursive: true });
+    for (const suffix of ["", "-wal", "-shm"]) if (fs.existsSync(dbFile + suffix)) fs.renameSync(dbFile + suffix, path.join(dir, path.basename(dbFile) + suffix));
+    console.warn(`📦 Database zonder clustergegevens${hasData ? " (met data)" : ""} apart gezet in ${dir}; herstellen uit back-up`);
+  }
   for (let attempt = 1; ; attempt++) {
     const r = await restoreFromAny(stores, keys.db!, dbFile).catch((e) => { console.error("Herstel mislukt:", e.message); return null; });
     if (r) {
@@ -76,6 +90,22 @@ async function main() {
     await app.listen({ port: config.httpPort, host: "0.0.0.0" });
     console.log(`🌐 Web/API op http://localhost:${config.httpPort}`);
     if (process.env.DISABLE_SMTP !== "1") startSmtpServer();
+    // Losse server: elk kwartier controleren en bij veranderingen een melding sturen.
+    const health = await import("./health.js");
+    const { getSetting } = await import("./db.js");
+    setInterval(async () => {
+      try {
+        const checks = await health.runChecks(null);
+        const prev = health.previousHealth();
+        const { worse, fixed } = health.isMailNoticeDue(prev, checks);
+        health.rememberHealth(checks);
+        const to = getSetting("alert_email");
+        if (to && Object.keys(prev).length && (worse.length || fixed.length)) {
+          const { sendNotice } = await import("./mail/send.js");
+          await sendNotice(to, worse.length ? `Eigen Cloud: ${worse.length} aandachtspunt(en)` : "Eigen Cloud: alles weer in orde", health.noticeText(worse, fixed, null));
+        }
+      } catch (e) { console.error("health:", e); }
+    }, 15 * 60_000).unref();
     return;
   }
 
@@ -89,21 +119,28 @@ async function main() {
   }
   for (const [k, v] of Object.entries(cfg.appEnv)) process.env[k] ??= v;
 
-  const { ClusterService } = await import("./cluster/service.js");
   if (cfg.kind === "witness") {
+    const { ClusterService } = await import("./cluster/service.js");
     const svc = new ClusterService(cfg, cfgFile, DATA_DIR);
     await svc.start();
     console.log(`👁️  Witness ${cfg.nodeId} actief op poort ${process.env.CLUSTER_PORT ?? cfg.clusterPort}`);
     return;
   }
 
+  // Eerst herstellen, pas daarna modules laden die de database openen.
   await restoreIfNeeded(cfg);
+  const { ClusterService } = await import("./cluster/service.js");
   const svc = new ClusterService(cfg, cfgFile, DATA_DIR);
   await svc.start();
   const { setClusterService } = await import("./cluster/routes.js");
   setClusterService(svc);
   const { blobFetcher } = await import("./blobs.js");
   blobFetcher.fetch = (rel) => svc.fetchBlob(rel);
+  const { clusterHealth } = await import("./settingsRoutes.js");
+  clusterHealth.info = () => svc.healthInfo();
+  clusterHealth.fix = (a) => svc.healthFix(a);
+  const { timeMachine } = await import("./cluster/timemachine.js");
+  timeMachine.svc = svc;
 
   const { config } = await import("./config.js");
   const { buildApp } = await import("./server.js");

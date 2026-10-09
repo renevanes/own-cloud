@@ -151,9 +151,9 @@ export class S3Store implements ObjectStore {
     return { url: u.href, headers };
   }
 
-  private async req(method: "GET" | "PUT" | "HEAD" | "DELETE", key: string, query: Record<string, string> = {}, body?: Buffer | Readable, size?: number) {
-    const extra: Record<string, string> = {};
-    if (method === "PUT") extra["content-length"] = String(Buffer.isBuffer(body) ? body.length : size);
+  private async req(method: "GET" | "PUT" | "HEAD" | "DELETE", key: string, query: Record<string, string> = {}, body?: Buffer | Readable, size?: number, extraHeaders: Record<string, string> = {}) {
+    const extra: Record<string, string> = { ...extraHeaders };
+    if (method === "PUT") extra["content-length"] = String(Buffer.isBuffer(body) ? body.length : size ?? 0);
     const { url, headers } = this.sign(method, key, query, extra);
     return request(url, { method, headers, body, headersTimeout: 60_000, bodyTimeout: 300_000 });
   }
@@ -205,6 +205,34 @@ export class S3Store implements ObjectStore {
     const r = await this.req("DELETE", key);
     await r.body.dump();
     if (r.statusCode >= 300 && r.statusCode !== 404) throw new Error(`${this.name}: DELETE ${key} → ${r.statusCode}`);
+  }
+
+  // ───────── Bucket-beheer (voor de installatie-assistent) ─────────
+
+  async bucketExists(): Promise<boolean> {
+    const r = await this.req("HEAD", "");
+    await r.body.dump();
+    if (r.statusCode === 404) return false;
+    if (r.statusCode === 403) throw new Error("Geen toegang tot deze bucket (bestaat hij al bij iemand anders, of klopt de sleutel niet?)");
+    if (r.statusCode >= 300) throw new Error(`Bucket controleren mislukt: ${r.statusCode}`);
+    return true;
+  }
+
+  async createBucket(objectLock: boolean) {
+    const region = this.config.region ?? "us-east-1";
+    const body = region === "us-east-1" ? Buffer.alloc(0) : Buffer.from(`<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><LocationConstraint>${region}</LocationConstraint></CreateBucketConfiguration>`);
+    const r = await this.req("PUT", "", {}, body, undefined, objectLock ? { "x-amz-bucket-object-lock-enabled": "true" } : {});
+    const text = await r.body.text();
+    if (r.statusCode >= 300 && !/BucketAlreadyOwnedByYou/.test(text)) throw new Error(`Bucket aanmaken mislukt: ${r.statusCode} ${text.slice(0, 200)}`);
+  }
+
+  /** Bucket-instelling (versioning, object-lock, lifecycle). Geeft false als de aanbieder het niet ondersteunt. */
+  async putBucketConfig(sub: "versioning" | "object-lock" | "lifecycle", xml: string): Promise<boolean> {
+    const body = Buffer.from(xml);
+    const md5 = crypto.createHash("md5").update(body).digest("base64");
+    const r = await this.req("PUT", "", { [sub]: "" }, body, undefined, { "content-md5": md5, "content-type": "application/xml" });
+    await r.body.dump();
+    return r.statusCode < 300;
   }
 
   /** Presigned GET (query-variant van SigV4). */

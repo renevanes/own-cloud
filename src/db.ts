@@ -67,7 +67,7 @@ END;
 CREATE TABLE IF NOT EXISTS calendars (
   id     INTEGER PRIMARY KEY,
   name   TEXT NOT NULL,
-  color  TEXT NOT NULL DEFAULT '#3b82f6'
+  color  TEXT NOT NULL DEFAULT '#3f6f4a'
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -171,7 +171,7 @@ CREATE TABLE IF NOT EXISTS cluster_events (
 `);
 
 if (!db.prepare("SELECT 1 FROM calendars LIMIT 1").get() && process.env.EIGEN_ROLE !== "replica") {
-  try { db.prepare("INSERT INTO calendars (name, color) VALUES (?, ?)").run("Persoonlijk", "#3b82f6"); } catch { /* replica: komt via replicatie */ }
+  try { db.prepare("INSERT INTO calendars (name, color) VALUES (?, ?)").run("Persoonlijk", "#3f6f4a"); } catch { /* replica: komt via replicatie */ }
 }
 
 export function getSetting(key: string): string | undefined {

@@ -1,6 +1,6 @@
 # De slak — Eigen Cloud over meerdere Europese aanbieders
 
-Eigen Cloud kan als **cluster** draaien: verspreid over meerdere soevereine Europese aanbieders, met automatische failover, zelfherstel, versleutelde back-ups, en de mogelijkheid om te **verhuizen**, te **vermenigvuldigen** en te **slapen**. Alles wordt bestuurd vanuit de app zelf (tab **🐌 Waar draai ik**) of met de beheer-CLI `eigen`.
+Eigen Cloud kan als **cluster** draaien: verspreid over meerdere soevereine Europese aanbieders, met automatische failover, zelfherstel, versleutelde back-ups, en de mogelijkheid om te **verhuizen**, te **vermenigvuldigen** en te **slapen**. Je richt het in met de **beheerconsole** (`npm run beheer`, zie de README) en bestuurt het daarna vanuit de app (tab **🐌 Waar draai ik**) of de console. De CLI `eigen` blijft beschikbaar voor wie dat prettig vindt.
 
 ```
             ┌──────────── DNS (deSEC + 2e aanbieder) ────────────┐
@@ -52,7 +52,18 @@ Eigen Cloud kan als **cluster** draaien: verspreid over meerdere soevereine Euro
 | Jouw laptop | Niets | De CLI is alleen nodig om te wekken; `eigen.json` staat in Bitwarden |
 | **Je hoofdsleutel** | **Alles onleesbaar** | `eigen key` → op papier, op 2 plekken. Zonder sleutel geen herstel, ook niet door jou. |
 
-## Starten
+## Starten met de beheerconsole (aanbevolen)
+
+`npm run beheer` (of dubbelklik `beheer.cmd` op Windows). De assistent doet alles uit de stappen hieronder automatisch: hoofdsleutel maken en laten bevestigen, buckets aanmaken (de back-up met versiebeheer en object-lock), aanbieders testen en live prijzen ophalen, een plaatsing kiezen, het domein bij deSEC klaarzetten, de relay testen, en de eerste server starten met zichtbare voortgang.
+
+Na de start blijft de console nuttig:
+- **Wakker maken** als alles slaapt (de console is dan het enige dat nog "leeft" — draai hem eventueel op een Raspberry Pi thuis).
+- **Back-up testen vanaf je eigen computer**: herstel uit elke opslag, buiten het cluster om.
+- **Database downloaden** (ook naar een eerder moment).
+- **Instellingen**: wijzigingen in opslag, aanbieders, DNS of relay worden ondertekend naar het draaiende cluster gestuurd.
+- **Herstellen op een nieuwe computer** met alleen je herstelsleutel en de gegevens van één opslag: de console bewaart een versleutelde kopie van zijn configuratie in je opslag.
+
+## Starten met de CLI (alternatief)
 
 ### 1. Beheerconfiguratie
 
@@ -115,8 +126,9 @@ Binnen een paar minuten vult het cluster zich zelf aan tot het aantal in `policy
 ## Testen
 
 ```bash
-npm test                      # 33 tests, waaronder een end-to-end clustertest van ±90 s
+npm test                      # 45 tests, waaronder end-to-end tests van het cluster (±90 s) en de console (±40 s)
 SKIP_CLUSTER=1 npm test       # zonder de clustertest
 ```
 
-De clustertest start echte processen (lokale "aanbieder") en doorloopt: vermenigvuldigen → repliceren → doorsturen → bestanden → secundaire MX → leider doden (failover) → zelfherstel → leider bevriezen met een niet-gerepliceerde schrijfactie (fencing + zelfherstel van de oude leider) → herstel naar een tijdstip → brandoefening → de leider zelf verhuizen → slapen → wekken.
+De clustertest start echte processen (lokale "aanbieder") en doorloopt: vermenigvuldigen → repliceren → doorsturen → bestanden → secundaire MX → leider doden (failover) → zelfherstel → leider bevriezen met een niet-gerepliceerde schrijfactie (fencing + zelfherstel van de oude leider) → herstel naar een tijdstip → brandoefening → tijdmachine → de leider zelf verhuizen → slapen → wekken.
+De consoletest doorloopt de hele assistent tot een draaiend cluster, stuurt een instelling door, test de back-up, laat slapen, wekt (en controleert dat de data terug is) en herstelt op een "nieuwe computer" met alleen de sleutel.

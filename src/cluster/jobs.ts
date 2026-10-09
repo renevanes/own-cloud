@@ -9,6 +9,7 @@ import { restoreFromStore, storedUpTo } from "./backup.js";
 import { imageUrls, userData } from "./cloudinit.js";
 import { isNotLeader } from "./fence.js";
 import type { Placement } from "./config.js";
+import { place, role } from "./places.js";
 import type { ClusterService, NodeRow } from "./service.js";
 
 /**
@@ -115,7 +116,7 @@ const STEPS: Record<JobType, Step> = {
       db.prepare(`INSERT INTO nodes (id, name, kind, provider, region, size, status, join_token_hash, created, updated)
         VALUES (?, ?, ?, ?, ?, ?, 'provisioning', ?, ?, ?)`)
         .run(nodeId, nodeId, p.kind, p.provider, p.region, p.size, crypto.createHash("sha256").update(token).digest("hex"), now, now);
-      svc.event("spawn", `Nieuwe ${p.kind}-node ${nodeId} bij ${p.provider}/${p.region}`);
+      svc.event("spawn", `Nieuwe ${role(p.kind)} wordt aangemaakt bij ${place(p as { provider: string; region: string })}`);
       return { state: { step: "create", nodeId, token, started: now } };
     }
     const n = node(svc, s.nodeId);
@@ -180,7 +181,7 @@ const STEPS: Record<JobType, Step> = {
       if (n.server_id && n.provider !== "manual") await svc.provider(n.provider).destroy(n.server_id);
       updateNode(svc, n.id, { status: "removed" });
       for (const st of svc.stores.filter((x) => x.purpose === "replica")) await st.delete(`bootstrap/${n.id}.enc`).catch(() => {});
-      svc.event("node", `${n.id} verwijderd bij ${n.provider}`);
+      svc.event("node", `Server ${place(n)} is opgeheven`);
       svc.manifestDirty = true;
       return { done: true };
     }
@@ -218,7 +219,7 @@ const STEPS: Record<JobType, Step> = {
     const db = svc.db!;
     if (!s.step) {
       db.prepare("INSERT INTO settings (key, value) VALUES ('cluster_mode', 'sleeping') ON CONFLICT(key) DO UPDATE SET value = 'sleeping'").run();
-      svc.event("sleep", "Cluster gaat slapen: mail wordt tijdelijk geweigerd, data wordt weggeschreven");
+      svc.event("sleep", "Je cloud gaat slapen: alles wordt weggeschreven en gecontroleerd");
       return { state: { step: "flush" } };
     }
     if (s.step === "flush") {
@@ -258,7 +259,7 @@ const STEPS: Record<JobType, Step> = {
     if (s.step === "self") {
       // Job afronden en laatste wijzigingen wegschrijven vóórdat deze server zichzelf opheft.
       db.prepare("UPDATE cluster_jobs SET status = 'done', updated = ? WHERE id = ?").run(Date.now(), job.id);
-      svc.event("sleep", "Cluster slaapt. Wekken met: eigen wake");
+      svc.event("sleep", "Je cloud slaapt. Wakker maken kan vanuit de beheerconsole");
       await svc.uploadSegments();
       await svc.writeManifest("asleep", s.topology);
       const me = node(svc, svc.self.id);
@@ -311,7 +312,10 @@ const STEPS: Record<JobType, Step> = {
       }
     }
     const allOk = results.every((r) => r.ok);
-    svc.event("drill", `Brandoefening ${allOk ? "geslaagd" : "MISLUKT"}: ` + results.map((r) => `${r.store}: ${r.ok ? "✓" : "✗"} ${r.detail}`).join(" | "), allOk ? "info" : "error", results);
+    const failed = results.filter((r) => !r.ok);
+    svc.event("drill", allOk
+      ? `Back-uptest geslaagd: herstellen uit ${results.length === 1 ? "de opslag" : `alle ${results.length} opslagplaatsen`} werkt`
+      : `Back-uptest mislukt voor ${failed.map((r) => `${r.store} (${r.detail})`).join(", ")}`, allOk ? "info" : "error", results);
     svc.manifestDirty = true;
     return allOk ? { done: true, state: { results } } : { fail: "herstel uit een of meer opslagplaatsen mislukt", state: { results } };
   },
@@ -345,7 +349,7 @@ export async function autoHeal(svc: ClusterService) {
     if (Date.now() - last > pol.autoReplaceAfterMin * 60_000) {
       const to = choosePlacement(svc, n.kind, { provider: n.provider, region: n.region });
       if (!to) continue;
-      svc.event("heal", `${n.id} is ${Math.round((Date.now() - last) / 60_000)} min onbereikbaar → vervangen door node bij ${to.provider}/${to.region}`, "warn");
+      svc.event("heal", `${place(n)} is ${Math.max(1, Math.round((Date.now() - last) / 60_000))} min onbereikbaar en wordt vervangen door een server in ${place(to)}`, "warn");
       createJob(svc, "move", { nodeId: n.id, to, kind: n.kind });
       busyNodes.add(n.id);
     }
@@ -363,7 +367,7 @@ export async function autoHeal(svc: ClusterService) {
     if (have + pendingSpawns < want) {
       const to = choosePlacement(svc, kind);
       if (!to) continue;
-      svc.event("heal", `Te weinig ${kind}-nodes (${have}/${want}) → nieuwe bij ${to.provider}/${to.region}`);
+      svc.event("heal", `Er ${want - have === 1 ? "ontbreekt een" : "ontbreken"} ${role(kind)}${want - have === 1 ? "" : "s"}; nieuwe in ${place(to)}`);
       createJob(svc, "spawn", { kind, provider: to.provider, region: to.region, size: to.size, country: to.country });
     }
   }

@@ -210,6 +210,36 @@ test("de slak: vermenigvuldigen, repliceren, failover, zelfherstel, fencing, bac
     assert.match(ev.message, /geslaagd/, ev.message);
   });
 
+  await t.test("10a. tijdmachine: verwijderde afspraak en foto terughalen", async () => {
+    const leader = await findLeader(h, token);
+    const evs = (await api(leader.api_url, `/api/events?from=${start - 864e5}&to=${start + 864e5}`, { token })).json;
+    const tandarts = evs.find((e: { title: string }) => e.title === "Tandarts");
+    const photo = (await api(leader.api_url, "/api/photos", { token })).json[0];
+    await new Promise((r) => setTimeout(r, 1500)); // zeker na de laatste wijziging
+    const before = Date.now();
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal((await api(leader.api_url, `/api/events/${tandarts.id}`, { method: "DELETE", token })).status, 200);
+    assert.equal((await api(leader.api_url, `/api/photos/${photo.id}`, { method: "DELETE", token })).status, 200);
+    const info = (await api(leader.api_url, "/api/timemachine", { token })).json;
+    assert.equal(info.available, true);
+    const prev = await waitFor("voorbeeld", async () => {
+      const r = await api(leader.api_url, "/api/timemachine/preview", { method: "POST", token, body: { at: before } });
+      return r.status === 200 && r.json.counts.events >= 1 && r.json.counts.photos >= 1 && r.json;
+    }, 30_000);
+    const ev = prev.items.events.find((e: { title: string }) => e.title === "Tandarts");
+    assert.equal(ev.reason, "verwijderd");
+    const ph = prev.items.photos.find((p: { id: number }) => p.id === photo.id);
+    assert.equal(ph.reason, "in prullenbak");
+    const thumb = await fetch(`${leader.api_url}/api/timemachine/${prev.id}/photos/${photo.id}/thumb`, { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(thumb.status, 200);
+    const r = await api(leader.api_url, "/api/timemachine/restore", { method: "POST", token, body: { id: prev.id, events: [ev.uid], photos: [ph.id] } });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.json.restored, { messages: 0, events: 1, photos: 1 });
+    const after = (await api(leader.api_url, `/api/events?from=${start - 864e5}&to=${start + 864e5}`, { token })).json;
+    assert.ok(after.some((e: { title: string }) => e.title === "Tandarts"));
+    assert.equal((await api(leader.api_url, "/api/photos", { token })).json.length, 1, "foto uit de prullenbak terug");
+  });
+
   await t.test("10b. verhuizen van de leider zelf: overdracht, nieuwe node, oude weg — zonder dataverlies", async () => {
     const leader = await findLeader(h, token);
     const r = await api(leader.api_url, "/api/cluster/jobs", { method: "POST", token, body: { type: "move", params: { nodeId: leader.id, to: { provider: "local", region: "ams", size: "s", country: "NL" } } } });

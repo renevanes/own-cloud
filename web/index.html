@@ -3,9 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0f172a">
+  <meta name="theme-color" content="#3f6f4a">
   <title>Eigen Cloud</title>
   <link rel="manifest" href="manifest.webmanifest">
+  <link rel="preload" href="/fonts/atkinson-hyperlegible-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -26,9 +27,11 @@
         <button data-tab="agenda">📅 <span>Agenda</span></button>
         <button data-tab="fotos">🖼️ <span>Foto's</span></button>
         <button data-tab="nodes" hidden>🐌 <span>Waar draai ik</span></button>
+        <button data-tab="instellingen">⚙️ <span>Instellingen</span><i class="health-dot" id="healthDot" hidden></i></button>
       </nav>
       <button id="logout" class="ghost" title="Uitloggen">⎋</button>
     </header>
+    <div id="healthBanner" class="health-banner" hidden></div>
 
     <!-- MAIL -->
     <main id="tab-mail" class="tab">
@@ -82,14 +85,14 @@
       <section class="nodes-head">
         <div id="clusterSummary" class="summary"></div>
         <div class="row-actions">
-          <button class="primary" id="addData">+ Data-node</button>
-          <button class="ghost" id="addWitness">+ Witness</button>
-          <button class="ghost" id="runDrill">🧯 Brandoefening</button>
-          <button class="ghost" id="runSnapshot">📸 Snapshot</button>
-          <button class="ghost danger" id="sleepCluster">😴 Slapen</button>
+          <button class="primary" id="addData">Server erbij</button>
+          <button class="ghost" id="addWitness">Witness erbij</button>
+          <button class="ghost" id="runDrill">Back-up testen</button>
+          <button class="ghost" id="runSnapshot">Nu een back-up maken</button>
+          <button class="ghost danger" id="sleepCluster">Laten slapen</button>
         </div>
       </section>
-      <div id="nodeCards" class="node-cards"></div>
+      <div class="nodes-map-row"><div id="nodeMap" class="node-map"></div><div id="nodeCards" class="node-cards"></div></div>
       <div class="nodes-cols">
         <section>
           <h3>Opslag</h3>
@@ -98,20 +101,112 @@
           <form id="policyForm" class="policy">
             <label class="check"><input type="checkbox" name="autoHeal"> Zelfherstel (vervangen en aanvullen)</label>
             <div class="row">
-              <label>Data-nodes<input type="number" name="minDataNodes" min="1" max="5"></label>
+              <label>Dataservers<input type="number" name="minDataNodes" min="1" max="5"></label>
               <label>Witnesses<input type="number" name="witnesses" min="0" max="3"></label>
               <label>Vervangen na (min)<input type="number" name="autoReplaceAfterMin" min="1" step="1"></label>
             </div>
             <button class="ghost">Opslaan</button>
           </form>
-          <h3>Jobs</h3>
+          <h3>Taken</h3>
           <ul id="jobList" class="log"></ul>
         </section>
         <section>
-          <h3>Gebeurtenissen</h3>
+          <h3>Wat er gebeurde</h3>
           <ul id="eventList" class="log"></ul>
         </section>
       </div>
+    </main>
+
+    <!-- INSTELLINGEN -->
+    <main id="tab-instellingen" class="tab settings" hidden>
+      <nav class="settings-nav" id="settingsNav">
+        <a href="#instellingen/gezondheid" data-sec="gezondheid">Gezondheid</a>
+        <a href="#instellingen/mail" data-sec="mail">Mail</a>
+        <a href="#instellingen/importeren" data-sec="importeren">Importeren uit Google</a>
+        <a href="#instellingen/tijdmachine" data-sec="tijdmachine">Tijdmachine</a>
+        <a href="#instellingen/telefoon" data-sec="telefoon">Telefoon</a>
+        <a href="#instellingen/account" data-sec="account">Account</a>
+      </nav>
+
+      <section class="settings-sec" data-sec="gezondheid">
+        <header class="sec-head"><h2>Gezondheid</h2><p id="healthSummary" class="muted"></p>
+          <button class="ghost" id="healthRefresh">Opnieuw controleren</button></header>
+        <div id="healthList" class="checklist"></div>
+      </section>
+
+      <section class="settings-sec" data-sec="mail" hidden>
+        <header class="sec-head"><h2>Mail</h2><p class="muted">Je adres, uitgaande mail en waar meldingen heen gaan.</p></header>
+        <form id="mailForm" class="form">
+          <label>Je e-mailadres<input name="mailFrom" type="email" autocomplete="email" required></label>
+          <label>Meldingen bij problemen naar<input name="alertEmail" type="email" placeholder="een adres buiten je eigen domein">
+            <small>Gebruik een adres dat niet van deze cloud afhangt, zodat een melding ook aankomt als je mail stuk is.</small></label>
+          <fieldset>
+            <legend>Uitgaande mail</legend>
+            <div class="seg" id="relayPreset">
+              <label><input type="radio" name="preset" value="none"> Rechtstreeks</label>
+              <label><input type="radio" name="preset" value="scaleway"> Scaleway TEM</label>
+              <label><input type="radio" name="preset" value="brevo"> Brevo</label>
+              <label><input type="radio" name="preset" value="custom"> Eigen relay</label>
+            </div>
+            <p class="muted" id="relayHint"></p>
+            <div class="relay-fields">
+              <div class="row"><label>Server<input name="host"></label><label class="narrow">Poort<input name="port" type="number"></label></div>
+              <div class="row"><label>Gebruikersnaam<input name="user" autocomplete="off"></label><label>Wachtwoord<input name="password" type="password" autocomplete="new-password" placeholder="ongewijzigd"></label></div>
+              <label class="check"><input type="checkbox" name="secure"> Versleuteld vanaf het begin (poort 465)</label>
+              <label>Extra SPF-regel van je relay<input name="spfExtra" placeholder="bijv. include:spf.brevo.com"><small>Je relay-aanbieder vermeldt welke regel erbij moet. De DNS wordt daarna automatisch bijgewerkt.</small></label>
+            </div>
+          </fieldset>
+          <p class="form-msg" id="mailMsg" role="status"></p>
+          <div class="row-actions"><button class="primary">Opslaan</button><button type="button" class="ghost" id="testMail">Stuur een testbericht</button></div>
+        </form>
+      </section>
+
+      <section class="settings-sec" data-sec="importeren" hidden>
+        <header class="sec-head"><h2>Importeren uit Google</h2><p class="muted">Haal je mail, agenda en foto's in één keer over. Dubbele berichten en foto's worden overgeslagen, dus opnieuw importeren kan altijd.</p></header>
+        <ol class="howto">
+          <li>Ga naar <a href="https://takeout.google.com" target="_blank" rel="noopener">takeout.google.com</a> en kies alleen <b>Mail</b>, <b>Agenda</b> en <b>Google Foto's</b>.</li>
+          <li>Kies <b>.zip</b> en de grootste bestandsgrootte. Google mailt je als de export klaar is.</li>
+          <li>Download alle zip-bestanden en sleep ze hieronder. Je hoeft ze niet uit te pakken.</li>
+        </ol>
+        <label class="dropzone" id="dropzone">
+          <input type="file" id="takeoutInput" multiple accept=".zip,.mbox,.ics" hidden>
+          <span class="dz-title">Sleep je Takeout-bestanden hierheen</span>
+          <span class="muted">of klik om ze te kiezen · .zip, .mbox of .ics</span>
+        </label>
+        <ul id="uploadList" class="uploads"></ul>
+        <div class="row-actions"><button class="primary" id="startImport" disabled>Importeren</button></div>
+        <div id="importProgress" class="import-progress" hidden></div>
+      </section>
+
+      <section class="settings-sec" data-sec="tijdmachine" hidden>
+        <header class="sec-head"><h2>Tijdmachine</h2><p class="muted">Haal mails, afspraken of foto's terug die je per ongeluk hebt verwijderd of veranderd. Je huidige gegevens blijven staan.</p></header>
+        <div id="tmBody"></div>
+      </section>
+
+      <section class="settings-sec" data-sec="telefoon" hidden>
+        <header class="sec-head"><h2>Telefoon</h2></header>
+        <div class="phone-grid">
+          <div>
+            <h3>Agenda op je telefoon</h3>
+            <p>Scan de code met je telefoon, of voeg het adres toe als agenda-abonnement (op Android met de gratis app ICSx⁵). Je afspraken verschijnen dan in je gewone agenda-app.</p>
+            <div class="copyline"><input id="icalUrl" readonly><button class="ghost" data-copy="icalUrl">Kopiëren</button></div>
+            <p class="muted"><small>Iedereen met dit adres kan je agenda lezen. Deel het niet.</small></p>
+          </div>
+          <div class="qr" id="icalQr"></div>
+        </div>
+        <h3>Als app op je startscherm</h3>
+        <p>Open deze pagina in Chrome op je telefoon en kies in het menu <b>Toevoegen aan startscherm</b>.</p>
+      </section>
+
+      <section class="settings-sec" data-sec="account" hidden>
+        <header class="sec-head"><h2>Account</h2></header>
+        <form id="pwForm" class="form narrow-form">
+          <label>Huidig wachtwoord<input name="current" type="password" autocomplete="current-password" required></label>
+          <label>Nieuw wachtwoord<input name="next" type="password" autocomplete="new-password" minlength="10" required><small>Minstens 10 tekens.</small></label>
+          <p class="form-msg" id="pwMsg" role="status"></p>
+          <div class="row-actions"><button class="primary">Wachtwoord wijzigen</button></div>
+        </form>
+      </section>
     </main>
   </div>
 

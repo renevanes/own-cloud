@@ -19,8 +19,11 @@ import { makeProvider, type Provider } from "./providers.js";
 import { makeDns, type DnsProvider } from "./dns.js";
 import { caddyfile } from "./cloudinit.js";
 import { runtime } from "./runtime.js";
-import { runJobs, autoHeal, createJob } from "./jobs.js";
+import { runJobs, autoHeal, createJob, choosePlacement, type JobType } from "./jobs.js";
+import { verifyAdminProof } from "./admin.js";
 import { isNotLeader } from "./fence.js";
+import * as health from "../health.js";
+import { place, role } from "./places.js";
 
 export interface NodeRow {
   id: string; name: string | null; kind: "data" | "witness"; provider: string; region: string | null; country: string | null; size: string | null;
@@ -49,6 +52,7 @@ export class ClusterService {
   private restoring = false;
   private providerCache = new Map<string, Provider>();
   lastSnapshotAt = 0;
+  private healthRunning = false;
 
   constructor(public cfg: ClusterConfig, private cfgFile: string, readonly dataDir: string) {
     this.keys = keysFor(cfg);
@@ -198,6 +202,7 @@ export class ClusterService {
     this.looping = true;
     try {
       if (this.db) {
+        if (this.due("adminCfg", 5000)) await this.applyAdminConfig().catch((e) => console.error("config:", e.message));
         await this.flushSpool().catch((e) => console.error("spool:", e.message));
         if (this.raft.isLeader()) await this.leaderLoop();
         else await this.fetchSome();
@@ -207,6 +212,25 @@ export class ClusterService {
     } finally {
       this.looping = false;
     }
+  }
+
+  private adminV = 0;
+  /** Neemt opslag/aanbieders/DNS uit de (gerepliceerde) beheerconfiguratie over. Draait op elke data-node. */
+  async applyAdminConfig() {
+    const raw = this.getSetting("admin_config");
+    if (!raw) return;
+    const a = JSON.parse(raw) as { v: number; stores?: ClusterConfig["stores"]; providers?: ClusterConfig["providers"]; dns?: ClusterConfig["dns"] };
+    if (a.v <= this.adminV) return;
+    this.adminV = a.v;
+    if (a.stores) {
+      const before = new Set(this.stores.map((s) => s.name));
+      this.cfg.stores = a.stores;
+      this.stores = a.stores.map(makeStore);
+      if (this.raft.isLeader()) for (const s of this.stores) if (!before.has(s.name)) this.storeProgress.set(s.name, await storedUpTo(s).catch(() => 0));
+    }
+    if (a.providers) { this.cfg.providers = a.providers; this.providerCache.clear(); }
+    if (a.dns) this.cfg.dns = a.dns;
+    writeClusterConfig(this.cfgFile, this.cfg);
   }
 
   private async leaderLoop() {
@@ -228,6 +252,11 @@ export class ClusterService {
     if (this.due("reconcile", 12 * 3600e3)) await this.reconcileBlobs();
     if (this.due("purge", 3600e3)) this.purgeTrash();
     if (this.due("zombies", 30 * 60_000)) await this.cleanupZombies();
+    if (!this.healthRunning && this.due("health", 15 * 60_000)) {
+      // Niet blokkeren: DNS-controles kunnen even duren.
+      this.healthRunning = true;
+      void this.healthRound().catch((e) => console.error("health:", e)).finally(() => { this.healthRunning = false; });
+    }
     if (this.due("drillCheck", 3600e3)) {
       const last = db.prepare("SELECT MAX(ts) AS ts FROM cluster_events WHERE kind = 'drill' AND level = 'info'").get() as { ts: number | null };
       const pending = db.prepare("SELECT 1 FROM cluster_jobs WHERE type = 'drill' AND status IN ('pending','running')").get();
@@ -238,6 +267,13 @@ export class ClusterService {
   private async initLeadership() {
     const db = this.db!;
     const now = Date.now();
+    if (lastSeq(db) === 0) {
+      // Vangnet: nooit leiden met een lege database terwijl er al een back-up bestaat.
+      for (const s of this.stores) {
+        const chain = await listChain(s).catch(() => null);
+        if (chain?.snapshots.some((x) => x.seq > 0)) return this.requestRestore("lege database terwijl er een back-up bestaat");
+      }
+    }
     const a = this.cfg.advertise;
     const si = this.cfg.selfInfo ?? {};
     db.prepare(`INSERT INTO nodes (id, name, kind, provider, region, size, server_id, country, status, cluster_url, api_url, ipv4, ipv6, created, updated)
@@ -245,18 +281,24 @@ export class ClusterService {
       ON CONFLICT(id) DO UPDATE SET status = 'ready', cluster_url = excluded.cluster_url, api_url = excluded.api_url, updated = excluded.updated`)
       .run(this.self.id, this.self.id, si.provider ?? "manual", si.region ?? null, si.size ?? null, si.serverId ?? null, si.country ?? null,
         a.clusterUrl, a.apiUrl ?? null, a.ipv4 ?? null, a.ipv6 ?? null, now, now);
+    if (this.cfg.initialSettings) {
+      for (const [k, v] of Object.entries(this.cfg.initialSettings)) db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run(k, v);
+      delete this.cfg.initialSettings;
+      writeClusterConfig(this.cfgFile, this.cfg);
+    }
     if (this.cfg.bootstrapLeader) {
       // Wakker worden / eerste start: alle andere (oude) nodes vervallen; openstaande jobs van vóór het slapen stoppen.
       db.prepare("UPDATE nodes SET status = 'removed', updated = ? WHERE id != ? AND status != 'removed'").run(now, this.self.id);
       db.prepare("UPDATE cluster_jobs SET status = 'failed', error = 'onderbroken (cluster sliep)', updated = ? WHERE status IN ('pending','running')").run(now);
       if (this.getSetting("cluster_mode") === "sleeping") db.prepare("UPDATE settings SET value = 'awake' WHERE key = 'cluster_mode'").run();
+      const woke = !!this.cfg.bootstrapTerm;
       this.cfg.bootstrapLeader = false;
       delete this.cfg.bootstrapTerm;
       writeClusterConfig(this.cfgFile, this.cfg);
-      this.event("wake", `Cluster gestart met ${this.self.id} als eerste node`);
+      this.event("wake", woke ? "Je cloud is weer wakker en heeft alles teruggehaald" : "Je cloud is gestart");
     }
     this.leaderInit = true;
-    this.event("leader", `${this.self.id} is leider (term ${this.raft.term})`);
+    { const me = this.db!.prepare("SELECT provider, region FROM nodes WHERE id = ?").get(this.self.id) as { provider: string; region: string | null } | undefined; this.event("leader", `${me ? place(me) : this.self.id} leidt nu het cluster`); }
     // Hervat uploads vanaf wat de opslag al heeft (nooit voorbij onze eigen log: hogere seq's zijn van een afgezette leider).
     const mySeq = lastSeq(db);
     let anySnapshot = false;
@@ -277,6 +319,7 @@ export class ClusterService {
     this.dnsDirty = true;
     this.manifestDirty = true;
     this.timers.reconcile = Date.now() - 12 * 3600e3 + 30_000;
+    this.timers.health = Date.now() - 15 * 60_000 + 90_000; // eerste controle na anderhalve minuut
   }
 
   // ───────── Wijzigingen en snapshots naar opslag ─────────
@@ -317,7 +360,8 @@ export class ClusterService {
     }
     if (ok) {
       this.lastSnapshotAt = Date.now();
-      this.event("snapshot", `Snapshot seq ${snap.seq} (${Math.round(snap.plainSize / 1024)} kB, versleuteld ${Math.round(snap.size / 1024)} kB) naar ${ok} opslag(en)`);
+      const mb = snap.plainSize / 1e6;
+      this.event("snapshot", `Volledige back-up gemaakt (${mb < 1 ? Math.max(1, Math.round(snap.plainSize / 1024)) + " kB" : mb.toFixed(1).replace(".", ",") + " MB"}) in ${ok === 1 ? "1 opslagplaats" : `${ok} opslagplaatsen`}`, "info", { seq: snap.seq, size: snap.size });
     }
     snap.cleanup();
     this.uploadedSeq = Math.min(...this.stores.map((s) => this.storeProgress.get(s.name) ?? 0));
@@ -478,7 +522,7 @@ export class ClusterService {
       if (!p || Date.now() - p.lastContact > 5000) continue;
       if (n.kind === "data" && p.ackSeq < last - 5) continue;
       db.prepare("UPDATE nodes SET status = 'ready', updated = ? WHERE id = ?").run(Date.now(), n.id);
-      this.event("node", `${n.id} (${n.kind}, ${n.provider}/${n.region}) is klaar en stemt mee`);
+      this.event("node", `Nieuwe ${role(n.kind)} in ${place(n)} is klaar`);
       this.dnsDirty = true;
       this.manifestDirty = true;
       for (const s of this.stores.filter((x) => x.purpose === "replica")) void s.delete(`bootstrap/${n.id}.enc`).catch(() => {});
@@ -496,7 +540,7 @@ export class ClusterService {
         if (!n || !n.join_token_hash || n.join_token_hash.length !== hash.length || !crypto.timingSafeEqual(Buffer.from(n.join_token_hash), Buffer.from(hash))) return { ok: false, error: "onbekende node of token" };
         if (n.status === "provisioning") {
           this.db.prepare("UPDATE nodes SET status = 'syncing', updated = ? WHERE id = ?").run(Date.now(), n.id);
-          this.event("node", `${n.id} heeft zich aangemeld en synchroniseert`);
+          this.event("node", `${place(n)} is opgestart en haalt de gegevens op`);
         }
         return { ok: true };
       }
@@ -505,6 +549,63 @@ export class ClusterService {
         const { storeRawMessage } = await import("../mail/store.js");
         await storeRawMessage(Buffer.from(String(m.raw), "base64"), { folder: "inbox" });
         await runtime.waitDurable();
+        return { ok: true };
+      }
+      case "clusterSummary": {
+        if (!this.raft.isLeader() || !this.db) return { leader: false, leaderId: this.raft.leaderId };
+        const pol = this.policy();
+        const nodes = this.nodes("status != 'removed'").map((n) => ({
+          id: n.id, kind: n.kind, provider: n.provider, region: n.region, country: n.country, size: n.size, status: n.status, ipv4: n.ipv4,
+          monthly_cost: n.monthly_cost, isLeader: n.id === this.self.id,
+          lastContact: n.id === this.self.id ? Date.now() : this.raft.peers.get(n.id)?.lastContact ?? null,
+        }));
+        return {
+          leader: true, id: this.self.id, term: this.raft.term, domain: this.cfg.domain ?? null, policy: pol, nodes,
+          sleeping: this.getSetting("cluster_mode") === "sleeping",
+          health: health.previousHealth(), healthCheckedAt: Number(this.getSetting("health_checked_at") ?? 0) || null,
+          lastSnapshotAt: this.lastSnapshotAt || null,
+          lastDrill: this.db.prepare("SELECT ts, level, message FROM cluster_events WHERE kind = 'drill' ORDER BY ts DESC LIMIT 1").get() ?? null,
+          jobs: this.db.prepare("SELECT id, type, status, error, created FROM cluster_jobs ORDER BY created DESC LIMIT 10").all(),
+          events: this.db.prepare("SELECT ts, level, kind, message FROM cluster_events WHERE kind != 'job' ORDER BY id DESC LIMIT 30").all(),
+        };
+      }
+      case "adminJob": {
+        if (!this.raft.isLeader() || !this.db) return { ok: false, error: "geen leider" };
+        if (!this.cfg.masterKey || !verifyAdminProof(this.cfg.masterKey, m.job, m.proof as { ts: number; mac: string })) return { ok: false, error: "niet ondertekend" };
+        const job = m.job as { type: JobType; params: Record<string, unknown> };
+        if (!["spawn", "move", "remove", "sleep", "drill", "snapshot"].includes(job.type)) return { ok: false, error: "onbekende job" };
+        if (job.type === "spawn" && !job.params.provider) {
+          const p = choosePlacement(this, (job.params.kind as "data" | "witness") ?? "data");
+          if (p) Object.assign(job.params, { provider: p.provider, region: p.region, size: p.size, country: p.country });
+        }
+        return { ok: true, id: createJob(this, job.type, job.params) };
+      }
+      case "adminConfig": {
+        // Wijzigingen uit de beheerconsole (opslag, aanbieders, DNS, plaatsing, mailinstellingen).
+        if (!this.raft.isLeader() || !this.db) return { ok: false, error: "geen leider" };
+        if (!this.cfg.masterKey || !verifyAdminProof(this.cfg.masterKey, m.update, m.proof as { ts: number; mac: string })) return { ok: false, error: "niet ondertekend" };
+        const u = m.update as { stores?: unknown; providers?: unknown; dns?: unknown; placement?: unknown; settings?: Record<string, string> };
+        const up = this.db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+        this.db.transaction(() => {
+          up.run("admin_config", JSON.stringify({ v: Date.now(), stores: u.stores, providers: u.providers, dns: u.dns }));
+          if (u.placement) {
+            const cur = JSON.parse(this.getSetting("cluster_policy") ?? "{}");
+            cur.placement = u.placement;
+            up.run("cluster_policy", JSON.stringify(cur));
+          }
+          for (const [k, v] of Object.entries(u.settings ?? {})) up.run(k, v);
+        })();
+        await this.applyAdminConfig();
+        this.dnsDirty = true;
+        this.event("config", "Instellingen bijgewerkt vanuit de beheerconsole");
+        return { ok: true };
+      }
+      case "setPolicy": {
+        if (!this.raft.isLeader() || !this.db) return { ok: false, error: "geen leider" };
+        if (!this.cfg.masterKey || !verifyAdminProof(this.cfg.masterKey, m.policy, m.proof as { ts: number; mac: string })) return { ok: false, error: "niet ondertekend" };
+        const cur = JSON.parse(this.getSetting("cluster_policy") ?? "{}");
+        Object.assign(cur, m.policy);
+        this.db.prepare("INSERT INTO settings (key, value) VALUES ('cluster_policy', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(cur));
         return { ok: true };
       }
       default:
@@ -566,30 +667,120 @@ export class ClusterService {
 
   // ───────── DNS, manifest, opruimen ─────────
 
-  async syncDns() {
-    if (!this.cfg.domain || !this.cfg.dns.length) { this.dnsDirty = false; return; }
+  private ips() {
     const ready = this.nodes("status = 'ready' AND kind = 'data'");
-    const v4 = [...new Set(ready.map((n) => n.ipv4).filter((x): x is string => !!x))];
-    const v6 = [...new Set(ready.map((n) => n.ipv6).filter((x): x is string => !!x))];
-    if (!v4.length) return;
+    return {
+      ips4: [...new Set(ready.map((n) => n.ipv4).filter((x): x is string => !!x))].sort(),
+      ips6: [...new Set(ready.map((n) => n.ipv6).filter((x): x is string => !!x))].sort(),
+    };
+  }
+
+  /** Publiceert alle verwachte records (A/AAAA, MX, SPF, DKIM, DMARC) bij elke DNS-aanbieder. */
+  async syncDns() {
+    if (!this.cfg.dns.length || !health.domain()) { this.dnsDirty = false; return; }
+    const ips = this.ips();
+    if (!ips.ips4.length) return;
     let ok = true;
     for (const d of this.dns()) {
       try {
-        for (const sub of ["cloud", "mail"]) {
-          await d.setRecords(sub, "A", v4, 300);
-          await d.setRecords(sub, "AAAA", v6, 300);
+        for (const rec of health.expectedRecords(ips)) {
+          const r = await health.mergeApexTxt(rec);
+          await d.setRecords(r.sub, r.type, r.values, r.ttl);
         }
-        await d.setRecords("", "MX", [`10 mail.${this.cfg.domain}.`], 3600);
-        await d.setRecords("", "TXT", [`"v=spf1 a:mail.${this.cfg.domain} -all"`], 3600);
       } catch (e) {
         ok = false;
         this.event("dns", `DNS bij ${d.name} bijwerken mislukt: ${(e as Error).message}`, "warn");
       }
     }
     if (ok) {
-      if (this.dnsDirty) this.event("dns", `DNS bijgewerkt: ${v4.join(", ")}`);
+      if (this.dnsDirty) this.event("dns", `DNS bijgewerkt: ${ips.ips4.join(", ")}`);
       this.dnsDirty = false;
     }
+  }
+
+  // ───────── Gezondheid ─────────
+
+  healthInfo(): health.ClusterInfo {
+    const pol = this.policy();
+    const db = this.db!;
+    const ready = this.nodes("status = 'ready'");
+    const last = lastSeq(db);
+    const drill = db.prepare("SELECT ts, level, message FROM cluster_events WHERE kind = 'drill' ORDER BY ts DESC LIMIT 1").get() as { ts: number; level: string; message: string } | undefined;
+    const peers = this.raft.peers;
+    return {
+      ...this.ips(),
+      dnsAutomatic: this.cfg.dns.length > 0,
+      ptrAutomatic: ready.some((n) => n.provider !== "manual" && !!this.cfg.providers[n.provider] && !!this.provider(n.provider).setPtr),
+      snapshotAgeH: this.lastSnapshotAt ? (Date.now() - this.lastSnapshotAt) / 3600e3 : null,
+      snapshotEveryH: pol.snapshotEveryHours,
+      stores: this.stores.map((s) => ({ name: s.name, country: s.config.country, purpose: s.purpose, lag: this.storeProgress.has(s.name) ? Math.max(0, last - this.storeProgress.get(s.name)!) : null })),
+      lastDrill: drill ? { ts: drill.ts, ok: drill.level === "info", message: drill.message } : null,
+      drillEveryDays: pol.drillEveryDays,
+      dataReady: ready.filter((n) => n.kind === "data").length,
+      witnessReady: ready.filter((n) => n.kind === "witness").length,
+      wantData: pol.minDataNodes,
+      wantWitness: pol.witnesses,
+      autoHeal: pol.autoHeal,
+      unreachable: ready.filter((n) => n.id !== this.self.id && Date.now() - (peers.get(n.id)?.lastContact ?? 0) > 30_000 && Date.now() - (this.raft.status().leaderSince ?? 0) > 30_000).map((n) => n.id),
+    };
+  }
+
+  async healthFix(action: string) {
+    switch (action) {
+      case "dkim:generate":
+        health.generateDkim();
+        this.dnsDirty = true;
+        await this.syncDns();
+        return "DKIM-sleutel gemaakt en gepubliceerd";
+      case "dns:publish":
+        this.dnsDirty = true;
+        await this.syncDns();
+        return this.dnsDirty ? "Niet alle records konden worden bijgewerkt" : "DNS-records bijgewerkt";
+      case "ptr:set": {
+        let n = 0;
+        for (const node of this.nodes("status = 'ready' AND kind = 'data'")) {
+          if (node.provider === "manual" || !node.server_id) continue;
+          const p = this.provider(node.provider);
+          if (p.setPtr) { await p.setPtr({ serverId: node.server_id, ipv4: node.ipv4 ?? undefined, ipv6: node.ipv6 ?? undefined }, `mail.${health.domain()}`); n++; }
+        }
+        return `Reverse DNS ingesteld voor ${n} server(s)`;
+      }
+      case "drill:run": createJob(this, "drill", {}); return "Brandoefening gestart";
+      case "snapshot:run": createJob(this, "snapshot", {}); return "Back-up gestart";
+      default: throw new Error("Onbekende reparatie");
+    }
+  }
+
+  /** Elk kwartier op de leider: controleren, veilige dingen zelf repareren, melden bij veranderingen. */
+  async healthRound() {
+    let checks = await health.runChecks(this.healthInfo());
+    const auto: string[] = [];
+    const info = this.healthInfo();
+    if (info.dnsAutomatic) {
+      if (checks.some((c) => c.id === "dns.dkim" && c.fix?.action === "dkim:generate")) auto.push("dkim:generate");
+      else if (checks.some((c) => c.fix?.action === "dns:publish")) auto.push("dns:publish");
+    }
+    if (checks.some((c) => c.fix?.action === "ptr:set")) auto.push("ptr:set");
+    for (const a of auto) {
+      try { this.event("health", `Automatisch hersteld: ${await this.healthFix(a)}`); } catch (e) { this.event("health", `Automatisch herstel ${a} mislukt: ${(e as Error).message}`, "warn"); }
+    }
+    if (auto.length) checks = await health.runChecks(this.healthInfo());
+    const prev = health.previousHealth();
+    const { worse, fixed } = health.isMailNoticeDue(prev, checks);
+    health.rememberHealth(checks);
+    const to = this.getSetting("alert_email");
+    if (to && (worse.length || fixed.length) && Object.keys(prev).length) {
+      const url = this.cfg.domain ? `https://cloud.${this.cfg.domain}` : null;
+      const subject = worse.length ? `Eigen Cloud: ${worse.length} ${worse.length === 1 ? "ding vraagt" : "dingen vragen"} aandacht` : "Eigen Cloud: alles weer in orde";
+      try {
+        const { sendNotice } = await import("../mail/send.js");
+        await sendNotice(to, subject, health.noticeText(worse, fixed, url));
+        this.event("notice", `Melding gestuurd naar ${to}: ${subject}`);
+      } catch (e) {
+        this.event("notice", `Melding sturen mislukt: ${(e as Error).message}`, "warn");
+      }
+    }
+    return checks;
   }
 
   manifest(state: "awake" | "asleep" = "awake", topology?: unknown[]) {

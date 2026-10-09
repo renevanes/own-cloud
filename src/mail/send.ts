@@ -4,6 +4,7 @@ import fs from "node:fs";
 import nodemailer from "nodemailer";
 import { config } from "../config.js";
 import { storeRawMessage } from "./store.js";
+import { getSetting } from "../db.js";
 
 export interface OutgoingMail {
   to: string[];
@@ -17,20 +18,27 @@ export interface OutgoingMail {
   attachments?: { filename: string; content: Buffer; contentType?: string }[];
 }
 
-function dkimOptions() {
-  if (!config.dkimKeyFile || !fs.existsSync(config.dkimKeyFile)) return undefined;
+/** Instellingen uit de app gaan voor omgevingsvariabelen. */
+export function mailSettings() {
   return {
-    domainName: config.mailFrom.split("@")[1],
-    keySelector: config.dkimSelector,
-    privateKey: fs.readFileSync(config.dkimKeyFile, "utf8"),
+    from: getSetting("mail_from") || config.mailFrom,
+    relay: getSetting("mail_relay") ?? config.smtpRelay,
   };
+}
+
+function dkimOptions() {
+  const domainName = mailSettings().from.split("@")[1];
+  const fromDb = getSetting("dkim_private");
+  if (fromDb) return { domainName, keySelector: getSetting("dkim_selector") || config.dkimSelector, privateKey: fromDb };
+  if (!config.dkimKeyFile || !fs.existsSync(config.dkimKeyFile)) return undefined;
+  return { domainName, keySelector: config.dkimSelector, privateKey: fs.readFileSync(config.dkimKeyFile, "utf8") };
 }
 
 /** Stelt het bericht samen (met DKIM-handtekening als er een sleutel is). */
 async function compose(mail: OutgoingMail): Promise<Buffer> {
   const builder = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: "windows" });
   const info = await builder.sendMail({
-    from: config.mailFrom,
+    from: mailSettings().from,
     to: mail.to,
     cc: mail.cc,
     bcc: mail.bcc,
@@ -61,7 +69,7 @@ async function deliverDirect(raw: Buffer, recipients: string[]) {
     for (const host of mxs) {
       try {
         const t = nodemailer.createTransport({ host, port: 25, name: config.hostname, secure: false, tls: { rejectUnauthorized: false }, connectionTimeout: 20000 });
-        await t.sendMail({ envelope: { from: config.mailFrom, to: rcpts }, raw });
+        await t.sendMail({ envelope: { from: mailSettings().from, to: rcpts }, raw });
         ok = true;
         break;
       } catch (e) {
@@ -77,11 +85,21 @@ export async function sendMail(mail: OutgoingMail): Promise<number | null> {
   const recipients = [...mail.to, ...(mail.cc ?? []), ...(mail.bcc ?? [])];
   if (!recipients.length) throw new Error("Geen ontvangers");
 
-  if (config.smtpRelay) {
-    const relay = nodemailer.createTransport(config.smtpRelay);
-    await relay.sendMail({ envelope: { from: config.mailFrom, to: recipients }, raw });
+  const { relay: relayUrl, from } = mailSettings();
+  if (relayUrl) {
+    await nodemailer.createTransport(relayUrl).sendMail({ envelope: { from, to: recipients }, raw });
   } else {
     await deliverDirect(raw, recipients);
   }
   return storeRawMessage(raw, { folder: "sent", isRead: true });
+}
+
+/** Systeemmelding (bijv. gezondheidsalarm) naar een extern adres. Wordt niet in 'Verzonden' bewaard. */
+export async function sendNotice(to: string, subject: string, text: string) {
+  const builder = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: "windows" });
+  const info = await builder.sendMail({ from: `Eigen Cloud <${mailSettings().from}>`, to, subject, text, messageId: `<${crypto.randomUUID()}@${config.hostname}>`, dkim: dkimOptions() });
+  const raw = info.message as Buffer;
+  const { relay: relayUrl, from } = mailSettings();
+  if (relayUrl) await nodemailer.createTransport(relayUrl).sendMail({ envelope: { from, to: [to] }, raw });
+  else await deliverDirect(raw, [to]);
 }

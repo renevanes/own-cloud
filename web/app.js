@@ -1,4 +1,6 @@
 // Eigen Cloud — webclient (geen build-stap nodig)
+import { europeMap, MAP_CSS } from "/shared/europe.js";
+document.head.insertAdjacentHTML("beforeend", `<style>${MAP_CSS}</style>`);
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -31,6 +33,8 @@ async function boot() {
   $("#login").hidden = true; $("#app").hidden = false;
   api("/api/cluster/status").then((c) => { if (c.enabled) $('[data-tab="nodes"]').hidden = false; }).catch(() => {});
   switchTab(location.hash.slice(1) || "mail");
+  refreshHealthBanner();
+  setInterval(refreshHealthBanner, 5 * 60_000);
 }
 $("#loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -41,13 +45,16 @@ $("#logout").onclick = async () => { await api("/api/logout", { method: "POST" }
 
 // ───────────── Tabs ─────────────
 const loaded = {};
-function switchTab(tab) {
-  if (!["mail", "agenda", "fotos", "nodes"].includes(tab)) tab = "mail";
+function switchTab(target) {
+  let [tab, sub] = String(target).split("/");
+  if (!["mail", "agenda", "fotos", "nodes", "instellingen"].includes(tab)) tab = "mail";
   $$(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   $$(".tab").forEach((t) => (t.hidden = t.id !== "tab-" + tab));
-  history.replaceState(null, "", "#" + tab);
-  if (!loaded[tab]) { loaded[tab] = true; ({ mail: initMail, agenda: initAgenda, fotos: initPhotos, nodes: initNodes })[tab](); }
+  history.replaceState(null, "", "#" + tab + (sub ? "/" + sub : ""));
+  if (!loaded[tab]) { loaded[tab] = true; ({ mail: initMail, agenda: initAgenda, fotos: initPhotos, nodes: initNodes, instellingen: initSettings })[tab](); }
+  if (tab === "instellingen") showSettings(sub || "gezondheid");
 }
+window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (h.startsWith("instellingen")) switchTab(h); });
 $$(".tabs button").forEach((b) => (b.onclick = () => switchTab(b.dataset.tab)));
 
 // ═════════════ MAIL ═════════════
@@ -198,7 +205,7 @@ async function loadCalendar() {
   const start = new Date(first); start.setDate(1 - ((first.getDay() + 6) % 7)); // maandag
   const end = new Date(start); end.setDate(start.getDate() + 42);
   cal.events = await api(`/api/events?from=${start.getTime()}&to=${end.getTime()}`);
-  const color = (id) => cal.calendars.find((c) => c.id === id)?.color || "#3b82f6";
+  const color = (id) => cal.calendars.find((c) => c.id === id)?.color || "#3f6f4a";
 
   $("#calTitle").textContent = first.toLocaleDateString("nl-NL", { month: "long", year: "numeric" });
   const today = dayKey(new Date());
@@ -221,7 +228,7 @@ function renderDayList() {
   const ds = new Date(cal.selected); ds.setHours(0, 0, 0, 0);
   const de = new Date(ds); de.setDate(ds.getDate() + 1);
   const evs = cal.events.filter((e) => e.occurrence_start < de.getTime() && e.occurrence_end > ds.getTime());
-  const color = (id) => cal.calendars.find((c) => c.id === id)?.color || "#3b82f6";
+  const color = (id) => cal.calendars.find((c) => c.id === id)?.color || "#3f6f4a";
   $("#dayList").innerHTML = `<h3 style="margin:8px 0 2px">${ds.toLocaleDateString("nl-NL", { weekday: "long", day: "numeric", month: "long" })}</h3>` +
     (evs.map((e, i) => `<div class="item" data-i="${cal.events.indexOf(e)}" style="border-left-color:${color(e.calendar_id)}">
       <b>${esc(e.title)}</b> ${e.recurring ? "🔁" : ""}<br><small>${e.all_day ? "Hele dag" : fmtTime(e.occurrence_start) + " – " + fmtTime(e.occurrence_end)}${e.location ? " · 📍 " + esc(e.location) : ""}</small>
@@ -411,26 +418,27 @@ async function loadCluster() {
   const countries = [...new Set(active.map((n) => n.country).filter(Boolean))];
   $("#clusterSummary").innerHTML = [
     `<span class="pill ${c.sleeping ? "warn" : "ok"}">${c.sleeping ? "😴 slaapt" : "🐌 wakker"}</span>`,
-    `<span class="pill">Leider <b>${esc(c.leader)}</b> · term ${c.term}</span>`,
-    `<span class="pill">${active.filter((n) => n.kind === "data").length} data · ${active.filter((n) => n.kind === "witness").length} witness</span>`,
+    `<span class="pill">Leider: <b>${esc(c.nodes.find((n) => n.isLeader)?.place ?? c.leader)}</b></span>`,
+    `<span class="pill">${active.filter((n) => n.kind === "data").length} dataservers, ${active.filter((n) => n.kind === "witness").length} witness</span>`,
     `<span class="pill">${countries.map((x) => FLAGS[x] || x).join(" ")} ${countries.length} ${countries.length === 1 ? "land" : "landen"}</span>`,
     `<span class="pill">${eur(c.monthlyCost)} / maand</span>`,
     c.blobQueue ? `<span class="pill warn">${c.blobQueue} bestanden wachten op upload</span>` : "",
   ].join("");
 
+  $("#nodeMap").innerHTML = europeMap(active.map((n) => ({ ...n, status: n.status })));
   $("#nodeCards").innerHTML = active.map((n) => {
     const stale = n.status === "ready" && !n.isSelf && n.lastContact && Date.now() - n.lastContact > 15000;
+    const roleText = n.kind === "witness" ? "Witness · beslist mee bij storingen" : n.isLeader ? "Dataserver · leidt nu" : "Dataserver · houdt alles bij";
     return `<div class="node ${n.isLeader ? "leader" : ""} ${stale ? "down" : ""}">
-      <div class="top"><span class="flag">${FLAGS[n.country] || "🖥️"}</span><span class="name">${esc(n.id)}</span>
-        <span class="badge ${n.kind}">${n.kind === "data" ? "data" : "witness"}</span>${n.isLeader ? '<span class="badge">👑 leider</span>' : ""}</div>
-      <div class="meta"><span class="dot ${stale ? "stale" : n.status}"></span>${STATUS_NL[n.status] || n.status}${stale ? " · onbereikbaar" : ""}<br>
-        ${esc(n.provider)}${n.region ? " / " + esc(n.region) : ""}${n.size ? " · " + esc(n.size) : ""}${n.monthly_cost != null ? " · " + eur(n.monthly_cost) : ""}<br>
-        ${n.ipv4 ? esc(n.ipv4) + " · " : ""}contact ${n.isSelf ? "(deze node)" : ago(n.lastContact)}${n.kind === "data" && n.lag != null ? ` · achterstand ${n.lag}` : ""}</div>
-      ${n.status === "ready" ? `<div class="acts"><button class="ghost" data-move="${n.id}">↪ Verhuizen</button><button class="ghost danger" data-remove="${n.id}">✕</button></div>` : ""}
+      <div class="top"><span class="flag">${FLAGS[n.country] || "🖥️"}</span><span class="name">${esc(n.place || n.id)}</span></div>
+      <div class="meta"><span class="dot ${stale ? "stale" : n.status}"></span>${stale ? "onbereikbaar" : STATUS_NL[n.status] || n.status} · ${roleText}<br>
+        ${n.monthly_cost != null ? eur(n.monthly_cost) + " per maand · " : ""}contact ${n.isSelf ? "nu (deze server)" : ago(n.lastContact)}${n.kind === "data" && n.lag ? ` · ${n.lag} wijzigingen achter` : ""}</div>
+      <div class="tech">${esc(n.id)} · ${esc(n.size ?? "")}${n.ipv4 ? " · " + esc(n.ipv4) : ""}</div>
+      ${n.status === "ready" ? `<div class="acts"><button class="ghost" data-move="${n.id}">↪ Verhuizen</button><button class="ghost danger" data-remove="${n.id}">Opheffen</button></div>` : ""}
     </div>`;
   }).join("");
 
-  $("#storeList").innerHTML = c.stores.map((s) => `<div class="store"><span>${FLAGS[s.country] || "🗄️"} <b>${esc(s.name)}</b> · ${s.purpose === "backup" ? "back-up (alleen toevoegen)" : "replica"}</span>
+  $("#storeList").innerHTML = c.stores.map((s) => `<div class="store"><span>${FLAGS[s.country] || "🗄️"} <b>${esc(s.name)}</b> · ${s.purpose === "backup" ? "back-up (onveranderbaar)" : "werkkopie"}</span>
     <span class="${s.uploadedSeq != null && c.lastSeq - s.uploadedSeq > 50 ? "error" : "muted"}">${s.uploadedSeq == null ? "?" : c.lastSeq - s.uploadedSeq === 0 ? "✓ bij" : `${c.lastSeq - s.uploadedSeq} achter`}</span></div>`).join("");
 
   const f = $("#policyForm");
@@ -438,7 +446,9 @@ async function loadCluster() {
     f.elements.autoHeal.checked = !!c.policy.autoHeal;
     for (const k of ["minDataNodes", "witnesses", "autoReplaceAfterMin"]) f.elements[k].value = c.policy[k];
   }
-  $("#jobList").innerHTML = c.jobs.map((j) => `<li class="${j.status === "failed" ? "error" : ""}"><time>${fmtDate(j.created)}</time><b>${esc(j.type)}</b> · ${esc(j.status)}${j.error ? " — " + esc(j.error) : ""}</li>`).join("") || `<li class="muted">Geen jobs</li>`;
+  const JOB = { spawn: "Server aanmaken", move: "Verhuizen", remove: "Server opheffen", sleep: "Laten slapen", drill: "Back-up testen", snapshot: "Back-up maken" };
+  const JST = { pending: "wacht", running: "bezig", done: "klaar", failed: "mislukt" };
+  $("#jobList").innerHTML = c.jobs.map((j) => `<li class="${j.status === "failed" ? "error" : ""}"><time>${fmtDate(j.created)}</time><b>${JOB[j.type] ?? esc(j.type)}</b> · ${JST[j.status] ?? esc(j.status)}${j.error && j.status !== "done" ? " — " + esc(j.error) : ""}</li>`).join("") || `<li class="muted">Niets bezig</li>`;
   $("#eventList").innerHTML = c.events.map((e) => `<li class="${e.level}"><time>${fmtDate(e.ts)}</time>${esc(e.message)}</li>`).join("");
 }
 
@@ -482,4 +492,279 @@ async function initNodes() {
   };
   await loadCluster();
   setInterval(() => { if (!$("#tab-nodes").hidden) loadCluster().catch(() => {}); }, 3000);
+}
+
+
+// ═════════════ GEZONDHEID ═════════════
+const GLYPH = { ok: "✓", warn: "!", fail: "✕", skip: "–" };
+let healthData = null;
+
+async function refreshHealthBanner(fresh = false) {
+  try { healthData = await api("/api/health" + (fresh ? "?fresh=1" : "")); } catch { return; }
+  const { summary } = healthData;
+  const b = $("#healthBanner"), dot = $("#healthDot");
+  const n = summary.fail + summary.warn;
+  dot.hidden = !n;
+  dot.classList.toggle("fail", summary.fail > 0);
+  if (summary.fail) {
+    b.hidden = false;
+    b.className = "health-banner fail";
+    b.innerHTML = `<span>${summary.fail === 1 ? "Er is één probleem" : `Er zijn ${summary.fail} problemen`} met je cloud.</span><a href="#instellingen/gezondheid">Bekijken en oplossen</a>`;
+  } else b.hidden = true;
+  if (!$("#tab-instellingen").hidden) renderHealth();
+}
+
+function renderHealth() {
+  if (!healthData) return;
+  const { checks, summary, checkedAt } = healthData;
+  $("#healthSummary").textContent = summary.fail || summary.warn
+    ? `${summary.ok} in orde, ${summary.warn} let op, ${summary.fail} probleem${summary.fail === 1 ? "" : "en"} · gecontroleerd om ${fmtTime(checkedAt)}`
+    : `Alles in orde · gecontroleerd om ${fmtTime(checkedAt)}`;
+  const groups = ["Mail", "Domein", "Back-up", "Servers", "Meldingen"];
+  const order = { fail: 0, warn: 1, ok: 2, skip: 3 };
+  $("#healthList").innerHTML = groups.map((g) => {
+    const items = checks.filter((c) => c.group === g).sort((a, b) => order[a.status] - order[b.status]);
+    if (!items.length) return "";
+    return `<div><h3>${g}</h3><ul class="checks">${items.map((c) => `
+      <li class="${c.status}"><span class="glyph" aria-label="${c.status}">${GLYPH[c.status]}</span>
+        <span class="title">${esc(c.title)}</span>
+        ${c.fix ? `<span class="act"><button class="ghost" data-fix="${c.fix.action}">${esc(c.fix.label)}</button></span>` : ""}
+        <span class="detail">${esc(c.detail)}</span>
+        ${c.manual ? `<div class="records"><span class="muted"><small>Zet dit record bij je DNS-beheerder:</small></span>${c.manual.map((r, i) => `<div class="rec"><span class="rtype">${r.type}</span><code>${esc(r.name)}</code><code id="rec-${c.id}-${i}">${esc(r.value)}</code><button class="ghost" data-copytext="${esc(r.value)}">Kopiëren</button></div>`).join("")}</div>` : ""}
+      </li>`).join("")}</ul></div>`;
+  }).join("");
+}
+
+// ═════════════ INSTELLINGEN ═════════════
+let settings = null;
+const RELAYS = {
+  none: { hint: "Je server levert mail zelf af. Dat werkt alleen als je aanbieder poort 25 openzet, en na een verhuizing moet het nieuwe IP-adres eerst vertrouwen opbouwen." },
+  scaleway: { host: "smtp.tem.scw.cloud", port: 465, secure: true, hint: "Scaleway Transactional Email (Frankrijk). Gebruikersnaam is je project-ID, wachtwoord een API-sleutel. Controleer de servernaam in je Scaleway-console." },
+  brevo: { host: "smtp-relay.brevo.com", port: 587, secure: false, spf: "include:spf.brevo.com", hint: "Brevo (Frankrijk). Gebruikersnaam en SMTP-sleutel vind je onder SMTP & API." },
+  custom: { hint: "Elke SMTP-relay die je vertrouwt." },
+};
+
+function showSettings(sec) {
+  $$("#settingsNav a").forEach((a) => a.classList.toggle("active", a.dataset.sec === sec));
+  $$(".settings-sec").forEach((s) => (s.hidden = s.dataset.sec !== sec));
+  if (sec === "gezondheid") healthData ? renderHealth() : refreshHealthBanner();
+  if (sec === "tijdmachine") loadTimeMachine();
+  if (sec === "importeren") loadUploads();
+}
+
+function msg(el, text, ok) { el.textContent = text; el.className = "form-msg " + (ok ? "ok" : "err"); }
+
+async function initSettings() {
+  settings = await api("/api/settings");
+  const f = $("#mailForm");
+  f.elements.mailFrom.value = settings.mailFrom;
+  f.elements.alertEmail.value = settings.alertEmail;
+  f.elements.spfExtra.value = settings.spfExtra;
+  const r = settings.relay;
+  const preset = !r ? "none" : r.host === RELAYS.scaleway.host ? "scaleway" : r.host === RELAYS.brevo.host ? "brevo" : "custom";
+  f.elements.preset.value = preset;
+  if (r) { f.elements.host.value = r.host; f.elements.port.value = r.port; f.elements.user.value = r.user; f.elements.secure.checked = r.secure; }
+  const applyPreset = (fill) => {
+    const p = f.elements.preset.value, d = RELAYS[p];
+    $(".relay-fields").hidden = p === "none";
+    $("#relayHint").textContent = d.hint;
+    if (fill && d.host) { f.elements.host.value = d.host; f.elements.port.value = d.port; f.elements.secure.checked = d.secure; if (d.spf) f.elements.spfExtra.value = d.spf; }
+  };
+  applyPreset(false);
+  $("#relayPreset").onchange = () => applyPreset(true);
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const none = f.elements.preset.value === "none";
+    try {
+      await api("/api/settings", { method: "PUT", body: {
+        mailFrom: f.elements.mailFrom.value, alertEmail: f.elements.alertEmail.value, spfExtra: none ? "" : f.elements.spfExtra.value,
+        relay: none ? null : { host: f.elements.host.value, port: Number(f.elements.port.value), user: f.elements.user.value, password: f.elements.password.value || undefined, secure: f.elements.secure.checked },
+      } });
+      f.elements.password.value = "";
+      msg($("#mailMsg"), "Opgeslagen. DNS wordt zo nodig automatisch bijgewerkt.", true);
+      refreshHealthBanner(true);
+    } catch (err) { msg($("#mailMsg"), err.message, false); }
+  };
+  $("#testMail").onclick = async () => {
+    msg($("#mailMsg"), "Versturen…", true);
+    try { const r = await api("/api/settings/test-mail", { method: "POST", body: {} }); msg($("#mailMsg"), `Testbericht verstuurd naar ${r.to}. Kijk of het aankomt (ook in je spammap).`, true); }
+    catch (err) { msg($("#mailMsg"), err.message, false); }
+  };
+
+  $("#pwForm").onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api("/api/settings/password", { method: "POST", body: { current: e.target.elements.current.value, next: e.target.elements.next.value } }); e.target.reset(); msg($("#pwMsg"), "Wachtwoord gewijzigd.", true); }
+    catch (err) { msg($("#pwMsg"), err.message, false); }
+  };
+
+  if (settings.icalUrl) {
+    $("#icalUrl").value = settings.icalUrl;
+    $("#icalQr").innerHTML = await (await fetch("/api/settings/ical-qr")).text();
+  } else $("#icalUrl").value = "Niet beschikbaar (geen agenda-token ingesteld)";
+
+  $("#healthRefresh").onclick = async () => { $("#healthRefresh").disabled = true; await refreshHealthBanner(true); $("#healthRefresh").disabled = false; };
+  $("#healthList").onclick = async (e) => {
+    const fix = e.target.closest("[data-fix]")?.dataset.fix;
+    const copy = e.target.closest("[data-copytext]");
+    if (copy) { navigator.clipboard?.writeText(copy.dataset.copytext); copy.textContent = "Gekopieerd"; return; }
+    if (!fix) return;
+    e.target.disabled = true; e.target.textContent = "Bezig…";
+    try { const r = await api("/api/health/fix", { method: "POST", body: { action: fix } }); e.target.textContent = "✓"; $("#healthSummary").textContent = r.message; setTimeout(() => refreshHealthBanner(true), 1500); }
+    catch (err) { e.target.textContent = "Opnieuw"; e.target.disabled = false; alert(err.message); }
+  };
+  document.addEventListener("click", (e) => {
+    const id = e.target.closest("[data-copy]")?.dataset.copy;
+    if (id) { navigator.clipboard?.writeText($("#" + id).value); e.target.textContent = "Gekopieerd"; }
+  });
+  initImport();
+}
+
+// ═════════════ IMPORTEREN ═════════════
+const CHUNK = 8 * 1024 * 1024;
+const pending = new Map(); // naam|grootte → File
+const fmtSize = (b) => b > 1e9 ? (b / 1e9).toFixed(1) + " GB" : b > 1e6 ? Math.round(b / 1e6) + " MB" : Math.max(1, Math.round(b / 1e3)) + " kB";
+let importTimer = null;
+
+async function loadUploads() {
+  const ups = await api("/api/import/uploads");
+  for (const f of pending.values()) if (!ups.some((u) => u.name === f.name && u.size === f.size)) ups.push({ name: f.name, size: f.size, received: 0, local: true });
+  $("#uploadList").innerHTML = ups.map((u) => {
+    const pct = Math.floor((u.received / u.size) * 100);
+    const waiting = u.received < u.size && !pending.has(u.name + "|" + u.size);
+    return `<li><span>${esc(u.name)}</span><span class="size">${fmtSize(u.size)}</span><span class="muted">${u.received >= u.size ? "klaar" : waiting ? "onderbroken — kies het bestand opnieuw" : pct + "%"}</span><span class="bar"><i style="width:${pct}%"></i></span></li>`;
+  }).join("");
+  $("#startImport").disabled = !ups.length || ups.some((u) => u.received < u.size);
+  const st = await api("/api/import/status");
+  if (st.progress) renderImport(st);
+}
+
+async function uploadFile(file) {
+  const key = file.name + "|" + file.size;
+  pending.set(key, file);
+  let meta = await api("/api/import/uploads", { method: "POST", body: { name: file.name, size: file.size } });
+  let offset = meta.received;
+  while (offset < file.size) {
+    const blob = file.slice(offset, offset + CHUNK);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const r = await fetch(`/api/import/uploads/${meta.id}?offset=${offset}`, { method: "PUT", headers: { "content-type": "application/octet-stream" }, body: blob });
+        const j = await r.json();
+        if (r.status === 409) { offset = j.received; break; }
+        if (!r.ok) throw new Error(j.error);
+        offset = j.received;
+        break;
+      } catch (e) {
+        if (attempt >= 5) throw e;
+        await new Promise((res) => setTimeout(res, 1000 * 2 ** attempt));
+      }
+    }
+    const li = [...$$("#uploadList li")].find((x) => x.firstElementChild.textContent === file.name);
+    if (li) { li.querySelector(".bar i").style.width = Math.floor((offset / file.size) * 100) + "%"; li.children[2].textContent = Math.floor((offset / file.size) * 100) + "%"; }
+  }
+  pending.delete(key);
+}
+
+function initImport() {
+  const dz = $("#dropzone");
+  const take = async (files) => {
+    const list = [...files].filter((f) => /\.(zip|mbox|ics)$/i.test(f.name));
+    if (!list.length) return alert("Kies .zip-bestanden van Google Takeout (of .mbox / .ics).");
+    for (const f of list) pending.set(f.name + "|" + f.size, f);
+    await loadUploads();
+    for (const f of list) { try { await uploadFile(f); } catch (e) { alert(`${f.name}: ${e.message}`); } }
+    loadUploads();
+  };
+  $("#takeoutInput").onchange = (e) => take(e.target.files);
+  dz.addEventListener("dragover", (e) => { e.preventDefault(); dz.classList.add("over"); });
+  dz.addEventListener("dragleave", () => dz.classList.remove("over"));
+  dz.addEventListener("drop", (e) => { e.preventDefault(); dz.classList.remove("over"); take(e.dataTransfer.files); });
+  $("#startImport").onclick = async () => {
+    try { await api("/api/import/start", { method: "POST", body: {} }); pollImport(); }
+    catch (e) { alert(e.message); }
+  };
+}
+
+function pollImport() {
+  clearInterval(importTimer);
+  const tick = async () => {
+    const st = await api("/api/import/status");
+    renderImport(st);
+    if (!st.running) { clearInterval(importTimer); loadUploads(); }
+  };
+  importTimer = setInterval(tick, 1500);
+  tick();
+}
+
+function renderImport(st) {
+  const p = st.progress, el = $("#importProgress");
+  if (!p) return;
+  el.hidden = false;
+  const phase = st.error ? `Gestopt: ${st.error}` : st.running ? `Bezig met ${p.phase}${p.file ? ` — ${p.file}` : ""}…` : "Klaar met importeren";
+  el.innerHTML = `<div class="phase">${esc(phase)}</div>
+    <div class="counters"><div><b>${p.mail.added}</b>mails${p.mail.skipped ? ` · ${p.mail.skipped} al aanwezig` : ""}</div>
+    <div><b>${p.calendar.added + p.calendar.updated}</b>afspraken in ${p.calendar.calendars} agenda${p.calendar.calendars === 1 ? "" : "'s"}</div>
+    <div><b>${p.photos.added}</b>foto's en video's${p.photos.duplicates ? ` · ${p.photos.duplicates} al aanwezig` : ""}</div></div>
+    ${p.log.length ? `<ul>${p.log.slice(-8).map((l) => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}`;
+  if (st.running && !importTimer) pollImport();
+}
+
+// ═════════════ TIJDMACHINE ═════════════
+let tmPreview = null;
+const toInput = (ms) => new Date(ms - new Date(ms).getTimezoneOffset() * 60000).toISOString().slice(0, 19);
+
+async function loadTimeMachine() {
+  const info = await api("/api/timemachine");
+  const body = $("#tmBody");
+  if (!info.available) { body.innerHTML = `<p class="empty-note">${esc(info.reason)}</p>`; return; }
+  const def = Date.now() - 864e5;
+  body.innerHTML = `
+    <form class="tm-pick" id="tmForm">
+      <label>Hoe zag het eruit op<input type="datetime-local" name="at" step="1" min="${toInput(info.oldest)}" max="${toInput(Date.now())}" value="${toInput(Math.max(def, info.oldest))}" required></label>
+      <button class="primary">Bekijken</button>
+    </form>
+    <div class="chips"><button data-ago="3600000">1 uur geleden</button><button data-ago="86400000">Gisteren</button><button data-ago="604800000">Vorige week</button><button data-ago="2592000000">Vorige maand</button></div>
+    <p class="muted"><small>Terug tot ${fmtFull(info.oldest)}.</small></p>
+    <div id="tmResult" class="tm-result"></div>`;
+  const f = $("#tmForm");
+  $(".chips", body).onclick = (e) => { const ago = e.target.dataset.ago; if (ago) { f.elements.at.value = toInput(Math.max(info.oldest, Date.now() - Number(ago))); f.requestSubmit(); } };
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const out = $("#tmResult");
+    out.innerHTML = `<p class="muted">Back-up van dat moment wordt opgehaald en vergeleken…</p>`;
+    try {
+      tmPreview = await api("/api/timemachine/preview", { method: "POST", body: { at: new Date(f.elements.at.value).getTime() } });
+      renderTm();
+    } catch (err) { out.innerHTML = `<p class="form-msg err">${esc(err.message)}</p>`; }
+  };
+}
+
+function renderTm() {
+  const { items, counts, at, id } = tmPreview;
+  const total = counts.messages + counts.events + counts.photos;
+  const out = $("#tmResult");
+  if (!total) { out.innerHTML = `<p class="empty-note">Op ${fmtFull(at)} was alles hetzelfde als nu. Er is niets terug te halen.</p>`; return; }
+  out.innerHTML = `<p>Op <b>${fmtFull(at)}</b> was er dit dat nu ontbreekt of anders is. Kies wat je terug wilt.</p>
+    ${items.messages.length ? `<div class="tm-group"><h3>Mails <button type="button" class="ghost" data-all="m">alles</button></h3><ul class="tm-items">${items.messages.map((m) => `<li><label><input type="checkbox" data-m="${m.id}"><span><b>${esc(m.subject)}</b><br><small class="muted">${esc(m.from_name || m.from_addr)} · ${fmtDate(m.date)}</small></span><span class="why">${m.reason}</span></label></li>`).join("")}</ul></div>` : ""}
+    ${items.events.length ? `<div class="tm-group"><h3>Afspraken <button type="button" class="ghost" data-all="e">alles</button></h3><ul class="tm-items">${items.events.map((e) => `<li><label><input type="checkbox" data-e="${esc(e.uid)}"><span><b>${esc(e.title)}</b><br><small class="muted">${e.all_day ? new Date(e.start).toLocaleDateString("nl-NL", { dateStyle: "medium" }) : fmtFull(e.start)}</small></span><span class="why">${e.reason}</span></label></li>`).join("")}</ul></div>` : ""}
+    ${items.photos.length ? `<div class="tm-group"><h3>Foto's <button type="button" class="ghost" data-all="p">alles</button></h3><div class="tm-photos">${items.photos.map((p) => `<label title="${esc(p.filename)} · ${p.reason}"><input type="checkbox" data-p="${p.id}">${p.has_thumb ? `<img loading="lazy" src="/api/timemachine/${id}/photos/${p.id}/thumb" alt="">` : `<small>${esc(p.filename)}</small>`}</label>`).join("")}</div></div>` : ""}
+    <div class="tm-actions"><button class="primary" id="tmRestore" disabled>Terugzetten</button><span class="muted" id="tmCount"></span></div>`;
+  const update = () => {
+    const n = $$("input[type=checkbox]:checked", out).length;
+    $("#tmRestore").disabled = !n;
+    $("#tmRestore").textContent = n ? `${n} terugzetten` : "Terugzetten";
+  };
+  out.onchange = update;
+  out.onclick = async (e) => {
+    const all = e.target.dataset.all;
+    if (all) { const boxes = $$(`[data-${all}]`, out).filter((x) => x.tagName === "INPUT"); const on = boxes.some((b) => !b.checked); boxes.forEach((b) => (b.checked = on)); update(); }
+    if (e.target.id === "tmRestore") {
+      e.target.disabled = true; e.target.textContent = "Bezig…";
+      const pick = (k) => $$(`input[data-${k}]:checked`, out).map((x) => x.dataset[k]);
+      try {
+        const r = await api("/api/timemachine/restore", { method: "POST", body: { id, messages: pick("m").map(Number), events: pick("e"), photos: pick("p").map(Number) } });
+        const { messages, events, photos } = r.restored;
+        out.innerHTML = `<p class="form-msg ok">Teruggezet: ${messages} mail${messages === 1 ? "" : "s"}, ${events} afspra${events === 1 ? "ak" : "ken"} en ${photos} foto${photos === 1 ? "" : "'s"}.</p>`;
+      } catch (err) { e.target.disabled = false; e.target.textContent = "Opnieuw proberen"; alert(err.message); }
+    }
+  };
 }
