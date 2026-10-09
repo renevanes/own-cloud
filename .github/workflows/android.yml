@@ -12,7 +12,6 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-    paths: ["android/**", "web-console/**", "web/shared/**", "src/console/catalog.ts", "package.json", ".github/workflows/android.yml"]
   workflow_dispatch: {}
 permissions:
   contents: write
