@@ -14,6 +14,8 @@ Je eigen vervanger voor Gmail, Google Agenda en Google Foto's, op servers die ji
 | **Naast Gmail** | Proefperiode *naast Gmail* (je mail komt nog bij Gmail binnen en wordt elke paar minuten opgehaald) of *Gmail als vangnet* na het overstappen. Instellingen → Gmail. |
 | **Android-app** | Alles van de webapp, plus automatische foto-back-up, je agenda in de agenda-app van je telefoon, meldingen bij nieuwe mail of problemen, *Delen → Eigen Cloud*, en de beheerconsole met vingerafdruk-ontgrendeling. Zonder Google-diensten. Zie [android/README.md](android/README.md). |
 
+> Het eerdere Lovable-project uit deze repository staat bewaard in de branch `archief/lovable`.
+
 Techniek: Node.js 22 + TypeScript, Fastify, SQLite (één bestand, makkelijk te back-uppen), sharp/ffmpeg, Caddy voor automatische HTTPS. Webapp werkt op telefoon en is als app op je startscherm te zetten.
 
 ---

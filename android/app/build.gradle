@@ -17,7 +17,7 @@ android {
         targetSdk 34
         versionCode versionParts[0] * 1000000 + versionParts[1] * 10000 + versionParts[2] * 100 + (ciBuild % 100)
         versionName pkg.version
-        buildConfigField "String", "UPDATE_REPO", "\"${System.getenv("EIGEN_UPDATE_REPO") ?: "renevanes/eigen-cloud"}\""
+        buildConfigField "String", "UPDATE_REPO", "\"${System.getenv("EIGEN_UPDATE_REPO") ?: "renevanes/own-cloud"}\""
     }
 
     buildFeatures { buildConfig true }

@@ -21,7 +21,7 @@ Je sleutels staan in een kluis op de telefoon (PBKDF2 + AES-256-GCM), te ontgren
 
 ## Installeren
 
-Download de nieuwste `eigen-cloud-x.y.z.apk` bij de [Releases](https://github.com/renevanes/eigen-cloud/releases/latest)
+Download de nieuwste `eigen-cloud-x.y.z.apk` bij de [Releases](https://github.com/renevanes/own-cloud/releases/latest)
 op je telefoon en open hem (sta *installeren uit deze bron* toe). Nieuwe versies meldt de app zelf.
 
 Eerste keer: vul het adres van je cloud in (bijv. `vanes.nl` → `https://cloud.vanes.nl`) en log in. Blijf ingelogd:
@@ -31,7 +31,7 @@ de achtergrondtaken gebruiken je inlogsessie (30 dagen geldig, vernieuwd als je 
 ## Bouwen
 
 De APK wordt gebouwd door GitHub Actions (`.github/workflows/android.yml`): eerst de tests van de Java-kern, dan
-`gradle :app:assembleRelease`, ondertekend met jouw sleutel. Bij een tag `v1.2.3` komt hij in een Release.
+`gradle :app:assembleRelease`, ondertekend met jouw sleutel. Elke nieuwe versie in `package.json` op `main` komt als Release online.
 De vier secrets staan bovenaan dat workflow-bestand beschreven.
 
 Zelf bouwen: Android Studio (of JDK 17 + Android SDK 34 + Gradle 8.9) en in deze map `gradle :app:assembleDebug`.

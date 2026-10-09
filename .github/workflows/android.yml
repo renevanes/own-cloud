@@ -1,5 +1,5 @@
-# Android-app: Java-kern testen, APK bouwen en ondertekenen. Bij een tag v* komt de APK in een GitHub Release;
-# de app kijkt daar dagelijks of er een nieuwe versie is.
+# Android-app: Java-kern testen, APK bouwen en ondertekenen. Elke nieuwe versie (package.json) op main krijgt een
+# GitHub Release met de APK; de app kijkt daar dagelijks of er een nieuwe versie is.
 #
 # Eenmalig instellen (Settings → Secrets and variables → Actions):
 #   ANDROID_KEYSTORE_BASE64   base64 van je keystore:  keytool -genkeypair -v -keystore eigen.keystore -alias eigen \
@@ -57,7 +57,13 @@ jobs:
           sha256sum "eigen-cloud-$V.apk" > "eigen-cloud-$V.apk.sha256"
       - uses: actions/upload-artifact@v4
         with: { name: eigen-cloud-apk, path: "eigen-cloud-*.apk*\nandroid/app/build/reports/lint-results-release.html" }
-      - name: Release (alleen bij een versietag)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Release (één per versie uit package.json; alleen vanaf main)
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         env: { GH_TOKEN: "${{ github.token }}" }
-        run: gh release create "$GITHUB_REF_NAME" eigen-cloud-*.apk eigen-cloud-*.apk.sha256 --title "Eigen Cloud $GITHUB_REF_NAME" --generate-notes || gh release upload "$GITHUB_REF_NAME" eigen-cloud-*.apk eigen-cloud-*.apk.sha256 --clobber
+        run: |
+          V=$(node -p 'require("./package.json").version')
+          if gh release view "v$V" >/dev/null 2>&1; then
+            echo "Release v$V bestaat al; verhoog de versie in package.json voor een nieuwe release."
+          else
+            gh release create "v$V" eigen-cloud-*.apk eigen-cloud-*.apk.sha256 --target "$GITHUB_SHA" --title "Eigen Cloud v$V" --generate-notes
+          fi
