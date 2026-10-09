@@ -47,6 +47,10 @@ het risico op wanbetaling, de btw en je eigen tijd.
 - **DNS-proxy.** Het cluster krijgt geen deSEC-token van jouw account. Het krijgt een eigen token dat
   alleen werkt via `https://<dienst>/v1/desec/…` en alleen voor zijn eigen zone (alleen `rrsets`; de zone
   zelf weggooien kan niet). De dienst stuurt het verzoek met zijn eigen deSEC-token door.
+- **Certificaten.** Caddy op de servers kan het proxy-adres niet gebruiken (de deSEC-module heeft desec.io
+  vast ingebouwd). Daarom spreekt de dienst ook het acme-dns-protocol: `POST /v1/acme-dns/update` met het
+  ordernummer en het DNS-token. Dat kan alleen het TXT-record `_acme.<domein>` zetten (de laatste twee
+  waarden); `_acme-challenge.cloud` en `_acme-challenge.mail` wijzen daar met een CNAME naartoe.
 - **Geheimen versleuteld opgeslagen.** De Scaleway-sleutel, het DNS-token, het pakket, de houdergegevens
   en een verhuiscode staan met AES-256-GCM versleuteld in de database. De sleutel staat in `BROKER_SECRET`
   of anders in `<datamap>/geheim.key` (alleen leesbaar voor de eigenaar). Inlogcodes en sessietokens

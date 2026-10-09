@@ -35,6 +35,8 @@ export interface ObjectStore {
   delete(key: string): Promise<void>;
   /** Tijdelijke download-URL zonder inloggegevens (voor het opstarten van nieuwe nodes). */
   presignGet(key: string, seconds: number): string;
+  /** Tijdelijke upload-URL (PUT), of null als deze opslag dat niet kan. */
+  presignPut?(key: string, seconds: number): string | null;
 }
 
 async function toBuffer(r: Readable): Promise<Buffer> {
@@ -101,6 +103,10 @@ export class FsStore implements ObjectStore {
     fs.rmSync(this.p(key), { force: true });
   }
   presignGet(key: string) {
+    return "file://" + this.p(key);
+  }
+  presignPut(key: string) {
+    fs.mkdirSync(path.dirname(this.p(key)), { recursive: true });
     return "file://" + this.p(key);
   }
 }
@@ -239,7 +245,9 @@ export class S3Store implements ObjectStore {
   }
 
   /** Presigned GET (query-variant van SigV4). */
-  presignGet(key: string, seconds: number, now = new Date()) {
+  presignPut(key: string, seconds: number, now = new Date()) { return this.presign("PUT", key, seconds, now); }
+  presignGet(key: string, seconds: number, now = new Date()) { return this.presign("GET", key, seconds, now); }
+  private presign(method: "GET" | "PUT", key: string, seconds: number, now: Date) {
     const amzDate = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
     const { k, scope } = this.signingKey(amzDate.slice(0, 8));
     const q = {
@@ -250,7 +258,7 @@ export class S3Store implements ObjectStore {
       "X-Amz-SignedHeaders": "host",
     };
     const u = this.url(key, q);
-    const canon = ["GET", u.path, u.qs, `host:${u.host}\n`, "host", "UNSIGNED-PAYLOAD"].join("\n");
+    const canon = [method, u.path, u.qs, `host:${u.host}\n`, "host", "UNSIGNED-PAYLOAD"].join("\n");
     const sts = ["AWS4-HMAC-SHA256", amzDate, scope, sha256hex(canon)].join("\n");
     return `${u.href}&X-Amz-Signature=${crypto.createHmac("sha256", k).update(sts).digest("hex")}`;
   }

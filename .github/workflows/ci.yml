@@ -132,6 +132,8 @@ jobs:
         with:
           context: .
           push: true
+          build-args: EIGEN_VERSION=${{ needs.apk.outputs.version }}
+          labels: org.opencontainers.image.version=${{ needs.apk.outputs.version }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/eigen-cloud:latest
             ghcr.io/${{ github.repository_owner }}/eigen-cloud:${{ github.sha }}
@@ -140,5 +142,6 @@ jobs:
           context: .
           file: Dockerfile.caddy
           push: true
+          labels: org.opencontainers.image.version=${{ needs.apk.outputs.version }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/eigen-caddy:latest

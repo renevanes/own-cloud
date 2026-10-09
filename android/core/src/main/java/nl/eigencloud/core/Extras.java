@@ -242,7 +242,9 @@ public final class Extras {
         Map<String, Object> con = console(c);
         con.put("preset", "dienst");
         Map<String, Object> dns = Json.map(kit, "dns");
-        c.put("dns", Json.list(Json.obj("type", "desec", "name", "dienst", "token", dns.get("token"), "zone", dns.get("zone"), "api", dns.get("api"))));
+        Map<String, Object> d0 = Json.obj("type", "desec", "name", "dienst", "token", dns.get("token"), "zone", dns.get("zone"), "api", dns.get("api"));
+        if (dns.get("acme") != null) d0.put("acme", Json.copy(dns.get("acme")));
+        c.put("dns", Json.list(d0));
         con.put("dnsMode", "dienst");
         con.put("nameservers", Json.copy(Json.listAt(kit, "nameservers")));
         Map<String, Object> m = Json.map(kit, "mailRelay");

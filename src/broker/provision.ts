@@ -31,7 +31,7 @@ export interface Kit {
   storage: { offer: "scaleway"; region: string; accessKey: string; secretKey: string; purpose: "replica" | "backup" }[];
   placement: { provider: string; region: string; size: string; country: string; kind: "data" | "witness" }[];
   policy: { minDataNodes: number; witnesses: number };
-  dns: { type: "desec"; name: string; token: string; zone: string; api: string };
+  dns: { type: "desec"; name: string; token: string; zone: string; api: string; acme: { username: string; password: string; subdomain: string; server_url: string } };
   mailRelay: { host: string; port: number; user: string; password: string; secure: boolean } | null;
   spfExtra: string;
 }
@@ -259,6 +259,9 @@ const STEPS: [string, StepFn][] = [
   }],
 
   ["dns-token", async (ctx, o) => {
+    // Certificaten (Let's Encrypt, DNS-01) gaan via ons acme-dns-adres: de uitdagingen voor cloud. en mail.
+    // wijzen naar _acme.<domein>; alleen dat ene TXT-record kan de server via ons bijwerken.
+    await ctx.apis.desec.putRrsets(o.domain, ["cloud", "mail"].map((h) => ({ subname: `_acme-challenge.${h}`, type: "CNAME", ttl: 3600, records: [`_acme.${o.domain}.`] })));
     const s = readSecrets(ctx, o);
     if (s.dnsToken && o.dns_token_hash === sha256(s.dnsToken)) return undefined;
     const token = crypto.randomBytes(32).toString("hex");
@@ -302,7 +305,10 @@ export function saveKit(ctx: Ctx, orderId: string): Kit {
     storage: b.storage.map((x) => ({ offer: "scaleway" as const, region: x.region, accessKey: s.apiKey!.accessKey, secretKey: s.apiKey!.secretKey, purpose: x.purpose })),
     placement: b.placement.map((p) => ({ provider: p.provider, region: p.region, size: p.size, country: p.country, kind: p.kind })),
     policy: { minDataNodes: b.includes.dataServers, witnesses: b.includes.witnesses },
-    dns: { type: "desec", name: "dienst", token: s.dnsToken, zone: o.domain, api: `${ctx.cfg.publicUrl}/v1/desec` },
+    dns: {
+      type: "desec", name: "dienst", token: s.dnsToken, zone: o.domain, api: `${ctx.cfg.publicUrl}/v1/desec`,
+      acme: { username: o.id, password: s.dnsToken, subdomain: "_acme", server_url: `${ctx.cfg.publicUrl}/v1/acme-dns` },
+    },
     mailRelay: b.includes.mail ? { host: "smtp.tem.scaleway.com", port: 587, user: st.projectId, password: s.apiKey.secretKey, secure: false } : null,
     spfExtra: st.spfExtra ?? "",
   };

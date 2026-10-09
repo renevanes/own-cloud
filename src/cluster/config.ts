@@ -44,6 +44,8 @@ export interface DnsConfig {
   file?: string; // type file: voor tests
   /** deSEC: andere basis-URL (bijv. de DNS-proxy van de Eigen Cloud Dienst); standaard https://desec.io/api/v1 */
   api?: string;
+  /** acme-dns-account voor certificaten (bij de Eigen Cloud Dienst; Caddy-module acmedns). */
+  acme?: { username: string; password: string; subdomain: string; server_url: string };
 }
 
 export interface ClusterConfig {

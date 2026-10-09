@@ -433,7 +433,7 @@ async function loadCluster() {
       <div class="top"><span class="flag">${FLAGS[n.country] || "🖥️"}</span><span class="name">${esc(n.place || n.id)}</span></div>
       <div class="meta"><span class="dot ${stale ? "stale" : n.status}"></span>${stale ? "onbereikbaar" : STATUS_NL[n.status] || n.status} · ${roleText}<br>
         ${n.monthly_cost != null ? eur(n.monthly_cost) + " per maand · " : ""}contact ${n.isSelf ? "nu (deze server)" : ago(n.lastContact)}${n.kind === "data" && n.lag ? ` · ${n.lag} wijzigingen achter` : ""}</div>
-      <div class="tech">${esc(n.id)} · ${esc(n.size ?? "")}${n.ipv4 ? " · " + esc(n.ipv4) : ""}</div>
+      <div class="tech">${esc(n.id)} · ${esc(n.size ?? "")}${n.ipv4 ? " · " + esc(n.ipv4) : ""}${c.update?.nodes?.[n.id]?.version ? " · versie " + esc(c.update.nodes[n.id].version) : ""}</div>
       ${n.status === "ready" ? `<div class="acts"><button class="ghost" data-move="${n.id}">↪ Verhuizen</button><button class="ghost danger" data-remove="${n.id}">Opheffen</button></div>` : ""}
     </div>`;
   }).join("");
@@ -446,10 +446,30 @@ async function loadCluster() {
     f.elements.autoHeal.checked = !!c.policy.autoHeal;
     for (const k of ["minDataNodes", "witnesses", "autoReplaceAfterMin"]) f.elements[k].value = c.policy[k];
   }
-  const JOB = { spawn: "Server aanmaken", move: "Verhuizen", remove: "Server opheffen", sleep: "Laten slapen", drill: "Back-up testen", snapshot: "Back-up maken" };
+  renderUpdate(c.update);
+  const JOB = { update: "Bijwerken", spawn: "Server aanmaken", move: "Verhuizen", remove: "Server opheffen", sleep: "Laten slapen", drill: "Back-up testen", snapshot: "Back-up maken" };
   const JST = { pending: "wacht", running: "bezig", done: "klaar", failed: "mislukt" };
   $("#jobList").innerHTML = c.jobs.map((j) => `<li class="${j.status === "failed" ? "error" : ""}"><time>${fmtDate(j.created)}</time><b>${JOB[j.type] ?? esc(j.type)}</b> · ${JST[j.status] ?? esc(j.status)}${j.error && j.status !== "done" ? " — " + esc(j.error) : ""}</li>`).join("") || `<li class="muted">Niets bezig</li>`;
   $("#eventList").innerHTML = c.events.map((e) => `<li class="${e.level}"><time>${fmtDate(e.ts)}</time>${esc(e.message)}</li>`).join("");
+}
+
+function renderUpdate(u) {
+  if (!u) return;
+  const versions = [...new Set(Object.values(u.nodes).map((n) => n.version).filter(Boolean))];
+  const line = u.running ? `Bezig met bijwerken naar <b>${esc(u.latest?.version ?? "")}</b>${u.running.current ? ` — nu ${esc(u.running.current)}` : ""}`
+    : u.failed ? `<span class="error">Versie ${esc(u.failed.version)} kwam op ${esc(u.failed.node)} niet goed op (${esc(u.failed.error)}).</span> De update is gestopt; je servers draaien gewoon door op de vorige versie.`
+    : u.available ? `Versie <b>${esc(u.available)}</b> is beschikbaar${u.mode === "auto" ? ` en wordt tussen ${u.window[0]}:00 en ${u.window[1]}:00 geïnstalleerd` : ""}.`
+    : `Alle servers draaien de nieuwste versie${versions.length === 1 ? ` (${esc(versions[0])})` : ""}.`;
+  const legacy = Object.entries(u.nodes).filter(([, n]) => n.updater === false).map(([id]) => id);
+  $("#updateBox").innerHTML = `<p>${line}</p>${u.checkError && u.mode !== "uit" ? `<p class="muted"><small>Laatste controle mislukt: ${esc(u.checkError)}</small></p>` : ""}
+    ${legacy.length ? `<p class="muted"><small>${legacy.map(esc).join(", ")} ${legacy.length === 1 ? "is" : "zijn"} van vóór het bijwerken op de plek zelf; ${legacy.length === 1 ? "die wordt" : "die worden"} bij een update vervangen door een nieuwe server.</small></p>` : ""}`;
+  const f = $("#updateForm");
+  if (document.activeElement?.form !== f) {
+    f.elements.mode.value = u.mode;
+    f.elements.window.value = u.window.join("-");
+  }
+  $(".win", f).hidden = f.elements.mode.value !== "auto";
+  $("#updateNow").hidden = !(u.available && !u.running);
 }
 
 function choosePlacement(title, kind) {
@@ -483,6 +503,25 @@ async function initNodes() {
     const mv = e.target.closest("[data-move]")?.dataset.move, rm = e.target.closest("[data-remove]")?.dataset.remove;
     if (mv) { const n = cluster.nodes.find((x) => x.id === mv); const p = await choosePlacement(`${mv} verhuizen naar…`, n.kind); if (p) startJob("move", { nodeId: mv, ...(p === "auto" ? {} : { to: p }) }); }
     if (rm && confirm(`${rm} verwijderen? Het beleid maakt eventueel automatisch een vervanger.`)) startJob("remove", { nodeId: rm });
+  };
+  const umsg = (t, ok) => { $("#updateMsg").textContent = t; $("#updateMsg").className = "form-msg " + (ok ? "ok" : "error"); };
+  $("#updateForm").onchange = () => { $("#updateForm .win").hidden = $("#updateForm").elements.mode.value !== "auto"; };
+  $("#updateForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try { await api("/api/cluster/update", { method: "POST", body: { mode: f.elements.mode.value, window: f.elements.window.value || "3-5" } }); umsg("Opgeslagen.", true); loadCluster(); }
+    catch (err) { umsg(err.message, false); }
+  };
+  $("#updateCheck").onclick = async (e) => {
+    e.target.disabled = true;
+    try { const r = await api("/api/cluster/update", { method: "POST", body: { check: true } }); umsg(r.update.available ? `Versie ${r.update.available} is beschikbaar.` : r.update.checkError ? `Kijken mislukt: ${r.update.checkError}` : "Je hebt de nieuwste versie.", !r.update.checkError); loadCluster(); }
+    catch (err) { umsg(err.message, false); } finally { e.target.disabled = false; }
+  };
+  $("#updateNow").onclick = async (e) => {
+    if (!confirm("Je servers nu bijwerken?\n\nEén server tegelijk; je cloud blijft gewoon werken. Een server die niet gezond terugkomt, zet zichzelf terug.")) return;
+    e.target.disabled = true;
+    try { await api("/api/cluster/update", { method: "POST", body: { now: true } }); umsg("Bijwerken gestart.", true); loadCluster(); }
+    catch (err) { umsg(err.message, false); } finally { e.target.disabled = false; }
   };
   $("#policyForm").onsubmit = async (e) => {
     e.preventDefault();

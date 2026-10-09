@@ -4,6 +4,7 @@ import { lastSeq } from "./changelog.js";
 import { choosePlacement, createJob, type JobType } from "./jobs.js";
 import type { ClusterService } from "./service.js";
 import { place } from "./places.js";
+import * as updates from "./updates.js";
 
 let svc: ClusterService | null = null;
 export function setClusterService(s: ClusterService) {
@@ -51,6 +52,7 @@ export function clusterRoutes(app: FastifyInstance) {
       monthlyCost: nodes.filter((n) => n.status !== "removed" && n.status !== "failed").reduce((a, n) => a + (n.monthly_cost ?? 0), 0),
       nodes,
       jobs: db.prepare("SELECT id, type, params, status, error, created, updated FROM cluster_jobs ORDER BY created DESC LIMIT 20").all(),
+      update: updates.updateSummary(svc),
       events: db.prepare("SELECT ts, level, kind, message FROM cluster_events WHERE kind != 'job' ORDER BY id DESC LIMIT 60").all(),
     };
   });
@@ -81,5 +83,29 @@ export function clusterRoutes(app: FastifyInstance) {
     for (const k of allowed) if (k in req.body) cur[k] = req.body[k];
     svc.db.prepare("INSERT INTO settings (key, value) VALUES ('cluster_policy', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(cur));
     return { ok: true, policy: svc.policy() };
+  });
+
+  /** Updates: instelling wijzigen (automatisch/melden/uit, venster), nu kijken, of nu bijwerken. */
+  app.post<{ Body: { mode?: string; window?: string; check?: boolean; now?: boolean } }>("/api/cluster/update", async (req, reply) => {
+    if (!svc?.db) return reply.code(400).send({ error: "Geen cluster" });
+    const b = req.body ?? {};
+    const set = (k: string, v: string) => svc!.db!.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(k, v);
+    if (b.mode !== undefined) {
+      if (!["auto", "melden", "uit"].includes(b.mode)) return reply.code(400).send({ error: "Kies automatisch, melden of uit" });
+      set("update_mode", b.mode);
+    }
+    if (b.window !== undefined) {
+      if (!/^\d{1,2}-\d{1,2}$/.test(b.window) || b.window.split("-").some((x) => Number(x) > 24)) return reply.code(400).send({ error: "Geef het venster als uren, bijvoorbeeld 3-5" });
+      set("update_window", b.window);
+    }
+    if (b.check || b.now) await updates.checkForUpdates(svc, { force: true });
+    if (b.now) {
+      if (updates.openUpdateJob(svc)) return reply.code(409).send({ error: "Er loopt al een update" });
+      const rel = updates.updateAvailable(svc);
+      if (!rel) return reply.code(400).send({ error: svc.getSetting("release_error") || "Je servers draaien al de nieuwste versie" });
+      set("update_failed", "");
+      createJob(svc, "update", { version: rel.version, image: rel.image, caddyImage: rel.caddyImage ?? null });
+    }
+    return { ok: true, update: updates.updateSummary(svc) };
   });
 }

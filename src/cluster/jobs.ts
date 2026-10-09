@@ -11,13 +11,14 @@ import { isNotLeader } from "./fence.js";
 import type { Placement } from "./config.js";
 import { place, role } from "./places.js";
 import type { ClusterService, NodeRow } from "./service.js";
+import { updateStep, updateTarget, imageTar } from "./updates.js";
 
 /**
  * Duurzame jobs: staan in de (gerepliceerde) database, dus als de leider wegvalt of verhuist,
  * pakt de volgende leider ze op. Elke stap is idempotent en slaat zijn voortgang op vóór de volgende stap.
  */
 
-export type JobType = "spawn" | "remove" | "move" | "sleep" | "drill" | "snapshot";
+export type JobType = "spawn" | "remove" | "move" | "sleep" | "drill" | "snapshot" | "update";
 
 interface Job {
   id: string; type: JobType; params: string; state: string; status: string; after: string | null;
@@ -103,6 +104,21 @@ export function choosePlacement(svc: ClusterService, kind: "data" | "witness", a
   return [...options].sort((a, b) => score(b) - score(a))[0];
 }
 
+/**
+ * Welke versie een nieuwe server krijgt. Na een update: precies die versie — uit je eigen opslag als daar een kopie
+ * van staat, anders vast (image@sha256) uit de registry. Daarvoor: wat er in je opslag staat, anders :latest.
+ */
+async function imageSource(svc: ClusterService, store: import("./stores.js").ObjectStore) {
+  const target = updateTarget(svc);
+  if (!target) return imageUrls(store);
+  const tar = imageTar(svc);
+  if (tar?.version === target.version) {
+    const urls = await imageUrls(store);
+    if (urls.imageUrl) return { ...urls, appImage: `eigen-cloud:${tar.version}`, caddyImage: urls.caddyUrl ? `eigen-caddy:${tar.version}` : target.caddyImage ?? undefined };
+  }
+  return { appImage: target.image, caddyImage: target.caddyImage ?? undefined };
+}
+
 // ───────── Stappen ─────────
 
 const STEPS: Record<JobType, Step> = {
@@ -128,7 +144,7 @@ const STEPS: Record<JobType, Step> = {
       const prov = svc.provider(p.provider);
       const info = await prov.create({
         cluster: svc.cfg.cluster, nodeId: n.id, kind: p.kind, region: p.region, size: p.size,
-        userData: userData(svc.cfg, { nodeId: n.id, kind: p.kind, bootstrapUrl: store.presignGet(key, 7200), joinToken: s.token, ...(await imageUrls(store)) }),
+        userData: userData(svc.cfg, { nodeId: n.id, kind: p.kind, bootstrapUrl: store.presignGet(key, 7200), joinToken: s.token, ...(await imageSource(svc, store)) }),
       });
       updateNode(svc, n.id, {
         server_id: info.serverId, ipv4: info.ipv4 ?? null, ipv6: info.ipv6 ?? null, country: info.country ?? p.country ?? prov.country(p.region),
@@ -324,6 +340,8 @@ const STEPS: Record<JobType, Step> = {
     await svc.snapshot();
     return { done: true };
   },
+
+  update: (svc, p, s) => updateStep(svc, p, s),
 };
 
 // ───────── Zelfherstel ─────────
@@ -336,6 +354,12 @@ export async function autoHeal(svc: ClusterService) {
   let openJobs = loadOpen();
   if (openJobs.some((j) => j.type === "sleep")) return;
   const busyNodes = new Set(openJobs.filter((j) => j.type === "move" || j.type === "remove").map((j) => JSON.parse(j.params).nodeId as string));
+  // Een server die net wordt bijgewerkt, is even weg: niet vervangen (maar hij telt gewoon mee).
+  const updating = new Set<string>();
+  for (const u of db.prepare("SELECT state FROM cluster_jobs WHERE type = 'update' AND status IN ('pending','running')").all() as { state: string }[]) {
+    const cur = JSON.parse(u.state).current;
+    if (cur) updating.add(cur);
+  }
   const kindOf = (j: { type: string; params: string }) => {
     const p = JSON.parse(j.params);
     return (p.kind ?? (p.nodeId ? svc.db!.prepare("SELECT kind FROM nodes WHERE id = ?").pluck().get(p.nodeId) : undefined)) as string | undefined;
@@ -344,7 +368,7 @@ export async function autoHeal(svc: ClusterService) {
   // 1. Onbereikbare nodes vervangen.
   const since = svc.raft.status().leaderSince ?? Date.now();
   for (const n of svc.nodes("status = 'ready'")) {
-    if (n.id === svc.self.id || busyNodes.has(n.id)) continue;
+    if (n.id === svc.self.id || busyNodes.has(n.id) || updating.has(n.id)) continue;
     const last = Math.max(svc.raft.peers.get(n.id)?.lastContact ?? 0, since);
     if (Date.now() - last > pol.autoReplaceAfterMin * 60_000) {
       const to = choosePlacement(svc, n.kind, { provider: n.provider, region: n.region });

@@ -162,7 +162,7 @@ interface Kit {
   storage: { offer: string; region: string; accessKey: string; secretKey: string; purpose: "replica" | "backup" }[];
   placement: Placement[];
   policy: { minDataNodes: number; witnesses: number };
-  dns: { type: "desec"; name: string; token: string; zone: string; api: string };
+  dns: { type: "desec"; name: string; token: string; zone: string; api: string; acme?: { username: string; password: string; subdomain: string; server_url: string } };
   mailRelay: { host: string; port: number; user: string; password: string; secure: boolean } | null;
   spfExtra: string;
 }
@@ -185,7 +185,7 @@ export async function dienstApply(c: AdminConfig, addStore: (b: { offer: string;
   }
   c.policy = { ...DEFAULT_POLICY, ...c.policy, placement: kit.placement, minDataNodes: kit.policy.minDataNodes, witnesses: kit.policy.witnesses };
   c.console.preset = "dienst";
-  c.dns = [{ type: "desec", name: "dienst", token: kit.dns.token, zone: kit.dns.zone, api: kit.dns.api }];
+  c.dns = [{ type: "desec", name: "dienst", token: kit.dns.token, zone: kit.dns.zone, api: kit.dns.api, ...(kit.dns.acme ? { acme: kit.dns.acme } : {}) }];
   c.console.dnsMode = "dienst";
   c.console.nameservers = kit.nameservers;
   if (kit.mailRelay) {

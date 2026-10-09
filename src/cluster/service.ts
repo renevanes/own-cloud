@@ -25,6 +25,8 @@ import { isNotLeader } from "./fence.js";
 import * as health from "../health.js";
 import { place, role } from "./places.js";
 import { gmailHooks, kickGmail } from "../gmail/sync.js";
+import { VERSION } from "../version.js";
+import * as updates from "./updates.js";
 
 export interface NodeRow {
   id: string; name: string | null; kind: "data" | "witness"; provider: string; region: string | null; country: string | null; size: string | null;
@@ -138,12 +140,16 @@ export class ClusterService {
       reply.header("content-type", "application/octet-stream");
       return reply.send(fs.createReadStream(abs).pipe(new EncryptStream(this.keys.blobs)));
     });
-    app.get("/cluster/health", async () => ({ ok: true, id: this.self.id, role: this.raft?.role }));
+    app.get("/cluster/health", async () => ({ ok: true, id: this.self.id, role: this.raft?.role, version: VERSION() }));
     await app.listen({ port: Number(process.env.CLUSTER_PORT ?? this.cfg.clusterPort), host: "0.0.0.0" });
     this.rpcServer = app;
   }
 
   // ───────── Register / leden ─────────
+
+  setSettingRaw(key: string, value: string) {
+    this.db!.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
+  }
 
   getSetting(key: string): string | undefined {
     if (!this.db) return undefined;
@@ -262,6 +268,12 @@ export class ClusterService {
     }
     // Gmail-koppeling: elke minuut een ronde, zonder de lus op te houden (kickGmail wacht nergens op).
     if (this.due("gmail", 60_000) && this.getSetting("gmail_mode") && this.getSetting("gmail_mode") !== "uit") void kickGmail();
+    // Versies van de servers bijhouden en (volgens je instelling) bijwerken naar de nieuwste versie.
+    const fast = process.env.CLUSTER_FAST === "1";
+    if (this.due("nodeInfo", fast ? 3000 : 5 * 60_000)) await updates.pollNodeInfo(this).catch((e) => console.error("versies:", e.message));
+    if (!this.timers.release) this.timers.release = Date.now() - 6 * 3600e3 + (fast ? 5000 : 2 * 60_000); // eerste keer kort na de start
+    if (this.due("release", Number(process.env.EIGEN_RELEASE_CHECK_MS ?? 6 * 3600e3))) void updates.checkForUpdates(this).catch((e) => console.error("updates:", e.message));
+    else if (this.due("updateWindow", 10 * 60_000)) await updates.maybeStartUpdate(this).catch(() => {});
     if (this.due("drillCheck", 3600e3)) {
       const last = db.prepare("SELECT MAX(ts) AS ts FROM cluster_events WHERE kind = 'drill' AND level = 'info'").get() as { ts: number | null };
       const pending = db.prepare("SELECT 1 FROM cluster_jobs WHERE type = 'drill' AND status IN ('pending','running')").get();
@@ -571,14 +583,30 @@ export class ClusterService {
           lastSnapshotAt: this.lastSnapshotAt || null,
           lastDrill: this.db.prepare("SELECT ts, level, message FROM cluster_events WHERE kind = 'drill' ORDER BY ts DESC LIMIT 1").get() ?? null,
           jobs: this.db.prepare("SELECT id, type, status, error, created FROM cluster_jobs ORDER BY created DESC LIMIT 10").all(),
+          update: updates.updateSummary(this),
           events: this.db.prepare("SELECT ts, level, kind, message FROM cluster_events WHERE kind != 'job' ORDER BY id DESC LIMIT 30").all(),
         };
+      }
+      case "nodeInfo":
+        return updates.localNodeInfo();
+      case "applyUpdate": {
+        // Van de leider (berichten zijn versleuteld en ondertekend met de clustersleutel).
+        updates.writeUpdateRequest({ id: String(m.id), app: String(m.app), caddy: (m.caddy as string) ?? null, version: String(m.version), saveApp: (m.saveApp as string) ?? null, saveCaddy: (m.saveCaddy as string) ?? null });
+        return { ok: true };
       }
       case "adminJob": {
         if (!this.raft.isLeader() || !this.db) return { ok: false, error: "geen leider" };
         if (!this.cfg.masterKey || !verifyAdminProof(this.cfg.masterKey, m.job, m.proof as { ts: number; mac: string })) return { ok: false, error: "niet ondertekend" };
         const job = m.job as { type: JobType; params: Record<string, unknown> };
-        if (!["spawn", "move", "remove", "sleep", "drill", "snapshot"].includes(job.type)) return { ok: false, error: "onbekende job" };
+        if (!["spawn", "move", "remove", "sleep", "drill", "snapshot", "update"].includes(job.type)) return { ok: false, error: "onbekende job" };
+        if (job.type === "update") {
+          if (updates.openUpdateJob(this)) return { ok: false, error: "er loopt al een update" };
+          const rel = (await updates.checkForUpdates(this, { force: true })) ?? updates.latestKnown(this);
+          if (!rel) return { ok: false, error: this.getSetting("release_error") || "geen nieuwe versie gevonden" };
+          if (!updates.updateAvailable(this)) return { ok: false, error: `alle servers draaien al versie ${rel.version}` };
+          if (updates.openUpdateJob(this)) return { ok: true, id: updates.openUpdateJob(this)!.id };
+          Object.assign(job.params, { version: rel.version, image: rel.image, caddyImage: rel.caddyImage ?? null });
+        }
         if (job.type === "spawn" && !job.params.provider) {
           const p = choosePlacement(this, (job.params.kind as "data" | "witness") ?? "data");
           if (p) Object.assign(job.params, { provider: p.provider, region: p.region, size: p.size, country: p.country });
@@ -726,6 +754,7 @@ export class ClusterService {
       wantData: pol.minDataNodes,
       wantWitness: pol.witnesses,
       autoHeal: pol.autoHeal,
+      update: (() => { const u = updates.updateSummary(this); return { available: u.available, mode: u.mode, failed: u.failed?.version ? u.failed : null, running: !!u.running, checkError: u.checkError }; })(),
       unreachable: ready.filter((n) => n.id !== this.self.id && Date.now() - (peers.get(n.id)?.lastContact ?? 0) > 30_000 && Date.now() - (this.raft.status().leaderSince ?? 0) > 30_000).map((n) => n.id),
     };
   }
@@ -749,6 +778,12 @@ export class ClusterService {
           if (p.setPtr) { await p.setPtr({ serverId: node.server_id, ipv4: node.ipv4 ?? undefined, ipv6: node.ipv6 ?? undefined }, `mail.${health.domain()}`); n++; }
         }
         return `Reverse DNS ingesteld voor ${n} server(s)`;
+      }
+      case "update:run": {
+        const rel = updates.updateAvailable(this);
+        if (!rel) return "Alle servers zijn al bijgewerkt";
+        if (!updates.openUpdateJob(this)) { this.setSettingRaw("update_failed", ""); createJob(this, "update", { version: rel.version, image: rel.image, caddyImage: rel.caddyImage ?? null }); }
+        return `Je servers worden bijgewerkt naar versie ${rel.version}`;
       }
       case "drill:run": createJob(this, "drill", {}); return "Brandoefening gestart";
       case "snapshot:run": createJob(this, "snapshot", {}); return "Back-up gestart";

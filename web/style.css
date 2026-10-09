@@ -315,3 +315,4 @@ dialog::backdrop { background: #0008; }
 button.link { padding: 0; text-decoration: underline; text-underline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) { .switch input, .switch input::after { transition: none; } }
 .phone-sub .switch b { font-weight: 400; }
+.update-box p { margin: 0 0 8px; } #updateForm .seg { margin-bottom: 4px; }

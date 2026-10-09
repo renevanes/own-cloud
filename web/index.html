@@ -107,6 +107,18 @@
             </div>
             <button class="ghost">Opslaan</button>
           </form>
+          <h3>Software</h3>
+          <div id="updateBox" class="update-box"></div>
+          <form id="updateForm" class="policy">
+            <div class="seg">
+              <label><input type="radio" name="mode" value="auto"> Automatisch bijwerken</label>
+              <label><input type="radio" name="mode" value="melden"> Alleen melden</label>
+              <label><input type="radio" name="mode" value="uit"> Uit</label>
+            </div>
+            <label class="win">Tussen (uur, Nederlandse tijd)<input name="window" placeholder="3-5" inputmode="numeric"><small>Eén server tegelijk; de leider als laatste. Komt een server niet gezond terug, dan zet hij zelf de vorige versie terug en stopt de update.</small></label>
+            <div class="row-actions"><button class="ghost">Opslaan</button><button type="button" class="ghost" id="updateCheck">Nu kijken</button><button type="button" class="primary" id="updateNow" hidden>Nu bijwerken</button></div>
+            <p class="form-msg" id="updateMsg" role="status"></p>
+          </form>
           <h3>Taken</h3>
           <ul id="jobList" class="log"></ul>
         </section>

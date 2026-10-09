@@ -12,6 +12,7 @@ Je eigen vervanger voor Gmail, Google Agenda en Google Foto's, op servers die ji
 | **Tijdmachine** | Kies een moment in het verleden en zet per ongeluk verwijderde of veranderde mails, afspraken en foto's terug. |
 | **Beheerconsole** | Installatie-assistent op je eigen computer of je telefoon: kluis met je sleutels, opslag en servers koppelen (met live prijzen), domein, mail, en daarna een overzicht met kaart, wekken, slapen en herstellen. |
 | **Naast Gmail** | Proefperiode *naast Gmail* (je mail komt nog bij Gmail binnen en wordt elke paar minuten opgehaald) of *Gmail als vangnet* na het overstappen. Instellingen → Gmail. |
+| **Bijwerken** | Servers werken zichzelf 's nachts bij naar de nieuwste versie, één voor één, en zetten zichzelf terug als de nieuwe versie niet goed opstart. Zie [CLUSTER.md](CLUSTER.md#bijwerken-naar-een-nieuwe-versie). |
 | **Android-app** | Alles van de webapp, plus automatische foto-back-up, je agenda in de agenda-app van je telefoon, meldingen bij nieuwe mail of problemen, *Delen → Eigen Cloud*, en de beheerconsole met vingerafdruk-ontgrendeling. Zonder Google-diensten. Zie [android/README.md](android/README.md). |
 
 > Het eerdere Lovable-project uit deze repository staat bewaard in de branch `archief/lovable`.

@@ -326,6 +326,23 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     }
   };
   app.route({ method: ["GET", "PUT", "PATCH", "POST", "DELETE"], url: "/v1/desec/domains/:zone/*", handler: proxy });
+
+  // ── acme-dns (voor Caddy's certificaten): alleen het TXT-record _acme.<domein>, de laatste twee waarden ──
+  app.post<{ Body: { subdomain?: string; txt?: string } }>("/v1/acme-dns/update", async (req, reply) => {
+    const user = String(req.headers["x-api-user"] ?? ""), key = String(req.headers["x-api-key"] ?? "").toLowerCase();
+    const o = /^[0-9a-f]{64}$/.test(key) ? (db.prepare("SELECT * FROM orders WHERE dns_token_hash = ?").get(sha256(key)) as OrderRow | undefined) : undefined;
+    if (!o || o.id !== user || o.status === "suspended") return httpError(reply, 401, "Geen geldige toegang");
+    const txt = String(req.body?.txt ?? "");
+    if (req.body?.subdomain !== "_acme" || !/^[A-Za-z0-9_-]{43}$/.test(txt)) return httpError(reply, 400, "Ongeldig verzoek");
+    try {
+      const cur = (await ctx.apis.desec.getRrset(o.domain, "_acme", "TXT")) as { records?: string[] } | null;
+      const keep = (cur?.records ?? []).filter((r) => r !== `"${txt}"`).slice(-1);
+      await ctx.apis.desec.putRrsets(o.domain, [{ subname: "_acme", type: "TXT", ttl: 3600, records: [...keep, `"${txt}"`] }]);
+      return { txt };
+    } catch (e) {
+      return httpError(reply, 502, `DNS-dienst niet bereikbaar: ${(e as Error).message}`);
+    }
+  });
   app.get("/v1/desec/domains/:zone/", proxy);
 
   // ── Achtergrond ──

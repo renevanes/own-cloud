@@ -17,7 +17,10 @@ COPY package.json ./
 COPY web ./web
 # Android-app voor de eerste installatie vanaf je eigen cloud (door de CI gevuld; leeg = geen download)
 COPY app-dist ./app-dist
-ENV NODE_ENV=production DATA_DIR=/data
+# Versie (de CI geeft "<package.json-versie>.<bouwnummer>" mee); servers vergelijken hiermee voor updates.
+ARG EIGEN_VERSION=dev
+LABEL org.opencontainers.image.version=$EIGEN_VERSION
+ENV NODE_ENV=production DATA_DIR=/data EIGEN_VERSION=$EIGEN_VERSION
 VOLUME /data
 EXPOSE 3000 2525 7946
 CMD ["node", "dist/main.js"]

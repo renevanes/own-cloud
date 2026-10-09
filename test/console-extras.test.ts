@@ -206,5 +206,19 @@ test("console: gratis deSEC-account en naam.dedyn.io, daarna alles via de Eigen 
     assert.equal(cfg.console.dnsMode, "dienst");
     assert.equal(cfg.console.dienst?.applied, true);
     assert.ok(!JSON.stringify(cfg).includes(up.st.scw.apiKeys.length ? "scw-org-geheim" : "@@"), "de organisatiesleutel van de dienst komt nooit bij de klant");
+
+    // Certificaten: Caddy krijgt het acme-dns-adres van de dienst; alleen _acme.<domein> is te wijzigen.
+    const { caddyfile } = await import("../src/cluster/cloudinit.js");
+    const cf = caddyfile(cfg)!;
+    assert.match(cf, /dns acmedns \{[\s\S]*server_url http:\/\/127\.0\.0\.1:\d+\/v1\/acme-dns/);
+    assert.doesNotMatch(cf, /dns desec/, "het dienst-token werkt niet rechtstreeks bij deSEC");
+    const zone = up.st.desec.zones.get("vanes.nl")!;
+    assert.equal(zone.rrsets.get("_acme-challenge.cloud/CNAME")?.records[0], "_acme.vanes.nl.");
+    const acme = cfg.dns[0].acme!;
+    const upd = (txt: string, key = acme.password) => fetch(`${acme.server_url}/update`, { method: "POST", headers: { "x-api-user": acme.username, "x-api-key": key, "content-type": "application/json" }, body: JSON.stringify({ subdomain: "_acme", txt }) });
+    for (const ch of ["a", "b", "c"]) assert.equal((await upd(ch.repeat(43))).status, 200);
+    assert.deepEqual(zone.rrsets.get("_acme/TXT")?.records, [`"${"b".repeat(43)}"`, `"${"c".repeat(43)}"`], "de laatste twee waarden");
+    assert.equal((await upd("d".repeat(43), "0".repeat(64))).status, 401, "verkeerde sleutel");
+    assert.equal((await upd("te kort")).status, 400);
   });
 });

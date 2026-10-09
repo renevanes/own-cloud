@@ -65,6 +65,7 @@ export interface ClusterInfo {
   wantWitness: number;
   autoHeal: boolean;
   unreachable: string[];
+  update?: { available: string | null; mode: string; failed: { version: string; node: string; error: string } | null; running: boolean; checkError: string | null };
 }
 
 export function domain(): string | null {
@@ -278,6 +279,15 @@ export async function runChecks(cluster: ClusterInfo | null): Promise<Check[]> {
   const nodesOk = cluster.dataReady >= cluster.wantData && cluster.witnessReady >= cluster.wantWitness && !cluster.unreachable.length;
   checks.push({ id: "cluster.nodes", group: "Servers", title: "Genoeg servers actief", status: nodesOk ? "ok" : cluster.dataReady >= 1 ? "warn" : "fail",
     detail: `${cluster.dataReady}/${cluster.wantData} data, ${cluster.witnessReady}/${cluster.wantWitness} witness${cluster.unreachable.length ? ` — onbereikbaar: ${cluster.unreachable.join(", ")}` : ""}${!nodesOk && cluster.autoHeal ? " · wordt automatisch hersteld" : ""}` });
+  const u = cluster.update;
+  if (u) {
+    const base = { id: "software", group: "Servers" as const, title: "Software bijgewerkt" };
+    if (u.failed) checks.push({ ...base, status: "warn", detail: `Bijwerken naar ${u.failed.version} lukte niet op ${u.failed.node} (${u.failed.error}); de vorige versie draait gewoon door.`, fix: { action: "update:run", label: "Opnieuw proberen" } });
+    else if (u.running) checks.push({ ...base, status: "ok", detail: `Wordt nu bijgewerkt naar ${u.available ?? "de nieuwste versie"}` });
+    else if (u.available) checks.push({ ...base, status: u.mode === "auto" ? "ok" : "warn", detail: `Versie ${u.available} is beschikbaar${u.mode === "auto" ? "; wordt 's nachts automatisch geïnstalleerd" : ""}`, fix: { action: "update:run", label: "Nu bijwerken" } });
+    else if (u.checkError && u.mode !== "uit") checks.push({ ...base, status: "warn", detail: `Kon niet kijken of er een nieuwe versie is: ${u.checkError}` });
+    else checks.push({ ...base, status: "ok", detail: u.mode === "uit" ? "Automatisch bijwerken staat uit" : "Je servers draaien de nieuwste versie" });
+  }
   return checks;
 }
 

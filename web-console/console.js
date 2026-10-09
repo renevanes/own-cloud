@@ -794,6 +794,7 @@ async function renderDash() {
       <div class="actions">
         ${s.state === "awake" && s.appUrl ? `<a class="btn primary" href="${esc(s.appUrl)}" target="_blank" rel="noopener" data-cloud>Open mijn cloud</a>` : ""}
         ${s.state === "asleep" || s.state === "unreachable" ? `<button class="btn primary" id="wake">Wakker maken</button>` : ""}
+        ${s.state === "awake" && s.live?.update?.available && !s.live.update.running ? `<button class="btn" id="upd">Bijwerken naar ${esc(s.live.update.available)}</button>` : ""}
         ${s.state === "awake" ? `<button class="btn" id="drillNow">Back-up testen</button><button class="btn" id="sleep">Laten slapen</button>` : ""}
         <a class="btn" href="/api/recovery-sheet" target="_blank" rel="noopener">Herstelblad</a>
         ${NATIVE ? "" : `<a class="btn" href="/api/download-db" download>Database downloaden</a>`}
@@ -801,6 +802,7 @@ async function renderDash() {
       </div>
       ${s.launch && (!s.launch.done || s.state !== "awake") ? `<h2>Opstarten</h2>${launchView(s.launch)}` : ""}
       ${s.live ? `<div class="healthline ${bad ? "fail" : warn ? "warn" : ""}">${bad ? `${bad} probleem${bad === 1 ? "" : "en"} en ${warn} aandachtspunt${warn === 1 ? "" : "en"}` : warn ? `${warn} aandachtspunt${warn === 1 ? "" : "en"}` : "Alle controles in orde"}${s.appUrl && (bad || warn) ? ` · <a href="${esc(s.appUrl)}/#instellingen/gezondheid" target="_blank" rel="noopener">bekijken</a>` : ""}</div>` : ""}
+      ${s.live?.update ? `<p class="muted"><small>${s.live.update.running ? `Bezig met bijwerken naar ${esc(s.live.update.latest?.version ?? "")}…` : s.live.update.failed ? `Bijwerken naar ${esc(s.live.update.failed.version)} lukte niet; de vorige versie draait door.` : `Software: versie ${esc([...new Set(Object.values(s.live.update.nodes).map((n) => n.version).filter(Boolean))].join(", "))}${s.live.update.mode === "auto" ? ", wordt 's nachts automatisch bijgewerkt" : ""}`}</small></p>` : ""}
       ${s.live?.lastDrill ? `<p class="muted"><small>Laatste back-uptest: ${time(s.live.lastDrill.ts)} — ${s.live.lastDrill.level === "info" ? "geslaagd" : "mislukt"}</small></p>` : ""}
       <h2>Servers</h2>
       <ul class="items">${nodes.length ? nodes.map((n) => `<li><span class="flag">${FLAGS[n.country] ?? "🖥️"}</span><b>${esc(placeName(n))}</b>
@@ -808,6 +810,7 @@ async function renderDash() {
       ${s.live?.events?.length ? `<h2>Wat er gebeurde</h2><ul class="events">${s.live.events.slice(0, 10).map((e) => `<li class="${e.level}"><time>${time(e.ts)}</time>${esc(e.message)}</li>`).join("")}</ul>` : ""}
       <p class="msg" id="dmsg"></p>`;
     $("#wake")?.addEventListener("click", async (e) => { try { await busy(e.target, () => api("/api/wake", { method: "POST" })); draw(); } catch (err) { $("#dmsg").textContent = err.message; $("#dmsg").className = "msg err"; } });
+    $("#upd")?.addEventListener("click", async (e) => { try { await busy(e.target, () => api("/api/action", { method: "POST", body: { type: "update" } })); $("#dmsg").textContent = "Bijwerken gestart: één server tegelijk."; $("#dmsg").className = "msg ok"; } catch (err) { $("#dmsg").textContent = err.message; $("#dmsg").className = "msg err"; } });
     $("#drillNow")?.addEventListener("click", async (e) => { try { await busy(e.target, () => api("/api/action", { method: "POST", body: { type: "drill" } })); $("#dmsg").textContent = "Back-uptest gestart; het resultaat verschijnt hieronder."; $("#dmsg").className = "msg ok"; } catch (err) { $("#dmsg").textContent = err.message; } });
     $("#sleep")?.addEventListener("click", async (e) => {
       if (!confirm("Je cloud laten slapen?\n\nAlles wordt versleuteld weggeschreven en gecontroleerd. Daarna worden alle servers verwijderd en betaal je alleen voor opslag. Mail en je cloud zijn dan niet bereikbaar tot je hem wakker maakt.")) return;

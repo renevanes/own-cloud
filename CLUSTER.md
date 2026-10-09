@@ -111,13 +111,44 @@ Binnen een paar minuten vult het cluster zich zelf aan tot het aantal in `policy
 | wakker maken | `npm run eigen -- wake` (kiest standaard de plek uit het manifest) |
 | iets terughalen van gisteren | `npm run eigen -- restore herstel.sqlite --until 2026-10-08T14:00` |
 | back-ups testen | 🧯 Brandoefening, of `npm run eigen -- drill` vanaf je laptop |
-| nieuwe versie uitrollen | images opnieuw bouwen en uploaden, daarna nodes één voor één verhuizen. Elke nieuwe node start met de nieuwe versie |
+| nieuwe versie uitrollen | gaat vanzelf (zie hieronder), of **Nu bijwerken** onder 🐌 Waar draai ik → Software |
+
+## Bijwerken naar een nieuwe versie
+
+Elke build op `main` maakt nieuwe images met een versienummer (`<package.json-versie>.<bouwnummer>`). De leider kijkt
+elke 6 uur in de registry (het pakket moet op openbaar staan) of er een nieuwere versie is, en doet dan wat jij
+hebt ingesteld onder **🐌 Waar draai ik → Software**:
+
+| Stand | Wat er gebeurt |
+|---|---|
+| Automatisch bijwerken (standaard) | 's nachts tussen 03:00 en 05:00 (instelbaar) |
+| Alleen melden | melding in de gebeurtenissen en bij Gezondheid; jij kiest **Nu bijwerken** |
+| Uit | niet kijken, niet bijwerken |
+
+Zo gaat een update:
+
+1. Alleen als alle servers gezond zijn. De doelversie ligt vast als `image@sha256:…`, zodat elke server precies
+   hetzelfde krijgt, ook servers die tijdens de update nieuw worden aangemaakt.
+2. Eén server tegelijk: eerst de witness, dan de andere dataservers, de leider als laatste (na het overdragen van
+   de leiding). Je cloud blijft al die tijd werken.
+3. **Op de plek zelf**: de app vraagt de updater op de server (`/opt/eigen/eigen-update.sh`, door cloud-init
+   geïnstalleerd, gestart via systemd) om de nieuwe images te laden. Die accepteert alleen vaste versies uit de
+   eigen registry-map, start ze, en kijkt tot 5 minuten of de server gezond terugkomt met de nieuwe versie. Zo
+   niet, dan zet hij zelf de vorige versie terug, stopt de update en blijven de andere servers onaangeroerd.
+   Hetzelfde IP-adres, geen gegevens kopiëren.
+4. Servers van vóór deze functie (zonder updater) worden **vervangen** door een nieuwe server met de nieuwe versie.
+5. De eerste dataserver bewaart de nieuwe images ook in je eigen opslag (`images/…`), zodat nieuwe servers ook
+   zonder de registry kunnen starten.
+
+Let op bij het ontwikkelen: een update laat oude en nieuwe versies even naast elkaar draaien. Wijzigingen aan de
+databasestructuur moeten dus met oude volgers kunnen leven (nieuwe kolommen of tabellen pas gebruiken als alle
+servers zijn bijgewerkt).
 
 ## Eerlijk over de grenzen
 
 - **Live API's niet getest.** De adapters voor Hetzner, Scaleway en UpCloud volgen de API-documentatie en zijn getest tegen nagebootste API's, niet tegen echte accounts. Begin met `provider-test` en één handmatige `spawn` per aanbieder. De S3-client is getest tegen de officiële AWS-testvector en een S3-server (moto).
 - **Mailreputatie.** Elke nieuwe server heeft een nieuw IP-adres. Bij Hetzner moet je poort 25 laten openzetten, en ook andere aanbieders blokkeren die vaak standaard. Gebruik daarom `SMTP_RELAY` (bijv. Scaleway TEM, Frans) voor uitgaande mail: dan maakt verhuizen niets uit voor je bezorging.
-- **DNS-01-certificaten** vereisen het Caddy-image uit `Dockerfile.caddy` (modules `caddy-dns/desec` en `caddy-dns/hetzner`). Controleer of je Hetzner-zone al naar de Cloud-API is gemigreerd.
+- **DNS-01-certificaten** vereisen het Caddy-image uit `Dockerfile.caddy` (modules `caddy-dns/desec`, `caddy-dns/hetzner` en, voor de Eigen Cloud Dienst, `caddy-dns/acmedns`). Controleer of je Hetzner-zone al naar de Cloud-API is gemigreerd.
 - **deSEC** hanteert standaard een minimale TTL van 1 uur. Dat is geen probleem voor failover (die hangt niet van DNS af), alleen voor het toevoegen van nieuwe IP-adressen.
 - **Witness**: elke node die stemt maar geen data heeft volstaat, dus ook een Raspberry Pi thuis in Rotterdam (`kind: "witness"`, handmatig).
 - **De aanbieder van een draaiende server** kan in theorie altijd bij het geheugen. Versleuteling beschermt je opslag, je back-ups en de perioden waarin alles slaapt.
@@ -126,7 +157,7 @@ Binnen een paar minuten vult het cluster zich zelf aan tot het aantal in `policy
 ## Testen
 
 ```bash
-npm test                      # 45 tests, waaronder end-to-end tests van het cluster (±90 s) en de console (±40 s)
+npm test                      # alle tests, waaronder end-to-end tests van het cluster, de console, de dienst en het bijwerken
 SKIP_CLUSTER=1 npm test       # zonder de clustertest
 ```
 
