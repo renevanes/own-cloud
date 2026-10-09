@@ -61,6 +61,9 @@ GROUPS_STARTED+=($!)
 rm -f "$BUILD/smtp-info.json" "$BUILD/cluster-info.json"
 setsid npx tsx scripts/android-smtp-server.ts "$BUILD/smtp-info.json" >"$BUILD/smtp.log" 2>&1 &
 GROUPS_STARTED+=($!)
+rm -f "$BUILD/dienst-info.json"
+setsid npx tsx scripts/android-dienst.ts "$BUILD/dienst-info.json" >"$BUILD/dienst.log" 2>&1 &
+GROUPS_STARTED+=($!)
 setsid npx tsx scripts/android-cluster-node.ts "$BUILD/cluster-info.json" >"$BUILD/cluster.log" 2>&1 &
 GROUPS_STARTED+=($!)
 CLUSTER_HELPER=$!
@@ -93,6 +96,11 @@ jrun VaultTest
 jrun SmtpTest SMTP_INFO="$BUILD/smtp-info.json"
 jrun S3MotoTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
 jrun ConsoleApiTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
+if wait_for 60 test -s "$BUILD/dienst-info.json"; then
+  jrun ConsoleExtrasTest MOTO_URL="http://127.0.0.1:$MOTO_PORT" DIENST_INFO="$BUILD/dienst-info.json"
+else
+  echo "   dienst niet gestart:"; tail -30 "$BUILD/dienst.log"; RESULTS+=("FAIL ConsoleExtrasTest"); FAILED=1
+fi
 run golden-verify.ts npx tsx scripts/golden-verify.ts "$BUILD"
 
 echo "== Wachten op de cluster-node (leider)"

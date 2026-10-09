@@ -42,6 +42,8 @@ export interface DnsConfig {
   token?: string;
   zone?: string;
   file?: string; // type file: voor tests
+  /** deSEC: andere basis-URL (bijv. de DNS-proxy van de Eigen Cloud Dienst); standaard https://desec.io/api/v1 */
+  api?: string;
 }
 
 export interface ClusterConfig {

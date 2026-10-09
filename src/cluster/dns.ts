@@ -11,10 +11,12 @@ export interface DnsProvider {
 }
 
 export class DesecDns implements DnsProvider {
-  constructor(readonly name: string, private cfg: { token: string; zone: string }) {}
+  /** `api`: andere basis-URL, bijv. de DNS-proxy van de Eigen Cloud Dienst. */
+  constructor(readonly name: string, private cfg: { token: string; zone: string; api?: string }) {}
   async setRecords(sub: string, type: string, values: string[], ttl: number) {
     // deSEC hanteert standaard een minimale TTL van 3600 s; dat is prima omdat failover niet van DNS afhangt.
-    const r = await fetch(`https://desec.io/api/v1/domains/${this.cfg.zone}/rrsets/`, {
+    const api = (this.cfg.api || "https://desec.io/api/v1").replace(/\/+$/, "");
+    const r = await fetch(`${api}/domains/${this.cfg.zone}/rrsets/`, {
       method: "PUT",
       headers: { authorization: `Token ${this.cfg.token}`, "content-type": "application/json" },
       body: JSON.stringify([{ subname: sub, type, ttl: Math.max(ttl, 3600), records: values }]),
@@ -53,7 +55,7 @@ export class FileDns implements DnsProvider {
 }
 
 export function makeDns(c: DnsConfig): DnsProvider {
-  if (c.type === "desec") return new DesecDns(c.name, { token: c.token!, zone: c.zone! });
+  if (c.type === "desec") return new DesecDns(c.name, { token: c.token!, zone: c.zone!, api: c.api });
   if (c.type === "hetzner") return new HetznerDns(c.name, { token: c.token!, zone: c.zone! });
   return new FileDns(c.name, c.file!);
 }

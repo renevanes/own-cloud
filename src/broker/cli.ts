@@ -1,0 +1,123 @@
+/**
+ * Beheer van de Eigen Cloud Dienst vanaf de opdrachtregel.
+ *   npm run dienst:cli -- klanten
+ *   npm run dienst:cli -- order <id>
+ *   npm run dienst:cli -- opnieuw <id>
+ *   npm run dienst:cli -- opschorten <id>
+ *   npm run dienst:cli -- hervatten <id>
+ *   npm run dienst:cli -- opruimen <id> [--zeker]
+ *   npm run dienst:cli -- bewaker
+ * Gebruikt dezelfde omgevingsvariabelen (en datamap) als de dienst zelf.
+ */
+import { loadConfig } from "./config.js";
+import { createBroker } from "./app.js";
+import { type OrderRow, type CustomerRow, getOrder, orderState } from "./db.js";
+import { getSteps } from "./context.js";
+import { retryOrder, suspendOrder, resumeOrder, cleanupOrder } from "./ops.js";
+import { runGuard } from "./guard.js";
+
+const STATUS: Record<string, string> = {
+  awaiting_payment: "wacht op betaling", paid: "betaald", provisioning: "wordt klaargezet", ready: "klaar",
+  failed: "mislukt", payment_problem: "betalingsprobleem", cancelled: "opgezegd", suspended: "opgeschort",
+};
+const STATE: Record<string, string> = { wait: "  ", busy: "… ", done: "✓ ", fail: "✗ " };
+const when = (ms: number | null) => (ms ? new Date(ms).toLocaleString("nl-NL", { timeZone: "Europe/Amsterdam" }) : "-");
+
+const [cmd, arg, ...rest] = process.argv.slice(2);
+const broker = await createBroker(loadConfig());
+const { ctx } = broker;
+const need = () => {
+  const o = arg ? getOrder(ctx.db, arg) : undefined;
+  if (!o) { console.error(arg ? `Bestelling ${arg} bestaat niet.` : "Geef het nummer van de bestelling op."); process.exit(1); }
+  return o;
+};
+
+try {
+  switch (cmd) {
+    case "klanten": {
+      const customers = ctx.db.prepare("SELECT * FROM customers ORDER BY created_at").all() as CustomerRow[];
+      if (!customers.length) console.log("Nog geen klanten.");
+      for (const c of customers) {
+        console.log(`${c.email}  (klant ${c.id}, sinds ${when(c.created_at)})`);
+        const orders = ctx.db.prepare("SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at").all(c.id) as OrderRow[];
+        if (!orders.length) console.log("    geen bestellingen");
+        for (const o of orders) console.log(`    ${o.id}  ${o.domain.padEnd(28)} ${o.bundle.padEnd(10)} ${STATUS[o.status] ?? o.status}${o.ends_at ? ` (tot ${o.ends_at})` : ""}`);
+      }
+      break;
+    }
+    case "order": {
+      const o = need();
+      const c = ctx.db.prepare("SELECT email FROM customers WHERE id = ?").get(o.customer_id) as { email: string };
+      const st = orderState(o);
+      console.log(`Bestelling ${o.id}`);
+      console.log(`  Klant:       ${c.email} (${o.customer_id})`);
+      console.log(`  Domein:      ${o.domain} (${{ register: "registreren", transfer: "verhuizen", own: "eigen domein" }[o.domain_mode]})`);
+      console.log(`  Bundel:      ${o.bundle}, € ${o.amount.replace(".", ",")} per maand`);
+      console.log(`  Status:      ${STATUS[o.status] ?? o.status}${o.error ? ` — ${o.error}` : ""}`);
+      console.log(`  Besteld:     ${when(o.created_at)}   betaald: ${when(o.paid_at)}   opgezegd: ${when(o.cancelled_at)}${o.ends_at ? ` (loopt tot ${o.ends_at})` : ""}`);
+      console.log(`  Mollie:      betaling ${o.mollie_payment_id ?? "-"}, abonnement ${o.mollie_subscription_id ?? "-"} vanaf ${o.subscription_start ?? "-"}`);
+      console.log(`  Scaleway:    project ${st.projectId ?? "-"}, applicatie ${st.applicationId ?? "-"}, sleutel ${st.apiKeyAccess ?? "-"}, maildomein ${st.temDomainId ?? "-"}`);
+      console.log(`  Openprovider: klant ${st.opHandle ?? "-"}, domein ${st.opDomainId ?? "-"}`);
+      console.log("  Stappen:");
+      for (const s of getSteps(ctx.db, o.id)) console.log(`    ${STATE[s.state]}${s.label}${s.detail ? ` — ${s.detail}` : ""}`);
+      const events = ctx.db.prepare("SELECT kind, detail, at FROM events WHERE order_id = ? ORDER BY id DESC LIMIT 10").all(o.id) as { kind: string; detail: string | null; at: number }[];
+      if (events.length) {
+        console.log("  Laatste gebeurtenissen:");
+        for (const e of events) console.log(`    ${when(e.at)}  ${e.kind}${e.detail ? `  ${e.detail.slice(0, 160)}` : ""}`);
+      }
+      break;
+    }
+    case "opnieuw": {
+      const o = need();
+      const status = await retryOrder(ctx, o.id);
+      console.log(`Opnieuw geprobeerd: ${STATUS[status ?? ""] ?? status}.`);
+      for (const s of getSteps(ctx.db, o.id)) console.log(`  ${STATE[s.state]}${s.label}${s.detail ? ` — ${s.detail}` : ""}`);
+      break;
+    }
+    case "opschorten": {
+      const o = need();
+      for (const l of await suspendOrder(ctx, o.id)) console.log(`  ${l}`);
+      console.log(`Bestelling ${o.id} is opgeschort. De klant heeft een mail gekregen.`);
+      break;
+    }
+    case "hervatten": {
+      const o = need();
+      const st = await resumeOrder(ctx, o.id);
+      console.log(`Bestelling ${o.id} hervat (${STATUS[st]}). Nieuwe sleutel staat in het pakket; de console van de klant haalt die op.`);
+      break;
+    }
+    case "opruimen": {
+      const o = need();
+      const sure = rest.includes("--zeker") || arg === "--zeker";
+      const r = await cleanupOrder(ctx, o.id, sure);
+      if (!sure) {
+        console.log("Dit zou er gebeuren (voer uit met --zeker):");
+        for (const l of r.plan) console.log(`  - ${l}`);
+      } else for (const l of r.done) console.log(`  ✓ ${l}`);
+      console.log("Zelf doen:");
+      for (const l of r.manual) console.log(`  - ${l}`);
+      break;
+    }
+    case "bewaker": {
+      const f = await runGuard(ctx);
+      if (!f.length) console.log("Geen enkele klant gebruikt meer servers dan zijn bundel.");
+      for (const x of f) console.log(`  ${x.orderId} ${x.domain}: ${x.running} draaiend, ${x.allowed} toegestaan${x.poweredOff.length ? `; uitgezet: ${x.poweredOff.join(", ")}` : ""}`);
+      break;
+    }
+    default:
+      console.log(`Gebruik: npm run dienst:cli -- <opdracht>
+
+  klanten               alle klanten met hun bestellingen
+  order <id>            details en stappen van een bestelling
+  opnieuw <id>          mislukt klaarzetten opnieuw proberen
+  opschorten <id>       sleutel intrekken en servers uitzetten (bijv. na wanbetaling)
+  hervatten <id>        nieuwe sleutel; de klant kan weer starten
+  opruimen <id> [--zeker]  na opzegging: IAM en maildomein weghalen
+  bewaker               nu controleren op te veel servers`);
+  }
+} catch (e) {
+  console.error(`Mislukt: ${(e as Error).message}`);
+  process.exitCode = 1;
+} finally {
+  await broker.close();
+}

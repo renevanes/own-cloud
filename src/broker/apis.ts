@@ -1,0 +1,138 @@
+/**
+ * Dunne clients voor Mollie, Openprovider, deSEC en Scaleway. Alleen wat de dienst nodig heeft;
+ * elke basis-URL komt uit de config zodat tests een nep-server kunnen gebruiken.
+ */
+import type { BrokerConfig } from "./config.js";
+
+export class ApiError extends Error {
+  constructor(readonly service: string, readonly status: number, message: string, readonly body?: unknown) { super(message); }
+  /** Blijvend mis: opnieuw proberen helpt niet (4xx behalve 401/408/425/429). */
+  get permanent() { return this.status >= 400 && this.status < 500 && ![401, 408, 425, 429].includes(this.status); }
+}
+
+/** Een netwerkfout of 5xx is tijdelijk; ApiError.permanent bepaalt de rest. */
+export const isPermanent = (e: unknown) => e instanceof ApiError && e.permanent;
+
+async function call(service: string, url: string, init: { method?: string; headers?: Record<string, string>; body?: unknown; raw?: string }) {
+  const headers: Record<string, string> = { accept: "application/json", ...init.headers };
+  let body: string | undefined = init.raw;
+  if (init.body !== undefined) { body = JSON.stringify(init.body); headers["content-type"] = "application/json"; }
+  let r: Response;
+  try {
+    r = await fetch(url, { method: init.method ?? "GET", headers, body, signal: AbortSignal.timeout(30_000) });
+  } catch (e) {
+    throw new ApiError(service, 0, `${service} niet bereikbaar: ${(e as Error).message}`);
+  }
+  const text = await r.text();
+  let json: any = null;
+  try { json = text ? JSON.parse(text) : null; } catch { /* geen JSON */ }
+  if (!r.ok) {
+    const msg = json?.detail ?? json?.desc ?? json?.message ?? json?.error?.message ?? json?.title ?? (typeof json === "object" && json ? JSON.stringify(json).slice(0, 200) : text.slice(0, 200));
+    throw new ApiError(service, r.status, `${service} ${r.status}: ${msg}`, json ?? text);
+  }
+  return { status: r.status, json };
+}
+
+// ───────── Mollie ─────────
+
+export class Mollie {
+  constructor(private c: BrokerConfig["mollie"]) {}
+  private h() { return { authorization: `Bearer ${this.c.apiKey}` }; }
+  req(method: string, p: string, body?: unknown): Promise<any> { return call("Mollie", this.c.url + p, { method, headers: this.h(), body }).then((r) => r.json); }
+  createCustomer(name: string, email: string) { return this.req("POST", "/customers", { name, email }); }
+  createPayment(body: Record<string, unknown>) { return this.req("POST", "/payments", body); }
+  getPayment(id: string) { return this.req("GET", `/payments/${encodeURIComponent(id)}`); }
+  createSubscription(customerId: string, body: Record<string, unknown>) { return this.req("POST", `/customers/${encodeURIComponent(customerId)}/subscriptions`, body); }
+  cancelSubscription(customerId: string, subId: string) { return this.req("DELETE", `/customers/${encodeURIComponent(customerId)}/subscriptions/${encodeURIComponent(subId)}`); }
+}
+
+// ───────── Openprovider ─────────
+
+export class Openprovider {
+  private token: { value: string; until: number } | null = null;
+  constructor(private c: BrokerConfig["openprovider"]) {}
+
+  private async login() {
+    const r = await call("Openprovider", `${this.c.url}/auth/login`, { method: "POST", body: { username: this.c.username, password: this.c.password, ip: "0.0.0.0" } });
+    const t = r.json?.data?.token;
+    if (!t) throw new ApiError("Openprovider", 401, "Openprovider: inloggen gaf geen token");
+    this.token = { value: t, until: Date.now() + 47 * 3600_000 }; // geldig 48 uur
+    return t as string;
+  }
+
+  async req(method: string, p: string, body?: unknown): Promise<any> {
+    for (let attempt = 0; ; attempt++) {
+      const t = this.token && this.token.until > Date.now() ? this.token.value : await this.login();
+      try {
+        const r = await call("Openprovider", this.c.url + p, { method, headers: { authorization: `Bearer ${t}` }, body });
+        // Openprovider meldt fouten soms met HTTP 200 en een code ≠ 0.
+        if (r.json && typeof r.json.code === "number" && r.json.code !== 0) throw new ApiError("Openprovider", 400, `Openprovider: ${r.json.desc ?? "fout " + r.json.code}`, r.json);
+        return r.json;
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 401 && attempt === 0) { this.token = null; continue; }
+        throw e;
+      }
+    }
+  }
+
+  async check(name: string, extension: string) {
+    const j = await this.req("POST", "/domains/check", { domains: [{ name, extension }], with_price: true });
+    const res = j?.data?.results?.[0] ?? {};
+    const p = res.price?.reseller ?? res.price?.product ?? null;
+    const price = p && p.price !== undefined && p.price !== null ? { currency: String(p.currency ?? "EUR"), value: Number(p.price).toFixed(2) } : null;
+    return { available: res.status === "free", price };
+  }
+}
+
+// ───────── deSEC (met het eigen token van de dienst) ─────────
+
+export class Desec {
+  constructor(private c: BrokerConfig["desec"]) {}
+  private h() { return { authorization: `Token ${this.c.token}` }; }
+  async getZone(name: string) {
+    try { return (await call("deSEC", `${this.c.url}/domains/${name}/`, { headers: this.h() })).json; }
+    catch (e) { if (e instanceof ApiError && e.status === 404) return null; throw e; }
+  }
+  async createZone(name: string) { return (await call("deSEC", `${this.c.url}/domains/`, { method: "POST", headers: this.h(), body: { name } })).json; }
+  async getRrset(zone: string, sub: string, type: string) {
+    try { return (await call("deSEC", `${this.c.url}/domains/${zone}/rrsets/${sub || "@"}/${type}/`, { headers: this.h() })).json; }
+    catch (e) { if (e instanceof ApiError && e.status === 404) return null; throw e; }
+  }
+  async putRrsets(zone: string, rrsets: { subname: string; type: string; ttl: number; records: string[] }[]) {
+    return (await call("deSEC", `${this.c.url}/domains/${zone}/rrsets/`, { method: "PUT", headers: this.h(), body: rrsets })).json;
+  }
+  /** Stuurt een verzoek van een klant ongewijzigd door (DNS-proxy). */
+  async forward(method: string, pathAndQuery: string, body: string | undefined) {
+    const headers: Record<string, string> = { ...this.h(), accept: "application/json" };
+    if (body !== undefined) headers["content-type"] = "application/json";
+    return fetch(`${this.c.url}${pathAndQuery}`, { method, headers, body, signal: AbortSignal.timeout(30_000) });
+  }
+}
+
+// ───────── Scaleway (organisatie-sleutel van de dienst) ─────────
+
+export class Scaleway {
+  constructor(private c: BrokerConfig["scaleway"]) {}
+  get organizationId() { return this.c.organizationId; }
+  get permissionSets() { return this.c.permissionSets; }
+  req(method: string, p: string, body?: unknown): Promise<any> {
+    return call("Scaleway", this.c.url + p, { method, headers: { "x-auth-token": this.c.secretKey }, body }).then((r) => r.json);
+  }
+  async reqOr404(method: string, p: string, body?: unknown): Promise<any> {
+    try { return await this.req(method, p, body); } catch (e) { if (e instanceof ApiError && e.status === 404) return null; throw e; }
+  }
+  /** Draaiende en uitgezette servers van een project in één zone. */
+  async servers(zone: string, projectId: string): Promise<{ id: string; name: string; state: string; creation_date: string }[]> {
+    const j = await this.req("GET", `/instance/v1/zones/${zone}/servers?project=${encodeURIComponent(projectId)}&per_page=100`);
+    return (j?.servers ?? []) as never;
+  }
+  serverAction(zone: string, id: string, action: "poweroff" | "poweron" | "terminate") {
+    return this.req("POST", `/instance/v1/zones/${zone}/servers/${id}/action`, { action });
+  }
+}
+
+export interface Apis { mollie: Mollie; openprovider: Openprovider; desec: Desec; scaleway: Scaleway }
+
+export function makeApis(c: BrokerConfig): Apis {
+  return { mollie: new Mollie(c.mollie), openprovider: new Openprovider(c.openprovider), desec: new Desec(c.desec), scaleway: new Scaleway(c.scaleway) };
+}

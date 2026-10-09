@@ -1,0 +1,370 @@
+/**
+ * Klaarzetten na betaling: een stappenmachine die in SQLite staat. Elke stap kijkt eerst of het
+ * onderdeel al bestaat (en bewaart het id), zodat opnieuw proberen nooit dubbel aanmaakt.
+ * Tijdelijke fouten (netwerk, 5xx, 401/429) → later opnieuw; blijvende fouten (4xx) → mislukt.
+ */
+import crypto from "node:crypto";
+import { NAMESERVERS } from "./config.js";
+import { ApiError, isPermanent } from "./apis.js";
+import { type OrderRow, getOrder, getCustomer, orderState, patchState, setStatus, event, sha256 } from "./db.js";
+import { type Ctx, bundleOf, setStep, getSteps, withLock } from "./context.js";
+import { trySend } from "./mail.js";
+
+export interface OrderInput {
+  registrant?: Registrant;
+  authCode?: string;
+}
+
+export interface Registrant {
+  firstName: string; lastName: string; company?: string;
+  street: string; number: string; zipcode: string; city: string; country: string;
+  phone: string; email: string;
+}
+
+export interface OrderSecrets { apiKey?: { accessKey: string; secretKey: string }; dnsToken?: string }
+
+export interface Kit {
+  domain: string;
+  nameservers: string[];
+  delegated: boolean;
+  provider: { id: "scaleway"; fields: { secretKey: string; projectId: string } };
+  storage: { offer: "scaleway"; region: string; accessKey: string; secretKey: string; purpose: "replica" | "backup" }[];
+  placement: { provider: string; region: string; size: string; country: string; kind: "data" | "witness" }[];
+  policy: { minDataNodes: number; witnesses: number };
+  dns: { type: "desec"; name: string; token: string; zone: string; api: string };
+  mailRelay: { host: string; port: number; user: string; password: string; secure: boolean } | null;
+  spfExtra: string;
+}
+
+export const readInput = (ctx: Ctx, o: OrderRow) => ctx.secrets.open<OrderInput>(o.input_enc, `input:${o.id}`) ?? {};
+export const readSecrets = (ctx: Ctx, o: OrderRow) => ctx.secrets.open<OrderSecrets>(o.secrets_enc, `secrets:${o.id}`) ?? {};
+export const readKit = (ctx: Ctx, o: OrderRow) => ctx.secrets.open<Kit>(o.kit_enc, `kit:${o.id}`);
+
+export function writeSecrets(ctx: Ctx, id: string, patch: Partial<OrderSecrets>) {
+  const o = getOrder(ctx.db, id)!;
+  const s = { ...readSecrets(ctx, o), ...patch };
+  ctx.db.prepare("UPDATE orders SET secrets_enc = ? WHERE id = ?").run(ctx.secrets.seal(s, `secrets:${id}`), id);
+  return s;
+}
+
+export function splitDomain(domain: string) {
+  const i = domain.indexOf(".");
+  return { name: domain.slice(0, i), extension: domain.slice(i + 1) };
+}
+
+/** Naam voor project en IAM-applicatie bij Scaleway. */
+export const resourceName = (o: OrderRow) => `eigen-cloud-${o.customer_id}-${o.id.slice(0, 8)}`;
+
+/** "+31 6 12345678", "0612345678", "+32 2 1234567" → Openprovider-telefoon. */
+export function parsePhone(input: string): { country_code: string; area_code: string; subscriber_number: string } | null {
+  let s = input.trim().replace(/[()\-.]/g, " ").replace(/\s+/g, " ");
+  if (s.startsWith("00")) s = "+" + s.slice(2);
+  let cc: string;
+  let rest: string;
+  if (s.startsWith("+")) {
+    const m = /^\+(\d{1,3}) (.+)$/.exec(s);
+    if (m) { cc = m[1]; rest = m[2]; }
+    else {
+      const digits = s.slice(1).replace(/ /g, "");
+      const one = ["1", "7"], two = ["20", "27", "30", "31", "32", "33", "34", "36", "39", "40", "41", "43", "44", "45", "46", "47", "48", "49", "90"];
+      const len = one.includes(digits[0]) ? 1 : two.includes(digits.slice(0, 2)) ? 2 : 3;
+      cc = digits.slice(0, len); rest = digits.slice(len);
+    }
+  } else if (s.startsWith("0")) { cc = "31"; rest = s.slice(1); }
+  else return null;
+  rest = rest.replace(/^0/, "");
+  const parts = rest.split(" ").filter(Boolean);
+  if (!parts.every((p) => /^\d+$/.test(p))) return null;
+  let area: string, sub: string;
+  if (parts.length >= 2) { area = parts[0]; sub = parts.slice(1).join(""); }
+  else {
+    const d = parts[0] ?? "";
+    let len = 2;
+    if (cc === "31") {
+      const twoDigit = ["10", "13", "15", "20", "23", "24", "26", "30", "33", "35", "36", "38", "40", "43", "45", "46", "50", "53", "55", "58", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "85", "88", "97"];
+      len = d.startsWith("6") ? 1 : twoDigit.includes(d.slice(0, 2)) ? 2 : 3;
+    }
+    area = d.slice(0, len); sub = d.slice(len);
+  }
+  const total = (area + sub).length;
+  if (!area || sub.length < 4 || total < 7 || total > 14) return null;
+  return { country_code: `+${cc}`, area_code: area, subscriber_number: sub };
+}
+
+/** "257 3 13 <base64>" → Openprovider dnssec_keys. */
+export function parseDnskey(s: string) {
+  const [flags, protocol, alg, ...key] = s.trim().split(/\s+/);
+  if (!key.length) return null;
+  return { flags: Number(flags), protocol: Number(protocol), alg: Number(alg), pub_key: key.join("") };
+}
+
+/** TXT-waarde voor deSEC: tussen aanhalingstekens, in stukken van max. 255 tekens. */
+export function txtRecord(value: string) {
+  const v = value.replace(/^"|"$/g, "").replace(/"\s*"/g, "");
+  const parts: string[] = [];
+  for (let i = 0; i < v.length; i += 255) parts.push(`"${v.slice(i, i + 255).replace(/"/g, '\\"')}"`);
+  return parts.join(" ") || '""';
+}
+
+/** Recordnaam (relatief of volledig) → deSEC-subname binnen de zone. */
+export function subnameOf(name: string, zone: string) {
+  const n = name.replace(/\.$/, "").toLowerCase();
+  if (n === zone || n === "@" || n === "") return "";
+  return n.endsWith(`.${zone}`) ? n.slice(0, -(zone.length + 1)) : n;
+}
+
+/** Records uit een TEM-domein, ook bij oudere vormen (spf_config/dkim_config). */
+export function temRecords(dom: any, projectId: string) {
+  const r = dom?.records ?? {};
+  const pick = (x: any) => (x && typeof x === "object" && x.value ? { name: String(x.name ?? ""), value: String(x.value) } : null);
+  const dkim = pick(r.dkim) ?? (dom?.dkim_config ? { name: `${projectId}._domainkey`, value: String(dom.dkim_config) } : null);
+  const dmarc = pick(r.dmarc);
+  const spf = pick(r.spf)?.value ?? (dom?.spf_config ? String(dom.spf_config) : "");
+  const spfExtra = spf.split(/\s+/).filter((t) => /^include:/.test(t)).join(" ");
+  return { dkim, dmarc, spfExtra };
+}
+
+// ───────── De stappen ─────────
+
+type StepFn = (ctx: Ctx, o: OrderRow) => Promise<string | undefined>;
+
+const STEPS: [string, StepFn][] = [
+  ["dns-zone", async (ctx, o) => {
+    let z = await ctx.apis.desec.getZone(o.domain);
+    if (!z) {
+      try { z = await ctx.apis.desec.createZone(o.domain); }
+      catch (e) {
+        // Bestaat al (bijv. na een onderbroken poging)? Dan alsnog ophalen.
+        if (e instanceof ApiError && e.status === 409) z = await ctx.apis.desec.getZone(o.domain);
+        if (!z) throw e;
+      }
+    }
+    const dnskeys = ((z.keys ?? []) as any[]).map((k) => k.dnskey).filter(Boolean);
+    patchState(ctx.db, o.id, { zone: true, dnskeys });
+    return dnskeys.length ? "Zone aangemaakt, met DNSSEC" : "Zone aangemaakt";
+  }],
+
+  ["domain", async (ctx, o) => {
+    if (o.domain_mode === "own") return `Zet bij je eigen registrar de nameservers op ${NAMESERVERS.join(" en ")}`;
+    const st = orderState(o);
+    const op = ctx.apis.openprovider;
+    const transferMsg = "Verhuizing aangevraagd. Je huidige registrar moet die nog goedkeuren; dat duurt meestal een paar dagen";
+    if (st.opDomainId) return o.domain_mode === "transfer" ? transferMsg : "Geregistreerd";
+    const existing = await op.req("GET", `/domains?full_name=${encodeURIComponent(o.domain)}&limit=1`);
+    const found = (existing?.data?.results ?? []).find((d: any) => `${d.domain?.name}.${d.domain?.extension}` === o.domain || d.full_name === o.domain);
+    if (found?.id) { patchState(ctx.db, o.id, { opDomainId: found.id }); return o.domain_mode === "transfer" ? transferMsg : "Geregistreerd"; }
+
+    const input = readInput(ctx, o);
+    const r = input.registrant;
+    if (!r) throw new ApiError("Dienst", 400, "Gegevens van de houder ontbreken");
+    let handle: string = st.opHandle;
+    if (!handle) {
+      const phone = parsePhone(r.phone);
+      if (!phone) throw new ApiError("Dienst", 400, "Telefoonnummer van de houder klopt niet");
+      const initials = `${r.firstName.split(/\s+/).map((p) => p[0]?.toUpperCase()).filter(Boolean).join(".")}.`;
+      const c = await op.req("POST", "/customers", {
+        name: { first_name: r.firstName, last_name: r.lastName, initials },
+        address: { street: r.street, number: r.number, zipcode: r.zipcode, city: r.city, country: r.country.toUpperCase() },
+        phone, email: r.email, ...(r.company ? { company_name: r.company } : {}),
+      });
+      handle = c?.data?.handle;
+      if (!handle) throw new ApiError("Openprovider", 502, "Openprovider gaf geen klant-handle terug");
+      patchState(ctx.db, o.id, { opHandle: handle });
+    }
+    const keys = ((st.dnskeys ?? []) as string[]).map(parseDnskey).filter(Boolean);
+    const body: Record<string, unknown> = {
+      domain: splitDomain(o.domain),
+      owner_handle: handle, admin_handle: handle, tech_handle: handle, billing_handle: handle,
+      period: 1, autorenew: "on",
+      name_servers: NAMESERVERS.map((name) => ({ name })),
+      is_dnssec_enabled: keys.length > 0,
+      ...(keys.length ? { dnssec_keys: keys } : {}),
+    };
+    // Aanname: een create mét auth_code is bij Openprovider een verhuizing (zie BROKER.md).
+    if (o.domain_mode === "transfer") body.auth_code = input.authCode;
+    const d = await op.req("POST", "/domains", body);
+    const id = d?.data?.id;
+    if (!id) throw new ApiError("Openprovider", 502, "Openprovider gaf geen domein-id terug");
+    patchState(ctx.db, o.id, { opDomainId: id, opDomainStatus: d?.data?.status ?? null });
+    return o.domain_mode === "transfer" ? transferMsg : "Geregistreerd";
+  }],
+
+  ["scaleway-project", async (ctx, o) => {
+    const scw = ctx.apis.scaleway;
+    const st = orderState(o);
+    if (st.projectId) return undefined;
+    const name = resourceName(o);
+    const list = await scw.req("GET", `/account/v3/projects?organization_id=${encodeURIComponent(scw.organizationId)}&name=${encodeURIComponent(name)}`);
+    let id = (list?.projects ?? []).find((p: any) => p.name === name)?.id;
+    if (!id) id = (await scw.req("POST", "/account/v3/projects", { name, organization_id: scw.organizationId, description: `Eigen Cloud voor ${o.domain} (bestelling ${o.id})` }))?.id;
+    if (!id) throw new ApiError("Scaleway", 502, "Scaleway gaf geen project-id terug");
+    patchState(ctx.db, o.id, { projectId: id });
+    return undefined;
+  }],
+
+  ["scaleway-iam", async (ctx, o) => {
+    const scw = ctx.apis.scaleway;
+    const org = encodeURIComponent(scw.organizationId);
+    let st = orderState(o);
+    const name = resourceName(o);
+    if (!st.applicationId) {
+      const list = await scw.req("GET", `/iam/v1alpha1/applications?organization_id=${org}&name=${encodeURIComponent(name)}`);
+      let id = (list?.applications ?? []).find((a: any) => a.name === name)?.id;
+      if (!id) id = (await scw.req("POST", "/iam/v1alpha1/applications", { name, organization_id: scw.organizationId, description: `Eigen Cloud ${o.domain}: alleen project ${st.projectId}` }))?.id;
+      if (!id) throw new ApiError("Scaleway", 502, "Scaleway gaf geen applicatie-id terug");
+      st = patchState(ctx.db, o.id, { applicationId: id });
+    }
+    if (!st.policyId) {
+      const list = await scw.req("GET", `/iam/v1alpha1/policies?organization_id=${org}&application_id=${encodeURIComponent(st.applicationId)}`);
+      let id = (list?.policies ?? [])[0]?.id;
+      if (!id) id = (await scw.req("POST", "/iam/v1alpha1/policies", {
+        name, organization_id: scw.organizationId, application_id: st.applicationId,
+        description: `Alleen project ${st.projectId}`,
+        rules: [{ permission_set_names: scw.permissionSets, project_ids: [st.projectId] }],
+      }))?.id;
+      if (!id) throw new ApiError("Scaleway", 502, "Scaleway gaf geen policy-id terug");
+      st = patchState(ctx.db, o.id, { policyId: id });
+    }
+    if (!readSecrets(ctx, getOrder(ctx.db, o.id)!).apiKey) await newApiKey(ctx, o.id);
+    return "Werkt alleen binnen jouw eigen project";
+  }],
+
+  ["mail", async (ctx, o) => {
+    const scw = ctx.apis.scaleway;
+    let st = orderState(o);
+    const base = "/transactional-email/v1alpha1/regions/fr-par/domains";
+    let dom: any = null;
+    if (st.temDomainId) dom = await scw.reqOr404("GET", `${base}/${st.temDomainId}`);
+    if (!dom) {
+      const list = await scw.req("GET", `${base}?project_id=${encodeURIComponent(st.projectId)}&name=${encodeURIComponent(o.domain)}`);
+      dom = (list?.domains ?? []).find((d: any) => d.name === o.domain && d.status !== "revoked") ?? null;
+    }
+    if (!dom) dom = await scw.req("POST", base, { project_id: st.projectId, domain_name: o.domain, accept_tos: true });
+    if (!dom?.id) throw new ApiError("Scaleway", 502, "Scaleway gaf geen maildomein-id terug");
+    st = patchState(ctx.db, o.id, { temDomainId: dom.id });
+
+    const rec = temRecords(dom, st.projectId);
+    const rrsets: { subname: string; type: string; ttl: number; records: string[] }[] = [];
+    if (rec.dkim) rrsets.push({ subname: subnameOf(rec.dkim.name, o.domain), type: "TXT", ttl: 3600, records: [txtRecord(rec.dkim.value)] });
+    if (rec.dmarc) {
+      const sub = subnameOf(rec.dmarc.name || "_dmarc", o.domain);
+      if (!(await ctx.apis.desec.getRrset(o.domain, sub, "TXT"))) rrsets.push({ subname: sub, type: "TXT", ttl: 3600, records: [txtRecord(rec.dmarc.value)] });
+    }
+    // Geen SPF hier: het cluster beheert het apex-TXT-record zelf en voegt spfExtra toe.
+    if (rrsets.length) await ctx.apis.desec.putRrsets(o.domain, rrsets);
+    patchState(ctx.db, o.id, { spfExtra: rec.spfExtra });
+    // Laat Scaleway de records controleren; dat gebeurt op de achtergrond en houdt "klaar" niet op.
+    await scw.req("POST", `${base}/${dom.id}/check`, {}).catch((e) => event(ctx.db, o.id, "tem-check", (e as Error).message));
+    return rec.dkim ? "Handtekening (DKIM) staat in je DNS" : "Maildomein aangemeld";
+  }],
+
+  ["dns-token", async (ctx, o) => {
+    const s = readSecrets(ctx, o);
+    if (s.dnsToken && o.dns_token_hash === sha256(s.dnsToken)) return undefined;
+    const token = crypto.randomBytes(32).toString("hex");
+    writeSecrets(ctx, o.id, { dnsToken: token });
+    ctx.db.prepare("UPDATE orders SET dns_token_hash = ? WHERE id = ?").run(sha256(token), o.id);
+    return undefined;
+  }],
+
+  ["ready", async (ctx, o) => {
+    saveKit(ctx, o.id);
+    return undefined;
+  }],
+];
+
+/** Nieuwe projectgebonden API-sleutel. Oude sleutels van de applicatie (zonder bekend geheim) gaan weg. */
+export async function newApiKey(ctx: Ctx, orderId: string) {
+  const scw = ctx.apis.scaleway;
+  const st = orderState(getOrder(ctx.db, orderId)!);
+  const list = await scw.req("GET", `/iam/v1alpha1/api-keys?application_id=${encodeURIComponent(st.applicationId)}`);
+  for (const k of list?.api_keys ?? []) await scw.reqOr404("DELETE", `/iam/v1alpha1/api-keys/${encodeURIComponent(k.access_key)}`);
+  const k = await scw.req("POST", "/iam/v1alpha1/api-keys", { application_id: st.applicationId, default_project_id: st.projectId, description: `Eigen Cloud ${getOrder(ctx.db, orderId)!.domain}` });
+  if (!k?.access_key || !k?.secret_key) throw new ApiError("Scaleway", 502, "Scaleway gaf geen API-sleutel terug");
+  // Het geheim krijg je maar één keer: meteen versleuteld bewaren.
+  writeSecrets(ctx, orderId, { apiKey: { accessKey: k.access_key, secretKey: k.secret_key } });
+  patchState(ctx.db, orderId, { apiKeyAccess: k.access_key });
+}
+
+/** Stelt het pakket voor de console samen en bewaart het versleuteld. */
+export function saveKit(ctx: Ctx, orderId: string): Kit {
+  const o = getOrder(ctx.db, orderId)!;
+  const st = orderState(o);
+  const s = readSecrets(ctx, o);
+  const b = bundleOf(ctx, o.bundle);
+  if (!b) throw new ApiError("Dienst", 400, `Bundel ${o.bundle} bestaat niet meer`);
+  if (!s.apiKey || !s.dnsToken || !st.projectId) throw new ApiError("Dienst", 500, "Pakket onvolledig: sleutel, DNS-token of project ontbreekt");
+  const kit: Kit = {
+    domain: o.domain,
+    nameservers: NAMESERVERS,
+    delegated: o.domain_mode === "register",
+    provider: { id: "scaleway", fields: { secretKey: s.apiKey.secretKey, projectId: st.projectId } },
+    storage: b.storage.map((x) => ({ offer: "scaleway" as const, region: x.region, accessKey: s.apiKey!.accessKey, secretKey: s.apiKey!.secretKey, purpose: x.purpose })),
+    placement: b.placement.map((p) => ({ provider: p.provider, region: p.region, size: p.size, country: p.country, kind: p.kind })),
+    policy: { minDataNodes: b.includes.dataServers, witnesses: b.includes.witnesses },
+    dns: { type: "desec", name: "dienst", token: s.dnsToken, zone: o.domain, api: `${ctx.cfg.publicUrl}/v1/desec` },
+    mailRelay: b.includes.mail ? { host: "smtp.tem.scaleway.com", port: 587, user: st.projectId, password: s.apiKey.secretKey, secure: false } : null,
+    spfExtra: st.spfExtra ?? "",
+  };
+  ctx.db.prepare("UPDATE orders SET kit_enc = ? WHERE id = ?").run(ctx.secrets.seal(kit, `kit:${orderId}`), orderId);
+  return kit;
+}
+
+const LABEL_FAIL: Record<string, string> = {
+  "dns-zone": "De DNS-zone kon niet worden aangemaakt",
+  domain: "De domeinnaam kon niet worden geregeld",
+  "scaleway-project": "Het project bij Scaleway kon niet worden aangemaakt",
+  "scaleway-iam": "De toegangssleutel kon niet worden gemaakt",
+  mail: "Mail versturen kon niet worden ingesteld",
+  "dns-token": "De DNS-toegang kon niet worden gemaakt",
+  ready: "Het pakket kon niet worden samengesteld",
+};
+
+/** Eén ronde klaarzetten. Geeft de nieuwe status terug. */
+export function provisionOrder(ctx: Ctx, orderId: string) {
+  return withLock(orderId, async () => {
+    let o = getOrder(ctx.db, orderId);
+    if (!o || !["paid", "provisioning"].includes(o.status)) return o?.status;
+    if (o.status === "paid") setStatus(ctx.db, o.id, "provisioning");
+    const done = new Set(getSteps(ctx.db, o.id).filter((s) => s.state === "done").map((s) => s.id));
+    for (const [id, fn] of STEPS) {
+      if (done.has(id)) continue;
+      o = getOrder(ctx.db, orderId)!;
+      setStep(ctx.db, o.id, id, "busy");
+      try {
+        const detail = await fn(ctx, o);
+        setStep(ctx.db, o.id, id, "done", detail);
+      } catch (e) {
+        const msg = (e as Error).message;
+        event(ctx.db, o.id, `step-${id}-error`, msg);
+        if (isPermanent(e)) {
+          const text = `${LABEL_FAIL[id] ?? "Er ging iets mis"}: ${msg}`;
+          setStep(ctx.db, o.id, id, "fail", text);
+          setStatus(ctx.db, o.id, "failed", text);
+          await trySend(ctx.mail, ctx.cfg.adminEmail, `Klaarzetten mislukt: ${o.domain}`, `Bestelling ${o.id} (${o.domain}) bleef steken bij stap '${id}':\n\n${msg}\n\nNa het oplossen: npm run dienst:cli -- opnieuw ${o.id}`);
+          return "failed";
+        }
+        const attempts = o.attempts + 1;
+        const wait = Math.min(ctx.cfg.loopMs * 2 ** Math.min(attempts - 1, 6), 3600_000);
+        ctx.db.prepare("UPDATE orders SET attempts = ?, next_attempt_at = ? WHERE id = ?").run(attempts, Date.now() + wait, o.id);
+        setStep(ctx.db, o.id, id, "busy", "Lukte nog niet; we proberen het zo opnieuw");
+        if (attempts === 10) await trySend(ctx.mail, ctx.cfg.adminEmail, `Klaarzetten loopt vast: ${o.domain}`, `Bestelling ${o.id} lukt al 10 keer niet bij stap '${id}':\n\n${msg}`);
+        return "provisioning";
+      }
+    }
+    ctx.db.prepare("UPDATE orders SET attempts = 0, next_attempt_at = 0 WHERE id = ?").run(orderId);
+    setStatus(ctx.db, orderId, "ready");
+    event(ctx.db, orderId, "ready");
+    o = getOrder(ctx.db, orderId)!;
+    const cust = getCustomer(ctx.db, o.customer_id)!;
+    await trySend(ctx.mail, cust.email, "Je cloud staat klaar om te starten",
+      `Hallo,\n\nAlles voor ${o.domain} is geregeld: servers, opslag, DNS en mail.\n\nOpen de Eigen Cloud-app of je beheerconsole en kies "Starten". Je cloud wordt dan in een paar minuten gebouwd. Je hoofdsleutel maak je zelf aan; die komt nooit bij ons.\n\nGroet,\nEigen Cloud Dienst`);
+    return "ready";
+  });
+}
+
+/** Alle bestellingen die (weer) aan de beurt zijn. */
+export async function provisionDue(ctx: Ctx) {
+  const due = ctx.db.prepare("SELECT id FROM orders WHERE status IN ('paid','provisioning') AND next_attempt_at <= ?").all(Date.now()) as { id: string }[];
+  for (const { id } of due) await provisionOrder(ctx, id).catch((e) => console.error(`[dienst] klaarzetten ${id}: ${(e as Error).message}`));
+}

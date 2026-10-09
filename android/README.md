@@ -19,10 +19,20 @@ De app praat daarvoor rechtstreeks met de aanbieders en met je servers; er zit g
 Je sleutels staan in een kluis op de telefoon (PBKDF2 + AES-256-GCM), te ontgrendelen met je wachtwoordzin of vingerafdruk
 (Android Keystore). Schermafbeeldingen van de beheerconsole zijn geblokkeerd; Google-back-up van de app staat uit.
 
+## Automatische updates
+
+Elke build op `main` is een nieuwe versie. GitHub Actions zet hem als pakket `eigen-cloud-app` op ghcr.io; de app
+kijkt elke paar uur, downloadt een nieuwe versie via wifi, controleert de SHA-256 en of hij met dezelfde sleutel is
+ondertekend, en installeert hem zelf. Vanaf Android 12 gebeurt dat zonder tik (na de eerste keer en nadat je de app
+eenmalig toestemming geeft om apps te installeren); op oudere Android-versies krijg je een melding om bij te werken.
+Zet het pakket `eigen-cloud-app` op ghcr.io één keer op **Public** (GitHub → je profiel → Packages), anders kan de
+app het niet ophalen. De vaste ondertekensleutel staat in `android/signing/` (lees de README daar).
+
 ## Installeren
 
-Download de nieuwste `eigen-cloud-x.y.z.apk` bij de [Releases](https://github.com/renevanes/own-cloud/releases/latest)
-op je telefoon en open hem (sta *installeren uit deze bron* toe). Nieuwe versies meldt de app zelf.
+Eerste keer: download de app van je eigen cloud (**Instellingen → Telefoon → App downloaden**, ingelogd), of de
+nieuwste `eigen-cloud-x.y.z.apk` bij de [Releases](https://github.com/renevanes/own-cloud/releases/latest), en open
+hem (sta *installeren uit deze bron* toe). Daarna werkt de app zichzelf bij.
 
 Eerste keer: vul het adres van je cloud in (bijv. `vanes.nl` → `https://cloud.vanes.nl`) en log in. Blijf ingelogd:
 de achtergrondtaken gebruiken je inlogsessie (30 dagen geldig, vernieuwd als je inlogt). Daarna in de app

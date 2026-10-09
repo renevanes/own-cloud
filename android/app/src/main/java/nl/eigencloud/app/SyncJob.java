@@ -98,7 +98,7 @@ public final class SyncJob extends JobService {
     /** Geeft true als het werk nog niet af is (wordt dan later herhaald). */
     private boolean runAll(Context c, boolean eager) {
         Prefs.setNum(c, "sync.last", System.currentTimeMillis());
-        Updater.daily(c);
+        Updater.periodic(c);
         CloudApi api = CloudApi.fromApp(c);
         if (api == null) { Prefs.setStr(c, "sync.error", "Log in in de app om op de achtergrond bij te werken"); return false; }
         Prefs.setStr(c, "sync.error", null);

@@ -41,6 +41,8 @@ Techniek: Node.js 22 + TypeScript, Fastify, SQLite (één bestand, makkelijk te 
    - **Starten** — één klik. Binnen ±10 minuten draait je cloud op drie servers.
 4. Open je cloud, ga naar **Instellingen → Importeren uit Google** en sleep je Takeout-bestanden erin.
 
+**Geen domein of accounts?** Kies in de eerste stap *Gratis adres*: de console maakt dan zelf een gratis account bij [deSEC](https://desec.io) (open source, non-profit) met een naam als `vanes.dedyn.io` — je typt alleen een plaatje over en klikt op de link in je mail. Wil je niets zelf afsluiten, kies dan in de stap *Zelf of via de dienst* een abonnement bij de **Eigen Cloud Dienst**: die regelt je domein, DNS, servers, opslag en mail-relay in één bedrag per maand, betaald met iDEAL. Je herstelsleutel blijft ook dan alleen bij jou. Zie [BROKER.md](BROKER.md) voor wie de dienst aanbiedt.
+
 **Liever vanaf je telefoon?** Installeer de [Android-app](android/README.md) en kies *Nieuwe Eigen Cloud opzetten*: dezelfde stappen, en je sleutels staan versleuteld op je telefoon (ontgrendelen met vingerafdruk).
 
 Bewaar het bestand `~/.eigen-cloud/kluis.json` gerust in je back-up of synchronisatiemap: het is versleuteld met je wachtwoordzin. Op een andere computer kies je in de console **Ik heb al een Eigen Cloud** en vul je je herstelsleutel en de gegevens van één opslag in.
@@ -130,6 +132,7 @@ npm install
 npm run set-password
 npm run dev          # http://localhost:3000, SMTP op poort 2525
 npm run beheer       # beheerconsole op http://localhost:4000
+npm run dienst       # de Eigen Cloud Dienst (centrale betaalde dienst), zie BROKER.md
 npm test             # mail, agenda, foto's, import, instellingen, gezondheid, versleuteling, Gmail,
                      # replicatie, aanbieders, cluster end-to-end en de console end-to-end
 android/core/test.sh # Java-kern van de Android-app tegen de TypeScript-code, moto (S3) en een echte cluster-node

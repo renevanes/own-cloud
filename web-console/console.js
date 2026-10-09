@@ -7,6 +7,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const root = $("#root");
 const FLAGS = { NL: "🇳🇱", DE: "🇩🇪", FI: "🇫🇮", FR: "🇫🇷", PL: "🇵🇱", SE: "🇸🇪", AT: "🇦🇹", CH: "🇨🇭", BE: "🇧🇪" };
+const eurStr = (m) => (m ? "€ " + String(m.value).replace(".", ",") : "");
 const eur = (n) => (n == null ? "prijs onbekend" : "€ " + Number(n).toFixed(2).replace(".", ","));
 const time = (ms) => {
   const d = new Date(ms), now = new Date();
@@ -70,25 +71,30 @@ if (NATIVE) {
   }, true);
 }
 
-let state = null, config = null, timer = null;
+let state = null, config = null, timer = null, dienstTimer = null;
 
-const STEPS = [
-  { id: "jij", label: "Jij en je domein" },
+const BASE_STEPS = [
+  { id: "jij", label: "Jij en je adres" },
   { id: "sleutel", label: "Herstelsleutel" },
+  { id: "regelen", label: "Zelf of via de dienst" },
   { id: "opslag", label: "Opslag voor back-ups" },
   { id: "servers", label: "Servers" },
   { id: "domein", label: "Domein koppelen" },
   { id: "mail", label: "Mail versturen" },
   { id: "starten", label: "Starten" },
 ];
+/** De stap "Zelf of via de dienst" alleen als deze versie een Eigen Cloud Dienst kent. */
+let STEPS = BASE_STEPS.filter((x) => x.id !== "regelen");
 
 async function boot() {
   state = await api("/api/state");
+  STEPS = BASE_STEPS.filter((x) => x.id !== "regelen" || state.dienst);
   render();
 }
 
 async function render() {
   clearInterval(timer);
+  clearTimeout(dienstTimer);
   $("#lockBtn").hidden = !state.unlocked;
   if (!state.vault) return renderStart();
   if (!state.unlocked) return renderLock();
@@ -164,15 +170,27 @@ function wizardShell(current, inner) {
   </ol><section class="pane">${inner}</section></div>`;
 }
 
+const DOMAIN_HINTS = {
+  own: "Straks zet je bij de partij waar je domein staat de nameservers om. De console vertelt precies wat je moet invullen.",
+  buy: "De Eigen Cloud Dienst registreert hem voor je; de kosten zitten in je abonnement.",
+  free: "Gratis van deSEC (open source, non-profit, Berlijn). Prima om te beginnen. Voor mail is een eigen domein beter: sommige ontvangers vertrouwen gratis adressen minder.",
+};
+
 function renderCreate() {
   root.innerHTML = wizardShell("jij", `
-    <h1>Jij en je domein</h1>
-    <p class="lead">Je cloud draait op je eigen domeinnaam. Heb je er nog geen, registreer er dan eerst een (bijvoorbeeld bij een Nederlandse registrar).</p>
+    <h1>Jij en je adres</h1>
+    <p class="lead">Je cloud krijgt een eigen adres op internet. Daaraan hangen je mailadres en de link naar je cloud.</p>
     <form class="fields" id="f">
-      <label>Domeinnaam<input name="domain" placeholder="vanes.nl" autocomplete="off" required></label>
-      <label>Je e-mailadres<div class="suffix"><input name="mailbox" placeholder="rene" required><span id="at">@…</span></div></label>
+      <fieldset class="radios">
+        <label class="check"><input type="radio" name="domainMode" value="own" checked> Ik heb een eigen domein</label>
+        ${state.dienst ? `<label class="check"><input type="radio" name="domainMode" value="buy"> Nieuw domein kopen</label>` : ""}
+        <label class="check"><input type="radio" name="domainMode" value="free"> Gratis adres</label>
+      </fieldset>
+      <label><span id="domTitle">Domeinnaam</span><div class="suffix"><input name="domain" placeholder="vanes.nl" autocomplete="off" autocapitalize="off" required><span id="domSuffix" hidden>.dedyn.io</span></div><small id="domHint"></small></label>
+      <p class="msg" id="avail" style="margin:-6px 0 0"></p>
+      <label>Je e-mailadres<div class="suffix"><input name="mailbox" placeholder="rene" autocapitalize="off" required><span id="at">@…</span></div></label>
       <label>Wachtwoord om in je cloud in te loggen<input type="password" name="appPassword" minlength="10" autocomplete="new-password" required><small>Minstens 10 tekens. Dit gebruik je dagelijks, ook op je telefoon.</small></label>
-      <label>Meldingen bij problemen naar<input type="email" name="alertEmail" placeholder="een adres bij een andere aanbieder"><small>Kies een adres buiten je nieuwe domein, zodat een melding ook aankomt als je mail stuk is.</small></label>
+      <label>Meldingen bij problemen naar<input type="email" name="alertEmail" placeholder="een adres bij een andere aanbieder"><small id="alertHint">Kies een adres buiten je nieuwe domein, zodat een melding ook aankomt als je mail stuk is.</small></label>
       <h2>Kluis van deze console</h2>
       <p class="muted" style="margin:0">De console bewaart je sleutels en API-tokens versleuteld op ${DEVICE}. Kies een wachtwoordzin die je nergens anders gebruikt, bijvoorbeeld vier losse woorden.</p>
       <div class="row"><label>Wachtwoordzin<input type="password" name="pass" minlength="12" autocomplete="new-password" required></label>
@@ -181,12 +199,38 @@ function renderCreate() {
       <div class="next"><button class="btn primary">Verder</button></div>
     </form>`);
   const f = $("#f");
-  f.domain.oninput = () => ($("#at").textContent = "@" + (f.domain.value.trim() || "…"));
+  const full = () => { const v = f.domain.value.trim().toLowerCase(); return f.domainMode.value === "free" ? (v ? v.replace(/\.dedyn\.io$/, "") + ".dedyn.io" : "") : v; };
+  let checkTimer = null;
+  const upd = () => {
+    const m = f.domainMode.value;
+    $("#domTitle").textContent = m === "free" ? "Kies een naam" : "Domeinnaam";
+    f.domain.placeholder = m === "free" ? "vanes" : "vanes.nl";
+    $("#domSuffix").hidden = m !== "free";
+    $("#domHint").textContent = DOMAIN_HINTS[m];
+    f.alertEmail.required = m === "free";
+    $("#alertHint").textContent = m === "free" ? "Nodig: hiermee maakt de console je gratis deSEC-account aan. Gebruik een adres buiten je nieuwe domein." : "Kies een adres buiten je nieuwe domein, zodat een melding ook aankomt als je mail stuk is.";
+    $("#at").textContent = "@" + (full() || "…");
+    $("#avail").textContent = "";
+    clearTimeout(checkTimer);
+    if (m === "buy" && /\.[a-z]{2,}$/.test(full())) {
+      checkTimer = setTimeout(async () => {
+        try {
+          const r = await api(`/api/dienst/check?name=${encodeURIComponent(full())}`);
+          if (!$("#avail")) return; // intussen verder gegaan
+          $("#avail").textContent = r.available ? `✓ ${r.domain} is vrij${r.price ? ` (${eurStr(r.price)} per jaar, zit in je abonnement)` : ""}` : `✕ ${r.domain} is al bezet. Heb jij hem? Kies dan "Ik heb een eigen domein".`;
+          $("#avail").className = "msg " + (r.available ? "ok" : "err");
+        } catch (err) { if ($("#avail")) { $("#avail").textContent = err.message; $("#avail").className = "msg err"; } }
+      }, 500);
+    }
+  };
+  f.onchange = upd;
+  f.domain.oninput = upd;
+  upd();
   f.onsubmit = async (e) => {
     e.preventDefault();
     if (f.pass.value !== f.pass2.value) return formMsg(f, "De wachtwoordzinnen zijn niet gelijk");
     try {
-      await busy($("button", f), () => api("/api/setup/create", { method: "POST", body: { domain: f.domain.value, mailbox: f.mailbox.value, appPassword: f.appPassword.value, alertEmail: f.alertEmail.value, passphrase: f.pass.value } }));
+      await busy($("button", f), () => api("/api/setup/create", { method: "POST", body: { domain: f.domain.value, domainMode: f.domainMode.value, mailbox: f.mailbox.value, appPassword: f.appPassword.value, alertEmail: f.alertEmail.value, passphrase: f.pass.value } }));
       location.hash = "sleutel";
       boot();
     } catch (err) { formMsg(f, err.message); }
@@ -249,7 +293,7 @@ async function go(step) {
 }
 
 function renderStep(id) {
-  const fn = ({ sleutel: stepKey, opslag: stepStores, servers: stepServers, domein: stepDns, mail: stepMail, starten: stepLaunch, klaar: renderDash })[id] ?? stepKey;
+  const fn = ({ sleutel: stepKey, regelen: stepRegelen, opslag: stepStores, servers: stepServers, domein: stepDns, mail: stepMail, starten: stepLaunch, klaar: renderDash })[id] ?? stepKey;
   fn();
 }
 
@@ -272,9 +316,158 @@ async function stepKey() {
   if (k.confirmed) { f.g3.value = k.groups[2]; f.g7.value = k.groups[6]; }
   f.onsubmit = async (e) => {
     e.preventDefault();
-    try { await api("/api/key/confirm", { method: "POST", body: { g3: f.g3.value, g7: f.g7.value } }); go("opslag"); }
+    try { await api("/api/key/confirm", { method: "POST", body: { g3: f.g3.value, g7: f.g7.value } }); go(state.dienst ? "regelen" : "opslag"); }
     catch (err) { formMsg(f, err.message); }
   };
+}
+
+// ═════════ Zelf of via de Eigen Cloud Dienst ═════════
+
+let dienstInfoCache = null, lastCheckout = null;
+
+async function stepRegelen() {
+  if (config.dienst?.orderId) return dienstProgress();
+  dienstInfoCache = await api("/api/dienst/info").catch(() => null);
+  const info = dienstInfoCache;
+  root.innerHTML = wizardShell("regelen", `
+    <h1>Zelf regelen of via de dienst?</h1>
+    <p class="lead">Je cloud heeft opslag, servers, DNS en een mail-relay nodig. Die kun je zelf afsluiten, of in één abonnement laten regelen. Je gegevens zijn in beide gevallen versleuteld met jouw sleutel; ook de dienst kan ze niet lezen.</p>
+    <div class="choices">
+      <button class="choice" id="zelf"><b>Zelf regelen</b><span class="muted">Je maakt accounts bij Europese aanbieders en betaalt hen rechtstreeks. DNS kan gratis via deSEC. Meestal het goedkoopst, wel meer stappen.</span></button>
+    </div>
+    <h2>Alles geregeld door de Eigen Cloud Dienst</h2>
+    ${info ? `<p class="muted" style="margin:0 0 12px">Servers en opslag in Amsterdam en Parijs (Scaleway), je domein, DNS en mail-relay. Eén bedrag per maand, maandelijks opzegbaar. Je kunt later alles meenemen naar je eigen accounts.</p>
+      <div class="presets">${info.bundles.map((b) => `<button class="preset" data-bundle="${esc(b.id)}">
+        <b>${esc(b.title)}</b><span class="price">${eurStr(b.monthly)} per maand</span><p>${esc(b.description)}</p>
+        <p><small>${b.includes.dataServers} dataservers en ${b.includes.witnesses} witness · ${b.includes.storageGb} GB opslag${b.includes.domain ? " · domein" : ""}${b.includes.mail ? " · mail-relay" : ""}</small></p></button>`).join("")}</div>`
+      : `<p class="note warn">De dienst is nu niet bereikbaar. Probeer het later opnieuw, of regel het zelf.</p>`}`);
+  $("#zelf").onclick = () => go("opslag");
+  root.onclick = (e) => { const b = e.target.closest?.("[data-bundle]")?.dataset.bundle; if (b) dienstLogin(b); };
+}
+
+function dienstShell(inner) {
+  root.innerHTML = wizardShell("regelen", `${inner}<p style="margin-top:22px"><button class="link" id="dienstBack">Terug naar de keuze</button></p>`);
+  $("#dienstBack").onclick = () => { clearTimeout(dienstTimer); stepRegelen(); };
+}
+
+function dienstLogin(bundle) {
+  if (config.dienst?.loggedIn) return dienstOrder(bundle);
+  dienstShell(`
+    <h1>Inloggen bij de dienst</h1>
+    <p class="lead">We sturen je een code van zes cijfers. Een wachtwoord heb je niet nodig.</p>
+    <form class="fields" id="f"><label>E-mailadres<input type="email" name="email" required value="${esc(config.dienst?.email ?? config.alertEmail ?? "")}"></label>
+      <p class="msg"></p><div><button class="btn primary">Stuur de code</button></div></form>
+    <form class="fields" id="g" hidden><label>Code uit de mail<input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required></label>
+      <p class="msg"></p><div><button class="btn primary">Inloggen</button> <button type="button" class="link" id="again">Andere code sturen</button></div></form>`);
+  const f = $("#f"), g = $("#g");
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    try { await busy($("button", f), () => api("/api/dienst/login", { method: "POST", body: { email: f.email.value } })); f.hidden = true; g.hidden = false; g.code.focus(); formMsg(g, `De code is verstuurd naar ${f.email.value}.`, true); }
+    catch (err) { formMsg(f, err.message); }
+  };
+  $("#again").onclick = () => { g.hidden = true; f.hidden = false; };
+  g.onsubmit = async (e) => {
+    e.preventDefault();
+    try { await busy($("button", g), () => api("/api/dienst/verify", { method: "POST", body: { code: g.code.value } })); config = await api("/api/config"); dienstOrder(bundle); }
+    catch (err) { formMsg(g, err.message); }
+  };
+}
+
+function dienstOrder(bundle) {
+  const info = dienstInfoCache;
+  const b = info?.bundles.find((x) => x.id === bundle);
+  const mode = config.domainMode;
+  if (mode === "free") {
+    dienstShell(`
+      <h1>Kies een domeinnaam</h1>
+      <p class="lead">Bij de dienst hoort een eigen domein, zoals vanes.nl, in plaats van ${esc(config.domain)}. De registratie zit in je abonnement.</p>
+      <form class="fields" id="f"><label>Domeinnaam<input name="domain" placeholder="vanes.nl" autocapitalize="off" required></label>
+        <label class="check"><input type="checkbox" name="mine"> Dit domein heb ik al</label>
+        <p class="msg"></p><div><button class="btn primary">Verder</button></div></form>`);
+    const f = $("#f");
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        if (!f.mine.checked) {
+          const r = await api(`/api/dienst/check?name=${encodeURIComponent(f.domain.value)}`);
+          if (!r.available) return formMsg(f, `${r.domain} is al bezet. Kies een andere naam, of vink aan dat hij van jou is.`);
+        }
+        await busy($("button", f), () => api("/api/setup/domain", { method: "POST", body: { domain: f.domain.value, domainMode: f.mine.checked ? "own" : "buy" } }));
+        config = await api("/api/config");
+        dienstOrder(bundle);
+      } catch (err) { formMsg(f, err.message); }
+    };
+    return;
+  }
+  const countries = { NL: "Nederland", BE: "België", DE: "Duitsland", FR: "Frankrijk", LU: "Luxemburg" };
+  dienstShell(`
+    <h1>${esc(b?.title ?? "Abonnement")} — ${eurStr(b?.monthly)} per maand</h1>
+    <p class="lead">Nog een paar gegevens, dan reken je af met iDEAL. Daarna wordt alles voor ${esc(config.domain)} klaargezet.</p>
+    <form class="fields" id="f">
+      ${mode === "own" ? `<fieldset class="radios">
+          <label class="check"><input type="radio" name="dmode" value="transfer" checked> Domein verhuizen naar de dienst (dan regelt de dienst ook de verlenging)</label>
+          <label class="check"><input type="radio" name="dmode" value="own"> Domein blijft waar hij staat; ik zet zelf de nameservers om</label>
+        </fieldset>
+        <label class="auth">Verhuiscode (auth-code)<input name="authCode" autocomplete="off"><small>Vraag je op bij de partij waar je domein nu staat.</small></label>`
+      : `<input type="hidden" name="dmode" value="register"><p class="note" style="margin:0">${esc(config.domain)} wordt op jouw naam geregistreerd.</p>`}
+      <div class="reg">
+        <h2 style="margin:6px 0 0">Houder van het domein</h2>
+        <p class="muted" style="margin:0"><small>Verplicht voor elke domeinregistratie; deze gegevens gaan naar het register (bij .nl: SIDN).</small></p>
+        <div class="row"><label>Voornaam<input name="firstName" autocomplete="given-name"></label><label>Achternaam<input name="lastName" autocomplete="family-name"></label></div>
+        <label>Bedrijf (optioneel)<input name="company" autocomplete="organization"></label>
+        <div class="row"><label>Straat<input name="street" autocomplete="address-line1"></label><label style="flex:0 0 110px">Nummer<input name="number"></label></div>
+        <div class="row"><label style="flex:0 0 140px">Postcode<input name="zipcode" autocomplete="postal-code"></label><label>Plaats<input name="city" autocomplete="address-level2"></label></div>
+        <div class="row"><label>Land<select name="country">${Object.entries(countries).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></label><label>Telefoon<input name="phone" type="tel" autocomplete="tel" placeholder="+31 6 12345678"></label></div>
+        <label>E-mailadres<input name="email" type="email" value="${esc(config.dienst?.email ?? config.alertEmail ?? "")}"></label>
+      </div>
+      <label class="check"><input type="checkbox" name="terms" required><span>Ik ga akkoord met de ${info?.termsUrl ? `<a href="${esc(info.termsUrl)}" target="_blank" rel="noopener">voorwaarden</a>` : "voorwaarden"}${info?.privacyUrl ? ` en de <a href="${esc(info.privacyUrl)}" target="_blank" rel="noopener">privacyverklaring</a>` : ""}</span></label>
+      <p class="msg"></p>
+      <div class="next"><button class="btn primary big">Afrekenen met iDEAL</button></div>
+    </form>`);
+  const f = $("#f");
+  const upd = () => {
+    const m = f.dmode.value;
+    const auth = $(".auth", f); if (auth) auth.hidden = m !== "transfer";
+    $(".reg", f).hidden = m === "own";
+    $$(".reg input:not([name=company])", f).forEach((i) => (i.required = m !== "own"));
+  };
+  f.onchange = upd;
+  upd();
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const m = f.dmode.value;
+    const registrant = Object.fromEntries(["firstName", "lastName", "company", "street", "number", "zipcode", "city", "country", "phone", "email"].map((k) => [k, f[k].value.trim()]));
+    try {
+      const r = await busy($("button", f), () => api("/api/dienst/order", { method: "POST", body: { bundle, mode: m, authCode: f.authCode?.value, registrant, acceptTerms: f.terms.checked } }));
+      lastCheckout = r.checkoutUrl;
+      config = await api("/api/config");
+      if (NATIVE) NATIVE.openUrl(r.checkoutUrl); else window.open(r.checkoutUrl, "_blank", "noopener");
+      dienstProgress();
+    } catch (err) { formMsg(f, err.message); }
+  };
+}
+
+async function dienstProgress() {
+  clearTimeout(dienstTimer);
+  let st;
+  try { st = await api("/api/dienst/status"); }
+  catch (err) { dienstShell(`<h1>De dienst</h1><p class="note warn">${esc(err.message)}</p><div><button class="btn" id="retry">Opnieuw</button></div>`); $("#retry").onclick = dienstProgress; return; }
+  const title = { awaiting_payment: "Wacht op je betaling", paid: "Betaling ontvangen", provisioning: "Alles wordt klaargezet", ready: "Alles staat klaar", failed: "Er ging iets mis", payment_problem: "Probleem met de betaling", cancelled: "Opgezegd", suspended: "Opgeschort" }[st.status] ?? "De dienst";
+  const lead = st.status === "awaiting_payment" ? "Rond de betaling af in het venster van Mollie. Daarna gaat het hier vanzelf verder."
+    : st.status === "ready" ? (config.dienst?.applied ? "Opslag, servers, DNS en mail zijn gekoppeld. Je kunt je cloud starten." : "De opslag wordt nu op jouw sleutel ingesteld…")
+    : st.status === "failed" ? `${esc(st.error ?? "")} De dienst probeert het opnieuw of neemt contact met je op; je betaling is niet verloren.`
+    : "Domein, DNS, servers en opslag worden aangemaakt. Dit duurt meestal een paar minuten.";
+  dienstShell(`<h1>${title}</h1><p class="lead">${lead}</p>
+    ${st.steps?.length ? launchView(st) : ""}
+    ${st.status === "awaiting_payment" && lastCheckout ? `<p><a class="btn" href="${esc(lastCheckout)}" target="_blank" rel="noopener">Naar de betaalpagina</a></p>` : ""}
+    <p class="msg" id="dmsg"></p>
+    ${st.status === "ready" && config.dienst?.applied ? `<div class="next"><button class="btn primary" id="nx">Verder naar starten</button></div>` : ""}`);
+  $("#nx")?.addEventListener("click", () => go("starten"));
+  if (st.status === "ready" && !config.dienst?.applied) {
+    try { await api("/api/dienst/apply", { method: "POST" }); config = await api("/api/config"); return dienstProgress(); }
+    catch (err) { $("#dmsg").textContent = err.message; $("#dmsg").className = "msg err"; dienstTimer = setTimeout(dienstProgress, 15000); return; }
+  }
+  if (!["ready", "cancelled", "suspended"].includes(st.status)) dienstTimer = setTimeout(dienstProgress, 3000);
 }
 
 function storeVerdict(stores) {
@@ -382,53 +575,137 @@ async function stepServers() {
 
 async function stepDns() {
   const d = config.domain;
+  if (config.dnsMode === "dienst") {
+    root.innerHTML = wizardShell("domein", `
+      <h1>Domein koppelen</h1>
+      <p class="lead">De Eigen Cloud Dienst beheert de DNS van ${esc(d)}. Je cloud zet er straks zelf de juiste records in.</p>
+      <div id="nsBox"></div>
+      <div class="next"><button class="btn primary" id="nx">Verder</button></div>`);
+    api("/api/dns/check").then((r) => nsPanel(r, d, "de dienst")).catch(() => {});
+    $("#nx").onclick = () => go("mail");
+    return;
+  }
+  const free = config.domainMode === "free";
   root.innerHTML = wizardShell("domein", `
     <h1>Domein koppelen</h1>
-    <p class="lead">Je cloud zet zelf de juiste DNS-records voor ${esc(d)}: waar de site en je mail te vinden zijn, en de beveiliging van je mail. Daarvoor heeft hij toegang nodig tot je DNS.</p>
-    <form class="fields" id="f">
+    <p class="lead">${free ? `${esc(d)} komt van deSEC: gratis, open source en zonder reclame. De console maakt het account voor je aan; jij hoeft alleen een plaatje over te typen en een link in je mail aan te klikken.`
+      : `Je cloud zet zelf de juiste DNS-records voor ${esc(d)}: waar de site en je mail te vinden zijn, en de beveiliging van je mail. Daarvoor heeft hij toegang nodig tot je DNS.`}</p>
+    ${free ? "" : `<form class="fields" id="f">
       <fieldset class="radios">
-        <label class="check"><input type="radio" name="mode" value="desec" ${config.dnsMode !== "hetzner" && config.dnsMode !== "manual" ? "checked" : ""}> deSEC (gratis, Berlijn, aanbevolen)</label>
+        <label class="check"><input type="radio" name="mode" value="desec" ${config.dnsMode !== "hetzner" && config.dnsMode !== "manual" ? "checked" : ""}> deSEC (gratis, open source, Berlijn — aanbevolen)</label>
         <label class="check"><input type="radio" name="mode" value="hetzner" ${config.dnsMode === "hetzner" ? "checked" : ""}> Hetzner DNS</label>
         <label class="check"><input type="radio" name="mode" value="manual" ${config.dnsMode === "manual" ? "checked" : ""}> Ik regel DNS zelf</label>
       </fieldset>
+      <p class="desecNew" style="margin:0"><button type="button" class="btn" id="newDesec">Nog geen deSEC-account? Laat de console er een maken</button></p>
       <label class="tok">API-token<input name="token" type="password" autocomplete="off" placeholder="${config.dns[0]?.token ?? ""}"><small class="hint"></small></label>
       <p class="msg"></p>
       <div><button class="btn">Koppelen</button></div>
-    </form>
+    </form>`}
+    <div id="signup"></div>
     <div id="nsBox"></div>
     <div class="next"><button class="btn primary" id="nx" ${config.dnsMode ? "" : "disabled"}>Verder</button></div>`);
-  const f = $("#f");
-  const upd = () => {
-    const m = f.mode.value;
-    $(".tok", f).hidden = m === "manual";
-    $(".hint", f).innerHTML = m === "desec" ? 'Maak een gratis account op <a href="https://desec.io" target="_blank" rel="noopener">desec.io</a> en daarna een token onder "Token Management".' : m === "hetzner" ? "Hetzner Console → je project → Beveiliging → API-tokens. Maak de DNS-zone eerst aan." : "";
-    $("button", f).textContent = m === "manual" ? "Opslaan" : "Koppelen";
-  };
-  f.onchange = upd;
-  upd();
-  const showNs = (r) => {
-    if (!r?.ns) return ($("#nsBox").innerHTML = f.mode.value === "manual" ? `<div class="note">Na het starten laat je cloud onder <b>Instellingen → Gezondheid</b> precies zien welke records je moet zetten.</div>` : "");
-    $("#nsBox").innerHTML = `<div class="panel"><b>${r.delegated ? "✓ Je domein wijst al naar " + (f.mode.value === "desec" ? "deSEC" : "Hetzner") : "Nog één ding bij je registrar"}</b>
-      ${r.delegated ? "" : `<p style="margin:0">Log in bij de partij waar je ${esc(d)} hebt geregistreerd en vervang de nameservers door:</p><div class="ns">${r.ns.map((n) => `<code>${esc(n)}</code>`).join("")}</div>
-      <p class="muted" style="margin:0"><small>Dat kan tot een dag duren. Je kunt intussen gewoon verder; je cloud controleert het zelf.</small></p><div><button class="btn" id="chk">Nu controleren</button></div>`}</div>`;
-    $("#chk")?.addEventListener("click", async (e) => { const c = await busy(e.target, () => api("/api/dns/check")); showNs(c); });
-  };
-  if (config.dnsMode && config.dnsMode !== "manual") api("/api/dns/check").then(showNs).catch(() => {});
-  f.onsubmit = async (e) => {
-    e.preventDefault();
-    try {
-      const r = await busy($("button", f), () => api("/api/dns", { method: "POST", body: { mode: f.mode.value, token: f.token.value } }));
-      config = await api("/api/config");
-      $("#nx").disabled = false;
-      formMsg(f, f.mode.value === "manual" ? "Opgeslagen." : "Gekoppeld.", true);
-      showNs(r);
-    } catch (err) { formMsg(f, err.message); }
-  };
+  const done = (r) => { $("#nx").disabled = false; nsPanel(r, d, "deSEC"); };
+  if (free) {
+    if (config.dnsMode === "desec") api("/api/dns/check").then((r) => nsPanel({ ...r, delegated: true }, d, "deSEC")).catch(() => {});
+    else desecSignup($("#signup"), done);
+  } else {
+    const f = $("#f");
+    const upd = () => {
+      const m = f.mode.value;
+      $(".tok", f).hidden = m === "manual";
+      $(".desecNew", f).hidden = m !== "desec" || !!config.dnsMode;
+      $(".hint", f).innerHTML = m === "desec" ? 'Al een account op <a href="https://desec.io" target="_blank" rel="noopener">desec.io</a>? Maak een token onder "Token Management" en plak het hier.' : m === "hetzner" ? "Hetzner Console → je project → Beveiliging → API-tokens. Maak de DNS-zone eerst aan." : "";
+      $("button[type=submit], form#f > div > button", f).textContent = m === "manual" ? "Opslaan" : "Koppelen";
+    };
+    f.onchange = upd;
+    upd();
+    $("#newDesec").onclick = () => { $(".desecNew", f).hidden = true; desecSignup($("#signup"), done); };
+    if (config.dnsMode && config.dnsMode !== "manual") api("/api/dns/check").then((r) => nsPanel(r, d, f.mode.value === "desec" ? "deSEC" : "Hetzner")).catch(() => {});
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const r = await busy($("form#f > div > button", f), () => api("/api/dns", { method: "POST", body: { mode: f.mode.value, token: f.token.value } }));
+        config = await api("/api/config");
+        formMsg(f, f.mode.value === "manual" ? "Opgeslagen." : "Gekoppeld.", true);
+        $("#nx").disabled = false;
+        if (f.mode.value === "manual") $("#nsBox").innerHTML = `<div class="note">Na het starten laat je cloud onder <b>Instellingen → Gezondheid</b> precies zien welke records je moet zetten.</div>`;
+        else nsPanel(r, d, f.mode.value === "desec" ? "deSEC" : "Hetzner");
+      } catch (err) { formMsg(f, err.message); }
+    };
+  }
   $("#nx").onclick = () => go("mail");
 }
 
+/** Waar je domein naar moet wijzen, en of dat al zo is. */
+function nsPanel(r, d, who) {
+  if (!r?.ns) return;
+  $("#nsBox").innerHTML = `<div class="panel"><b>${r.delegated ? `✓ ${esc(d)} wijst naar ${esc(who)}` : "Nog één ding bij je registrar"}</b>
+    ${r.delegated ? "" : `<p style="margin:0">Log in bij de partij waar je ${esc(d)} hebt geregistreerd en vervang de nameservers door:</p><div class="ns">${r.ns.map((n) => `<code>${esc(n)}</code>`).join("")}</div>
+    <p class="muted" style="margin:0"><small>Dat kan tot een dag duren. Je kunt intussen gewoon verder; je cloud controleert het zelf.</small></p><div><button class="btn" id="chk">Nu controleren</button></div>`}</div>`;
+  $("#chk")?.addEventListener("click", async (e) => { const c = await busy(e.target, () => api("/api/dns/check")); nsPanel(c, d, who); });
+}
+
+/** Een deSEC-account aanmaken: plaatje overtypen, link in de mail aanklikken, klaar. */
+async function desecSignup(box, done) {
+  const free = config.domainMode === "free";
+  if (config.desec && !config.dnsMode) return desecWait(box, done);
+  box.innerHTML = `<form class="panel" id="cf"><b>Gratis account bij deSEC</b>
+    <label>E-mailadres voor je deSEC-account<input type="email" name="email" required value="${esc(config.desec?.email ?? config.alertEmail ?? "")}"><small>deSEC stuurt hier een bevestigingslink naartoe. Gebruik een adres buiten ${esc(config.domain)}.</small></label>
+    <div class="captcha"><img id="cimg" alt="Plaatje met tekens"><button type="button" class="link" id="cnew">Ander plaatje</button></div>
+    <label>Tekens uit het plaatje<input name="solution" autocomplete="off" autocapitalize="characters" required></label>
+    <p class="msg"></p><div><button class="btn primary">Account aanmaken</button></div></form>`;
+  const f = $("#cf", box);
+  let capId = null;
+  const load = async () => {
+    try { const c = await api("/api/desec/captcha", { method: "POST" }); capId = c.id; $("#cimg").src = `data:image/png;base64,${c.challenge}`; f.solution.value = ""; }
+    catch (err) { formMsg(f, err.message); }
+  };
+  $("#cnew").onclick = load;
+  await load();
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await busy(f.querySelector("button.primary"), () => api("/api/desec/register", { method: "POST", body: { captchaId: capId, solution: f.solution.value, email: f.email.value } }));
+      config = await api("/api/config");
+      desecWait(box, done);
+    } catch (err) { formMsg(f, err.message); load(); }
+  };
+  void free;
+}
+
+function desecWait(box, done) {
+  const free = config.domainMode === "free";
+  box.innerHTML = `<div class="panel"><b>Kijk in je mail</b>
+    <p style="margin:0">deSEC heeft een bevestigingslink gestuurd naar <b>${esc(config.desec?.email ?? "")}</b>. Klik erop en kom daarna hier terug.</p>
+    <p class="msg" id="wmsg"></p>
+    <div><button class="btn primary" id="clicked">Ik heb op de link geklikt</button> <button class="link" id="redo">Opnieuw beginnen</button></div>
+    ${free ? `<form class="fields" id="rename" hidden><p style="margin:0">Zegt deSEC dat ${esc(config.domain)} al bezet is? Kies dan een andere naam en maak het account opnieuw aan.</p>
+      <label>Nieuwe naam<div class="suffix"><input name="name" required autocapitalize="off"><span>.dedyn.io</span></div></label><div><button class="btn">Andere naam gebruiken</button></div></form>` : ""}</div>`;
+  const msg = $("#wmsg", box);
+  $("#clicked").onclick = async (e) => {
+    try {
+      const r = await busy(e.target, () => api("/api/desec/finish", { method: "POST" }));
+      if (r.pending) { msg.textContent = "Nog niet bevestigd. Duurt het lang? Kijk ook in je spammap."; msg.className = "msg err"; const rn = $("#rename", box); if (rn) rn.hidden = false; return; }
+      config = await api("/api/config");
+      box.innerHTML = `<p class="msg ok">✓ Account aangemaakt en gekoppeld.</p>`;
+      done(r);
+    } catch (err) { msg.textContent = err.message; msg.className = "msg err"; }
+  };
+  $("#redo").onclick = () => { config.desec = null; desecSignup(box, done); };
+  const rn = $("#rename", box);
+  if (rn) rn.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api("/api/setup/domain", { method: "POST", body: { domain: rn.name.value, domainMode: "free" } });
+      config = await api("/api/config");
+      config.desec = null;
+      stepDns();
+    } catch (err) { msg.textContent = err.message; msg.className = "msg err"; }
+  };
+}
+
 const RELAYS = {
-  scaleway: { host: "smtp.tem.scw.cloud", port: 465, secure: true, label: "Scaleway TEM (Frankrijk)" },
+  scaleway: { host: "smtp.tem.scaleway.com", port: 465, secure: true, label: "Scaleway TEM (Frankrijk)" },
   brevo: { host: "smtp-relay.brevo.com", port: 587, secure: false, spf: "include:spf.brevo.com", label: "Brevo (Frankrijk)" },
   custom: { label: "Eigen relay" },
 };

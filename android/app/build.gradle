@@ -4,8 +4,11 @@ plugins {
 
 // Versie komt uit package.json van de cloud, zodat app en servers samen oplopen.
 def pkg = new groovy.json.JsonSlurper().parse(file("../../package.json"))
-def versionParts = pkg.version.tokenize(".").collect { it.toInteger() }
+// Elke build op main krijgt een hoger versienummer, zodat de app hem als update ziet.
 def ciBuild = (System.getenv("GITHUB_RUN_NUMBER") ?: "0").toInteger()
+def signingProps = new Properties()
+def signingFile = file("../signing/signing.properties")
+if (signingFile.exists()) signingFile.withInputStream { signingProps.load(it) }
 
 android {
     namespace "nl.eigencloud.app"
@@ -15,9 +18,13 @@ android {
         applicationId "nl.eigencloud.app"
         minSdk 26
         targetSdk 34
-        versionCode versionParts[0] * 1000000 + versionParts[1] * 10000 + versionParts[2] * 100 + (ciBuild % 100)
-        versionName pkg.version
+        versionCode 2000000 + ciBuild
+        versionName ciBuild > 0 ? "${pkg.version}.${ciBuild}" : pkg.version
         buildConfigField "String", "UPDATE_REPO", "\"${System.getenv("EIGEN_UPDATE_REPO") ?: "renevanes/own-cloud"}\""
+        // Updates komen als OCI-pakket van ghcr.io (openbaar te lezen, ook als de repository privé is).
+        buildConfigField "String", "UPDATE_IMAGE", "\"${System.getenv("EIGEN_UPDATE_IMAGE") ?: "renevanes/eigen-cloud-app"}\""
+        // Adres van de Eigen Cloud Dienst (centrale betaalde dienst); leeg = optie verborgen.
+        buildConfigField "String", "DIENST_URL", "\"${System.getenv("EIGEN_DIENST_URL") ?: ""}\""
     }
 
     buildFeatures { buildConfig true }
@@ -32,12 +39,17 @@ android {
 
     signingConfigs {
         release {
-            // GitHub Actions zet deze vier variabelen uit de repository-secrets (zie .github/workflows/android.yml).
+            // Voorkeur: repository-secrets (zie android/signing/README.md); anders de vaste sleutel in android/signing.
             if (System.getenv("ANDROID_KEYSTORE")) {
                 storeFile file(System.getenv("ANDROID_KEYSTORE"))
                 storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
                 keyAlias System.getenv("ANDROID_KEY_ALIAS")
                 keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+            } else if (signingProps.getProperty("storeFile")) {
+                storeFile file("../signing/" + signingProps.getProperty("storeFile"))
+                storePassword signingProps.getProperty("storePassword")
+                keyAlias signingProps.getProperty("keyAlias")
+                keyPassword signingProps.getProperty("keyPassword")
             }
         }
     }
@@ -45,7 +57,7 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig System.getenv("ANDROID_KEYSTORE") ? signingConfigs.release : signingConfigs.debug
+            signingConfig signingConfigs.release
         }
     }
 

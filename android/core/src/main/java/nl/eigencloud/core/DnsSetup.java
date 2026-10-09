@@ -56,7 +56,8 @@ public final class DnsSetup {
         c.put("dns", Json.list(Json.obj("type", mode, "name", mode, "token", tok, "zone", d)));
         console.put("dnsMode", mode);
         console.put("nameservers", new ArrayList<Object>(ns));
-        return new Result(ns, delegated(d, ns));
+        // dedyn.io-namen staan meteen goed: deSEC beheert dedyn.io zelf.
+        return new Result(ns, d.endsWith(".dedyn.io") || delegated(d, ns));
     }
 
     /** deSEC: checks the token and adds the domain when it does not exist yet. */
@@ -65,6 +66,7 @@ public final class DnsSetup {
         Http.Response r = Http.request("GET", Endpoints.DESEC + "/domains/" + domain + "/", h, null, 15_000);
         if (r.status == 401 || r.status == 403) throw new IOException("deSEC accepteert dit token niet");
         if (r.status == 404) {
+            if (domain.endsWith(".dedyn.io")) throw new IOException(domain + " bestaat (nog) niet bij deSEC. Maak het account opnieuw aan met een andere naam.");
             Http.Response cr = Http.request("POST", Endpoints.DESEC + "/domains/", h, Bytes.utf8(Json.stringify(Json.obj("name", domain))), 15_000);
             if (!cr.ok()) throw new IOException("Domein toevoegen bij deSEC mislukt: " + Bytes.head(cr.text(), 200));
         }

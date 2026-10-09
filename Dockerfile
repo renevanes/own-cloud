@@ -15,6 +15,8 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
 COPY web ./web
+# Android-app voor de eerste installatie vanaf je eigen cloud (door de CI gevuld; leeg = geen download)
+COPY app-dist ./app-dist
 ENV NODE_ENV=production DATA_DIR=/data
 VOLUME /data
 EXPOSE 3000 2525 7946

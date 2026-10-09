@@ -30,6 +30,7 @@ final class ConsoleBackend {
             instance = new ConsoleApi(new File(new File(app.getFilesDir(), "beheer"), "kluis.json"), catalog, url -> {
                 if (Prefs.cloudUrl(app) == null) Prefs.setStr(app, Prefs.CLOUD_URL, url);
             });
+            instance.dienstUrl = BuildConfig.DIENST_URL;
         }
         return instance;
     }

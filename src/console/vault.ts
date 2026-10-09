@@ -13,7 +13,13 @@ export interface ConsoleState {
   step: string;
   done: boolean;
   keyConfirmed: boolean;
-  dnsMode?: "desec" | "hetzner" | "manual";
+  dnsMode?: "desec" | "hetzner" | "manual" | "dienst";
+  /** Hoe je aan je domein komt: eigen domein, gratis naam.dedyn.io, of nieuw via de dienst. */
+  domainMode?: "own" | "free" | "buy";
+  /** Account bij deSEC dat de console zelf heeft aangemaakt. */
+  desec?: { email: string; password: string; at: number };
+  /** Eigen Cloud Dienst (centrale betaalde dienst). */
+  dienst?: { email?: string; token?: string; orderId?: string; bundle?: string; applied?: boolean };
   preset?: string;
   firstLaunch?: { at: number; nodeId: string; provider: string; region: string; clusterUrl?: string; apiUrl?: string };
   appPasswordHash?: string;

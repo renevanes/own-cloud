@@ -12,7 +12,9 @@
     "import": "tsx src/import/cli.ts",
     "set-password": "tsx src/setPassword.ts",
     "eigen": "tsx src/cluster/cli.ts",
-    "beheer": "tsx src/console/server.ts"
+    "beheer": "tsx src/console/server.ts",
+    "dienst": "tsx src/broker/main.ts",
+    "dienst:cli": "tsx src/broker/cli.ts"
   },
   "keywords": [],
   "author": "",

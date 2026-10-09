@@ -14,7 +14,7 @@ public final class R { public static final class drawable { public static final 
 J
 cat > "$OUT/stubs-src/nl/eigencloud/app/BuildConfig.java" <<'J'
 package nl.eigencloud.app;
-public final class BuildConfig { public static final String VERSION_NAME = "0.0.0"; public static final int VERSION_CODE = 1; public static final String UPDATE_REPO = "x/y"; }
+public final class BuildConfig { public static final String VERSION_NAME = "0.0.0"; public static final int VERSION_CODE = 1; public static final String UPDATE_REPO = "x/y"; public static final String UPDATE_IMAGE = "x/y-app"; public static final String DIENST_URL = ""; }
 J
 set +e
 javac -Xlint:all -Xlint:-options -Xlint:-deprecation -Werror -source 8 -target 8 -bootclasspath "$JAR:$LMF" -encoding UTF-8 -d "$OUT/classes" \

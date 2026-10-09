@@ -32,6 +32,8 @@ public final class ConsoleApi {
     private final Catalog catalog;
     private final Listener listener;
     private long lastUse;
+    /** Base URL of the Eigen Cloud Dienst (central paid service); empty = not offered. */
+    public volatile String dienstUrl = "";
     /** The vault locks itself after this much idle time (ms). */
     public long idleMs = 15 * 60_000L;
 
@@ -209,7 +211,11 @@ public final class ConsoleApi {
                 "stores", stores, "providers", providers, "dns", dns,
                 "dnsMode", con == null ? null : con.get("dnsMode"), "mailRelay", relay,
                 "spfExtra", Json.str(con, "spfExtra") == null ? "" : Json.str(con, "spfExtra"),
-                "policy", c.get("policy"), "preset", con == null ? null : con.get("preset"));
+                "policy", c.get("policy"), "preset", con == null ? null : con.get("preset"),
+                "domainMode", con == null || con.get("domainMode") == null ? "own" : con.get("domainMode"),
+                "desec", Json.map(con, "desec") == null ? null : Json.obj("email", Json.str(con, "desec", "email"), "at", Json.path(con, "desec", "at")),
+                "dienst", Json.map(con, "dienst") == null ? null : Json.obj("email", Json.str(con, "dienst", "email"), "loggedIn", Json.str(con, "dienst", "token") != null,
+                        "orderId", Json.str(con, "dienst", "orderId"), "bundle", Json.path(con, "dienst", "bundle"), "applied", Json.truthy(Json.path(con, "dienst", "applied"))));
     }
 
     /** What /api/state reports about biometric unlock (filled in by the app). */
@@ -257,11 +263,25 @@ public final class ConsoleApi {
                 return ok(Json.obj("vault", vault.exists(), "unlocked", unlocked(), "step", con == null ? null : con.get("step"),
                         "done", con != null && Json.truthy(con.get("done")), "domain", vault.isUnlocked() ? cfg().get("domain") : null,
                         "offers", Json.obj("stores", catalog.storeOffers(), "servers", catalog.serverOffers()),
-                        "phone", true, "biometric", biometric));
+                        "phone", true, "biometric", biometric, "dienst", dienstUrl != null && !dienstUrl.isEmpty(),
+                        "domainMode", con == null ? null : con.get("domainMode")));
+            }
+            case "GET /api/dienst/info":
+                return ok(Extras.dienstInfo(dienstUrl));
+            case "GET /api/dienst/check": {
+                String name = "";
+                int q = path.indexOf("?name=");
+                if (q >= 0) name = Bytes.decodeURIComponent(path.substring(q + 6).replaceFirst("&.*$", ""));
+                return ok(Extras.dienstCheck(dienstUrl, name));
             }
             case "POST /api/setup/create": {
                 if (vault.exists()) return err(409, "Er is al een kluis. Ontgrendel hem.");
-                Map<String, Object> c = Console.newAdminConfig(Json.str(b, "domain"), Json.str(b, "mailbox"), Json.str(b, "alertEmail"), Json.str(b, "appPassword"));
+                String mode = Json.str(b, "domainMode") == null ? "own" : Json.str(b, "domainMode");
+                String domain = Extras.normalizeDomain(Json.str(b, "domain"), mode);
+                String alert = Json.str(b, "alertEmail");
+                if ("free".equals(mode) && (alert == null || alert.isEmpty())) return err(400, "Vul een meldadres in; daarmee maakt de console je gratis deSEC-account aan");
+                Map<String, Object> c = Console.newAdminConfig(domain, Json.str(b, "mailbox"), alert, Json.str(b, "appPassword"));
+                Json.map(c, "console").put("domainMode", mode);
                 vault.create(Json.str(b, "passphrase"), c);
                 touch();
                 return ok(Json.obj("ok", true));
@@ -373,6 +393,57 @@ public final class ConsoleApi {
                 boolean tested = SmtpCheck.configure(c, relay, Json.str(b, "spfExtra"), Json.truthy(b.get("sendTest")));
                 save();
                 return ok(Json.obj("ok", true, "tested", tested));
+            }
+
+            case "POST /api/setup/domain": {
+                if (Json.truthy(Json.path(c, "console", "done"))) return err(409, "Je cloud draait al; het domein wijzigen kan dan niet meer hier");
+                String mode = Json.str(b, "domainMode") == null ? "own" : Json.str(b, "domainMode");
+                Extras.changeDomain(c, Extras.normalizeDomain(Json.str(b, "domain"), mode), mode);
+                save();
+                return ok(Json.obj("ok", true, "domain", c.get("domain")));
+            }
+            case "POST /api/desec/captcha":
+                return ok(Extras.desecCaptcha());
+            case "POST /api/desec/register": {
+                Map<String, Object> r = Extras.desecRegister(c, Json.str(b, "captchaId"), Json.str(b, "solution"), Json.str(b, "email"));
+                save();
+                return ok(r);
+            }
+            case "POST /api/desec/finish": {
+                String token;
+                try {
+                    token = Extras.desecFinish(c);
+                } finally {
+                    save();
+                }
+                if (token == null) return ok(Json.obj("pending", true, "email", Json.str(c, "console", "desec", "email")));
+                DnsSetup.Result r = DnsSetup.configure(c, "desec", token);
+                save();
+                return ok(r.toJson());
+            }
+            case "POST /api/dienst/login": {
+                Map<String, Object> r = Extras.dienstLogin(dienstUrl, c, Json.str(b, "email"));
+                save();
+                return ok(r);
+            }
+            case "POST /api/dienst/verify": {
+                Map<String, Object> r = Extras.dienstVerify(dienstUrl, c, Json.str(b, "code"));
+                save();
+                return ok(r);
+            }
+            case "POST /api/dienst/order": {
+                Map<String, Object> r = Extras.dienstOrder(dienstUrl, c, b);
+                save();
+                return ok(r);
+            }
+            case "GET /api/dienst/status":
+                return ok(Extras.dienstStatus(dienstUrl, c));
+            case "POST /api/dienst/apply": {
+                try {
+                    return ok(Extras.dienstApply(dienstUrl, c, catalog));
+                } finally {
+                    save();
+                }
             }
 
             case "GET /api/checklist":

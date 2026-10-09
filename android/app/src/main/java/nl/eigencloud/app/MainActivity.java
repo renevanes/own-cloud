@@ -87,6 +87,7 @@ public final class MainActivity extends Activity {
         CookieManager.getInstance().flush();
         // Bij openen meteen bijwerken (mail, agenda, nieuwe foto's), niet pas na een kwartier.
         if (Prefs.cloudUrl(this) != null && CloudApi.sessionToken(Prefs.cloudUrl(this)) != null) SyncJob.runNow(this);
+        event(Json.obj("type", "changed")); // bijv. terug uit de instelling "onbekende apps installeren"
     }
 
     @Override
@@ -203,6 +204,7 @@ public final class MainActivity extends Activity {
             case Prefs.NOTIFY_MAIL:
             case Prefs.NOTIFY_HEALTH:
             case Prefs.UPDATES:
+            case Prefs.AUTO_INSTALL:
                 return Build.VERSION.SDK_INT >= 33 ? new String[]{"android.permission.POST_NOTIFICATIONS"} : new String[0];
             default:
                 return new String[0];
@@ -313,8 +315,24 @@ public final class MainActivity extends Activity {
         @JavascriptInterface
         public void installUpdate() {
             if (!trusted()) return;
-            String url = Prefs.str(MainActivity.this, "update.url");
-            if (url != null && url.startsWith("https://")) startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+            if (!Updater.canInstall(MainActivity.this)) { startActivity(Updater.installPermissionIntent(MainActivity.this)); return; }
+            new Thread(() -> {
+                try {
+                    Updater.Release r = Updater.check(MainActivity.this);
+                    if (r == null) { event(Json.obj("type", "update", "available", null)); return; }
+                    event(Json.obj("type", "update", "installing", r.version));
+                    Updater.install(MainActivity.this, r);
+                } catch (IOException | RuntimeException e) {
+                    event(Json.obj("type", "update", "error", e.getMessage()));
+                }
+            }).start();
+        }
+
+        /** Opent de instelling waarmee Eigen Cloud zelf updates mag installeren. */
+        @JavascriptInterface
+        public void allowInstalls() {
+            if (!trusted()) return;
+            startActivity(Updater.installPermissionIntent(MainActivity.this));
         }
 
         /** Startscherm: verbinden met een bestaande cloud. Antwoord komt als event {type:"connect"}. */

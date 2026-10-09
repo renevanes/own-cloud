@@ -146,3 +146,7 @@ label small { color: var(--muted); }
   .dash { grid-template-columns: 1fr; padding: 8px 16px 40px; gap: 16px; }
   .dash .mapwrap { position: static; max-width: 340px; }
 }
+
+/* deSEC-account: plaatje overtypen */
+.captcha { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.captcha img { height: 70px; min-width: 160px; background: #fff; border: 1.5px solid var(--line); border-radius: var(--radius-s); image-rendering: pixelated; }

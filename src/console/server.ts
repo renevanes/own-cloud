@@ -22,6 +22,7 @@ import { makeProvider } from "../cluster/providers.js";
 import { makeStore, type StoreConfig } from "../cluster/stores.js";
 import { restoreFromAny, restoreFromStore } from "../cluster/backup.js";
 import { rpc } from "../cluster/transport.js";
+import * as extras from "./extras.js";
 import { clusterStatus, findLeader, prepareStore, probeCluster, provisionFirstNode, readManifest, recoverAdminConfig, saveAdminCopy, sendJob, adminProof, pushAdminConfig } from "../cluster/admin.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -84,6 +85,9 @@ function sanitized(c: AdminConfig) {
     mailRelay: c.console.mailRelay ? (() => { try { const u = new URL(c.console.mailRelay!); return { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username), secure: u.protocol === "smtps:" }; } catch { return null; } })() : null,
     spfExtra: c.console.spfExtra ?? "",
     policy: c.policy, preset: c.console.preset ?? null,
+    domainMode: c.console.domainMode ?? "own",
+    desec: c.console.desec ? { email: c.console.desec.email, at: c.console.desec.at } : null,
+    dienst: c.console.dienst ? { email: c.console.dienst.email ?? null, loggedIn: !!c.console.dienst.token, orderId: c.console.dienst.orderId ?? null, bundle: c.console.dienst.bundle ?? null, applied: !!c.console.dienst.applied } : null,
   };
 }
 
@@ -141,6 +145,89 @@ function adminPolicy(placement: Placement[]) {
   return { ...DEFAULT_POLICY, placement };
 }
 
+// ───────── Gedeelde stappen (ook gebruikt door de dienst-koppeling) ─────────
+
+type StoreInput = { offer: string; region: string; endpoint?: string; accessKey?: string; secretKey?: string; bucket?: string; purpose: "replica" | "backup"; dir?: string };
+
+/** Opslag koppelen: bucket aanmaken en instellen (versiebeheer, onveranderbaar), en bij succes bewaren. */
+async function addStore(b: StoreInput) {
+  const offer = storeOffers().find((o) => o.id === b.offer);
+  const region = offer?.regions.find((r) => r.id === b.region);
+  if (!offer || !region) throw new Error("Kies een aanbieder en locatie");
+  const name = `${offer.id}-${region.id}${b.purpose === "backup" ? "-backup" : ""}`;
+  const existing = cfg().stores.find((x) => x.name === name);
+  let store: StoreConfig;
+  if (offer.id === "localfs") {
+    store = { name, type: "fs", purpose: b.purpose, country: region.country, dir: b.dir || path.join(path.dirname(vault.file), "opslag", name) };
+  } else {
+    const endpoint = offer.customEndpoint ? b.endpoint : region.endpoint;
+    if (!endpoint || !/^https?:\/\//.test(endpoint)) throw new Error("Vul de endpoint-URL in (begint met https://)");
+    store = {
+      name, type: "s3", purpose: b.purpose, country: region.country, endpoint, region: region.id === "eigen" ? "us-east-1" : region.id,
+      bucket: b.bucket || `${cfg().cluster}-${b.purpose === "backup" ? "backup" : "data"}-${crypto.randomBytes(3).toString("hex")}`,
+      accessKey: b.accessKey || existing?.accessKey, secretKey: b.secretKey || existing?.secretKey,
+    };
+    if (!store.accessKey || !store.secretKey) throw new Error("Vul de toegangssleutel en geheime sleutel in");
+  }
+  const steps = await prepareStore(store);
+  const ok = steps.every((x) => x.ok || /Versiebeheer|Onveranderbaar/.test(x.label));
+  if (ok) {
+    cfg().stores = [...cfg().stores.filter((x) => x.name !== name), store];
+    save();
+  }
+  return { ok, steps, name };
+}
+
+/** DNS koppelen bij deSEC of Hetzner (of handmatig). */
+async function configureDns(c: AdminConfig, mode: "desec" | "hetzner" | "manual", tokenIn?: string) {
+  const d = c.domain!;
+  if (mode === "manual") {
+    c.dns = [];
+    c.console.dnsMode = "manual";
+    save();
+    return { ok: true, ns: null, delegated: null };
+  }
+  const token = tokenIn && !tokenIn.startsWith("••") ? tokenIn.trim() : c.dns.find((x) => x.type === mode)?.token;
+  if (!token) throw new Error("Vul je API-token in");
+  let ns: string[] = [];
+  if (mode === "desec") {
+    const base = extras.DESEC_URL();
+    const h = { authorization: `Token ${token}`, "content-type": "application/json" };
+    const r = await fetch(`${base}/domains/${d}/`, { headers: h });
+    if (r.status === 401 || r.status === 403) throw new Error("deSEC accepteert dit token niet");
+    if (r.status === 404) {
+      if (d.endsWith(".dedyn.io")) throw new Error(`${d} bestaat (nog) niet bij deSEC. Maak het account opnieuw aan met een andere naam.`);
+      const cr = await fetch(`${base}/domains/`, { method: "POST", headers: h, body: JSON.stringify({ name: d }) });
+      if (!cr.ok) throw new Error(`Domein toevoegen bij deSEC mislukt: ${(await cr.text()).slice(0, 200)}`);
+    }
+    ns = ["ns1.desec.io", "ns2.desec.org"];
+  } else {
+    const r = await fetch(`https://api.hetzner.cloud/v1/zones?name=${d}`, { headers: { authorization: `Bearer ${token}` } });
+    if (!r.ok) throw new Error("Hetzner accepteert dit token niet (of DNS staat nog in de oude DNS-console)");
+    const j = (await r.json()) as { zones?: { authoritative_nameservers?: { assigned?: string[] } }[] };
+    if (!j.zones?.length) throw new Error(`Maak eerst de zone ${d} aan in de Hetzner Console → DNS`);
+    ns = j.zones[0].authoritative_nameservers?.assigned ?? ["hydrogen.ns.hetzner.com", "oxygen.ns.hetzner.com", "helium.ns.hetzner.de"];
+  }
+  c.dns = [{ type: mode, name: mode, token, zone: d }];
+  c.console.dnsMode = mode;
+  c.console.nameservers = ns;
+  save();
+  // dedyn.io-namen staan meteen goed: deSEC beheert dedyn.io zelf.
+  return { ok: true, ns, delegated: d.endsWith(".dedyn.io") ? true : await delegated(d, ns) };
+}
+
+/** "vanes.nl" (eigen of te kopen domein) of "rene" → "rene.dedyn.io" (gratis). */
+function normalizeDomain(input: string | undefined, mode: string) {
+  let d = (input ?? "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  if (mode === "free") {
+    d = d.replace(/\.dedyn\.io$/, "");
+    if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(d)) throw new Error("Kies een naam met letters, cijfers en streepjes, zoals vanes");
+    return `${d}.dedyn.io`;
+  }
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d)) throw new Error("Vul een domeinnaam in, zoals vanes.nl");
+  return d;
+}
+
 // ───────── Server ─────────
 
 export async function buildConsole() {
@@ -158,17 +245,29 @@ export async function buildConsole() {
     done: vault.config?.console.done ?? false,
     domain: vault.config?.domain ?? null,
     offers: { stores: storeOffers(), servers: serverOffers() },
+    dienst: !!extras.DIENST_URL(),
+    domainMode: vault.config?.console.domainMode ?? null,
   }));
 
-  app.post<{ Body: { passphrase: string; domain: string; mailbox: string; alertEmail?: string; appPassword: string } }>("/api/setup/create", async (req, reply) => {
+  // Openbaar (ook vóór de kluis): de dienst en domeinbeschikbaarheid tonen in de eerste stap.
+  app.get("/api/dienst/info", async (_req, reply) => {
+    try { return await extras.dienstInfo(); } catch (e) { return reply.code(502).send({ error: (e as Error).message }); }
+  });
+  app.get<{ Querystring: { name?: string } }>("/api/dienst/check", async (req, reply) => {
+    try { return await extras.dienstCheck(req.query.name ?? ""); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+  });
+
+  app.post<{ Body: { passphrase: string; domain: string; domainMode?: "own" | "free" | "buy"; mailbox: string; alertEmail?: string; appPassword: string } }>("/api/setup/create", async (req, reply) => {
     if (vault.exists()) return reply.code(409).send({ error: "Er is al een kluis. Ontgrendel hem." });
     const b = req.body;
-    const domain = (b.domain ?? "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
-    if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain)) return reply.code(400).send({ error: "Vul een domeinnaam in, zoals vanes.nl" });
+    const mode = b.domainMode ?? "own";
+    let domain: string;
+    try { domain = normalizeDomain(b.domain, mode); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     if (!/^[a-z0-9._+-]+$/i.test(b.mailbox ?? "")) return reply.code(400).send({ error: "Vul het deel vóór de @ in, zoals rene" });
     if ((b.appPassword ?? "").length < 10) return reply.code(400).send({ error: "Kies een inlogwachtwoord van minstens 10 tekens" });
     if (b.alertEmail && !/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(b.alertEmail)) return reply.code(400).send({ error: "Het meldadres is geen geldig e-mailadres" });
     if (b.alertEmail?.endsWith("@" + domain)) return reply.code(400).send({ error: "Kies voor meldingen een adres buiten je eigen domein, zodat een melding je ook bereikt als je mail stuk is" });
+    if (mode === "free" && !b.alertEmail) return reply.code(400).send({ error: "Vul een meldadres in; daarmee maakt de console je gratis deSEC-account aan" });
     const cfg: AdminConfig = {
       cluster: domain.split(".")[0].replace(/[^a-z0-9-]/g, "").slice(0, 20) || "eigen",
       nodeId: "beheer", kind: "data", masterKey: randomKeyHex(), clusterPort: 7946, advertise: { clusterUrl: "" }, seeds: [], domain,
@@ -176,7 +275,7 @@ export async function buildConsole() {
       image: { ref: "ghcr.io/renevanes/eigen-cloud:latest", caddyRef: "ghcr.io/renevanes/eigen-caddy:latest" } as AdminConfig["image"],
       appEnv: { MAIL_DOMAINS: domain, MAIL_FROM: `${b.mailbox}@${domain}`, HOSTNAME_FQDN: `mail.${domain}`, NODE_ENV: "production" },
       policy: adminPolicy([]),
-      console: { step: "sleutel", done: false, keyConfirmed: false, appPasswordHash: hashPassword(b.appPassword), alertEmail: b.alertEmail ?? "" },
+      console: { step: "sleutel", done: false, keyConfirmed: false, appPasswordHash: hashPassword(b.appPassword), alertEmail: b.alertEmail ?? "", domainMode: mode },
     };
     try { vault.create(b.passphrase ?? "", cfg); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     newSession(reply);
@@ -230,33 +329,8 @@ export async function buildConsole() {
     });
 
     // ── Opslag ──
-    s.post<{ Body: { offer: string; region: string; endpoint?: string; accessKey?: string; secretKey?: string; bucket?: string; purpose: "replica" | "backup"; dir?: string } }>("/api/stores", async (req, reply) => {
-      const b = req.body;
-      const offer = storeOffers().find((o) => o.id === b.offer);
-      const region = offer?.regions.find((r) => r.id === b.region);
-      if (!offer || !region) return reply.code(400).send({ error: "Kies een aanbieder en locatie" });
-      const name = `${offer.id}-${region.id}${b.purpose === "backup" ? "-backup" : ""}`;
-      const existing = cfg().stores.find((x) => x.name === name);
-      let store: StoreConfig;
-      if (offer.id === "localfs") {
-        store = { name, type: "fs", purpose: b.purpose, country: region.country, dir: b.dir || path.join(path.dirname(vault.file), "opslag", name) };
-      } else {
-        const endpoint = offer.customEndpoint ? b.endpoint : region.endpoint;
-        if (!endpoint || !/^https?:\/\//.test(endpoint)) return reply.code(400).send({ error: "Vul de endpoint-URL in (begint met https://)" });
-        store = {
-          name, type: "s3", purpose: b.purpose, country: region.country, endpoint, region: region.id === "eigen" ? "us-east-1" : region.id,
-          bucket: b.bucket || `${cfg().cluster}-${b.purpose === "backup" ? "backup" : "data"}-${crypto.randomBytes(3).toString("hex")}`,
-          accessKey: b.accessKey || existing?.accessKey, secretKey: b.secretKey || existing?.secretKey,
-        };
-        if (!store.accessKey || !store.secretKey) return reply.code(400).send({ error: "Vul de toegangssleutel en geheime sleutel in" });
-      }
-      const steps = await prepareStore(store);
-      const ok = steps.every((x) => x.ok || /Versiebeheer|Onveranderbaar/.test(x.label));
-      if (ok) {
-        cfg().stores = [...cfg().stores.filter((x) => x.name !== name), store];
-        save();
-      }
-      return { ok, steps, name };
+    s.post<{ Body: StoreInput }>("/api/stores", async (req, reply) => {
+      try { return await addStore(req.body); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     });
     s.delete<{ Params: { name: string } }>("/api/stores/:name", async (req) => {
       cfg().stores = cfg().stores.filter((x) => x.name !== req.params.name);
@@ -322,43 +396,59 @@ export async function buildConsole() {
 
     // ── DNS ──
     s.post<{ Body: { mode: "desec" | "hetzner" | "manual"; token?: string } }>("/api/dns", async (req, reply) => {
-      const c = cfg();
-      const d = c.domain!;
-      const mode = req.body.mode;
-      if (mode === "manual") {
-        c.dns = [];
-        c.console.dnsMode = "manual";
-        save();
-        return { ok: true, ns: null, delegated: null };
-      }
-      const token = req.body.token && !req.body.token.startsWith("••") ? req.body.token.trim() : c.dns.find((x) => x.type === mode)?.token;
-      if (!token) return reply.code(400).send({ error: "Vul je API-token in" });
-      let ns: string[] = [];
-      if (mode === "desec") {
-        const h = { authorization: `Token ${token}`, "content-type": "application/json" };
-        const r = await fetch(`https://desec.io/api/v1/domains/${d}/`, { headers: h });
-        if (r.status === 401 || r.status === 403) return reply.code(400).send({ error: "deSEC accepteert dit token niet" });
-        if (r.status === 404) {
-          const cr = await fetch("https://desec.io/api/v1/domains/", { method: "POST", headers: h, body: JSON.stringify({ name: d }) });
-          if (!cr.ok) return reply.code(400).send({ error: `Domein toevoegen bij deSEC mislukt: ${(await cr.text()).slice(0, 200)}` });
-        }
-        ns = ["ns1.desec.io", "ns2.desec.org"];
-      } else {
-        const r = await fetch(`https://api.hetzner.cloud/v1/zones?name=${d}`, { headers: { authorization: `Bearer ${token}` } });
-        if (!r.ok) return reply.code(400).send({ error: "Hetzner accepteert dit token niet (of DNS staat nog in de oude DNS-console)" });
-        const j = (await r.json()) as { zones?: { authoritative_nameservers?: { assigned?: string[] } }[] };
-        if (!j.zones?.length) return reply.code(400).send({ error: `Maak eerst de zone ${d} aan in de Hetzner Console → DNS` });
-        ns = j.zones[0].authoritative_nameservers?.assigned ?? ["hydrogen.ns.hetzner.com", "oxygen.ns.hetzner.com", "helium.ns.hetzner.de"];
-      }
-      c.dns = [{ type: mode, name: mode, token, zone: d }];
-      c.console.dnsMode = mode;
-      c.console.nameservers = ns;
-      save();
-      return { ok: true, ns, delegated: await delegated(d, ns) };
+      try { return await configureDns(cfg(), req.body.mode, req.body.token); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     });
     s.get("/api/dns/check", async () => {
       const c = cfg();
       return { ns: c.console.nameservers ?? null, delegated: c.console.nameservers ? await delegated(c.domain!, c.console.nameservers) : null, current: await dnsp.resolveNs(c.domain!).catch(() => []) };
+    });
+
+    // ── Domein wijzigen (vóór de start) ──
+    s.post<{ Body: { domain: string; domainMode: "own" | "free" | "buy" } }>("/api/setup/domain", async (req, reply) => {
+      const c = cfg();
+      if (c.console.done) return reply.code(409).send({ error: "Je cloud draait al; het domein wijzigen kan dan niet meer hier" });
+      try { extras.changeDomain(c, normalizeDomain(req.body.domain, req.body.domainMode), req.body.domainMode); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+      save();
+      return { ok: true, domain: c.domain };
+    });
+
+    // ── Gratis DNS: deSEC-account vanuit de console ──
+    s.post("/api/desec/captcha", async (_req, reply) => {
+      try { return await extras.desecCaptcha(); } catch (e) { return reply.code(502).send({ error: (e as Error).message }); }
+    });
+    s.post<{ Body: { captchaId: string; solution: string; email?: string } }>("/api/desec/register", async (req, reply) => {
+      try { const r = await extras.desecRegister(cfg(), req.body); save(); return r; } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+    s.post("/api/desec/finish", async (_req, reply) => {
+      const c = cfg();
+      try {
+        const token = await extras.desecFinish(c);
+        if (!token) return { pending: true, email: c.console.desec?.email };
+        save();
+        return await configureDns(c, "desec", token);
+      } catch (e) { save(); return reply.code(400).send({ error: (e as Error).message }); }
+    });
+
+    // ── Eigen Cloud Dienst ──
+    s.post<{ Body: { email: string } }>("/api/dienst/login", async (req, reply) => {
+      try { const r = await extras.dienstLogin(cfg(), req.body.email); save(); return r; } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+    s.post<{ Body: { code: string } }>("/api/dienst/verify", async (req, reply) => {
+      try { const r = await extras.dienstVerify(cfg(), req.body.code); save(); return r; } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+    s.post<{ Body: extras.OrderInput }>("/api/dienst/order", async (req, reply) => {
+      try { const r = await extras.dienstOrder(cfg(), req.body); save(); return r; } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+    s.get("/api/dienst/status", async (_req, reply) => {
+      try { return await extras.dienstStatus(cfg()); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+    s.post("/api/dienst/apply", async (_req, reply) => {
+      const c = cfg();
+      try {
+        const r = await extras.dienstApply(c, addStore);
+        save();
+        return r;
+      } catch (e) { save(); return reply.code(400).send({ error: (e as Error).message }); }
     });
 
     // ── Mail ──

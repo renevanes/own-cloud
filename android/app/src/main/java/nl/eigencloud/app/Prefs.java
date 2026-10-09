@@ -16,13 +16,14 @@ final class Prefs {
     static final String NOTIFY_MAIL = "notifyMail";
     static final String NOTIFY_HEALTH = "notifyHealth";
     static final String UPDATES = "updates";
+    static final String AUTO_INSTALL = "autoInstall";
 
     static SharedPreferences get(Context c) { return c.getApplicationContext().getSharedPreferences("eigen", Context.MODE_PRIVATE); }
 
     static String cloudUrl(Context c) { return get(c).getString(CLOUD_URL, null); }
 
     static boolean flag(Context c, String key) {
-        boolean def = key.equals(BACKUP_WIFI_ONLY) || key.equals(NOTIFY_MAIL) || key.equals(NOTIFY_HEALTH) || key.equals(UPDATES) || key.equals(BACKUP_VIDEOS);
+        boolean def = key.equals(BACKUP_WIFI_ONLY) || key.equals(NOTIFY_MAIL) || key.equals(NOTIFY_HEALTH) || key.equals(UPDATES) || key.equals(AUTO_INSTALL) || key.equals(BACKUP_VIDEOS);
         return get(c).getBoolean(key, def);
     }
 

@@ -1,0 +1,144 @@
+# Eén pijplijn voor alles. Bij elke push naar main:
+#   1. testen (Node en de Java-kern van de app)
+#   2. de Android-app bouwen en ondertekenen (vaste sleutel, zie android/signing/README.md)
+#   3. de app publiceren als pakket op ghcr.io (eigen-cloud-app) — daar haalt de app zelf zijn updates op
+#   4. de server-images bouwen (met de app erin, zodat je hem van je eigen cloud kunt downloaden)
+# Zet de pakketten eigen-cloud, eigen-caddy en eigen-cloud-app op ghcr.io één keer op "Public"
+# (GitHub → je profiel → Packages → pakket → Package settings). De code en je data zitten er niet in.
+name: CI
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+permissions:
+  contents: write
+  packages: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: 17 }
+      - run: npm ci
+      - run: pipx install "moto[server]"
+      - name: Java-kern (versleuteling, aanbieders, opslag, console) tegen de echte TypeScript-code
+        run: android/core/test.sh
+
+  apk:
+    needs: core
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: 17 }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: "8.9" }
+      - name: Android SDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" > /dev/null
+      - name: Sleutel uit secrets (als die er zijn)
+        env: { KS: "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" }
+        run: |
+          if [ -n "$KS" ]; then echo "$KS" | base64 -d > "$RUNNER_TEMP/eigen.keystore"; echo "ANDROID_KEYSTORE=$RUNNER_TEMP/eigen.keystore" >> "$GITHUB_ENV"; fi
+      - name: Bouwen (lint + release-APK)
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          EIGEN_UPDATE_REPO: ${{ github.repository }}
+          EIGEN_UPDATE_IMAGE: ${{ github.repository_owner }}/eigen-cloud-app
+          EIGEN_DIENST_URL: ${{ vars.EIGEN_DIENST_URL }}
+        run: |
+          set -o pipefail
+          gradle --no-daemon :app:lintRelease :app:assembleRelease 2>&1 | tee build.log || {
+            grep -E "error:|e: |What went wrong|FAILURE|ERROR" -A4 build.log | head -60 | sed 's/^/::error::/'; exit 1; }
+      - id: meta
+        name: update.json
+        run: |
+          V="$(node -p 'require("./package.json").version').${GITHUB_RUN_NUMBER}"
+          mkdir -p out && cp android/app/build/outputs/apk/release/app-release.apk out/eigen-cloud.apk
+          SHA=$(sha256sum out/eigen-cloud.apk | cut -d' ' -f1)
+          printf '{"version":"%s","versionCode":%d,"sha256":"%s","size":%d,"commit":"%s","date":"%s"}\n' "$V" $((2000000 + GITHUB_RUN_NUMBER)) "$SHA" "$(stat -c%s out/eigen-cloud.apk)" "$GITHUB_SHA" "$(date -u +%FT%TZ)" > out/update.json
+          cat out/update.json
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app
+          path: |
+            out/eigen-cloud.apk
+            out/update.json
+            android/app/build/reports/lint-results-release.html
+
+  publish-app:
+    needs: [apk, test]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with: { name: app, path: art }
+      - uses: oras-project/setup-oras@v1
+      - name: App-update publiceren op ghcr.io
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          cd art/out
+          IMG="ghcr.io/${{ github.repository_owner }}/eigen-cloud-app"
+          oras push "$IMG:latest" --artifact-type application/vnd.eigencloud.app.v1 \
+            update.json:application/json eigen-cloud.apk:application/vnd.android.package-archive
+          oras tag "$IMG:latest" "v${{ needs.apk.outputs.version }}"
+      - name: GitHub Release (één per versie uit package.json)
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          V=$(node -p 'require("./package.json").version')
+          cp art/out/eigen-cloud.apk "eigen-cloud-$V.apk"
+          if gh release view "v$V" >/dev/null 2>&1; then
+            gh release upload "v$V" "eigen-cloud-$V.apk" --clobber
+          else
+            gh release create "v$V" "eigen-cloud-$V.apk" --target "$GITHUB_SHA" --title "Eigen Cloud v$V" --generate-notes
+          fi
+
+  images:
+    needs: [test, apk]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with: { name: app, path: art }
+      - run: cp art/out/eigen-cloud.apk art/out/update.json app-dist/
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/eigen-cloud:latest
+            ghcr.io/${{ github.repository_owner }}/eigen-cloud:${{ github.sha }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.caddy
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/eigen-caddy:latest
