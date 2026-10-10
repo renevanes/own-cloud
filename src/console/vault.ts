@@ -14,8 +14,8 @@ export interface ConsoleState {
   done: boolean;
   keyConfirmed: boolean;
   dnsMode?: "desec" | "hetzner" | "manual" | "dienst";
-  /** Hoe je aan je domein komt: eigen domein, gratis naam.dedyn.io, of nieuw via de dienst. */
-  domainMode?: "own" | "free" | "buy";
+  /** Hoe je aan je domein komt: eigen domein, gratis naam.dedyn.io, nieuw via de dienst, of een gratis adres van de dienst (sub). */
+  domainMode?: "own" | "free" | "buy" | "sub";
   /** Account bij deSEC dat de console zelf heeft aangemaakt. */
   desec?: { email: string; password: string; at: number };
   /** Eigen Cloud Dienst (centrale betaalde dienst). */
@@ -26,6 +26,12 @@ export interface ConsoleState {
   alertEmail?: string;
   mailRelay?: string;
   spfExtra?: string;
+  /** Extra DNS-records die de cloud zelf beheert (bijv. de DKIM-sleutel van de mail-relay van Scaleway). */
+  extraDns?: { sub: string; type: "TXT"; value: string }[];
+  /** "Eén sleutel"-route: alles bij Scaleway door de console zelf ingericht. */
+  quick?: "scaleway";
+  /** Maildomein bij Scaleway (om bij opnieuw beginnen op te ruimen). */
+  temDomainId?: string;
   nameservers?: string[];
   catalog?: Record<string, Record<string, { data?: import("./catalog.js").SizeOption; witness?: import("./catalog.js").SizeOption }>>;
 }
@@ -59,6 +65,12 @@ export class Vault {
     this.key = derive(pass, this.salt);
     this.config = cfg;
     this.save();
+  }
+
+  /** Opnieuw beginnen: kluisbestand weg (de herstelsleutel is daarmee ook van dit toestel weg). */
+  destroy() {
+    this.lock();
+    fs.rmSync(this.file, { force: true });
   }
 
   unlock(pass: string) {

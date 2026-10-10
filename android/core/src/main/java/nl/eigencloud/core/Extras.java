@@ -27,7 +27,7 @@ public final class Extras {
             if (!LABEL.matcher(d).matches()) throw new IllegalArgumentException("Kies een naam met letters, cijfers en streepjes, zoals vanes");
             return d + ".dedyn.io";
         }
-        if (!DOMAIN.matcher(d).matches()) throw new IllegalArgumentException("Vul een domeinnaam in, zoals vanes.nl");
+        if (!DOMAIN.matcher(d).matches()) throw new IllegalArgumentException("sub".equals(mode) ? "Kies eerst een vrije naam" : "Vul een domeinnaam in, zoals vanes.nl");
         return d;
     }
 
@@ -160,7 +160,9 @@ public final class Extras {
     public static Object dienstInfo(String base) throws IOException { return dienst(base, "GET", "/v1/info", null, null); }
 
     public static Object dienstCheck(String base, String name) throws IOException {
-        String d = normalizeDomain(name, "buy");
+        // Zonder punt: een gratis adres van de dienst (naam.<zone>); de dienst controleert de naam zelf.
+        String raw = name == null ? "" : name.trim().toLowerCase();
+        String d = raw.matches("^[a-z0-9-]+$") ? raw : normalizeDomain(name, "buy");
         return dienst(base, "GET", "/v1/domains/check?name=" + Bytes.encodeURIComponent(d), null, null);
     }
 
@@ -194,13 +196,13 @@ public final class Extras {
         if (token == null) throw new IllegalArgumentException("Log eerst in bij de dienst");
         if (!Json.truthy(b.get("acceptTerms"))) throw new IllegalArgumentException("Ga akkoord met de voorwaarden om verder te gaan");
         String domain = Json.jsString(c.get("domain"));
-        if (domain.endsWith(".dedyn.io")) throw new IllegalArgumentException("Bij de dienst hoort een eigen domeinnaam. Kies eerst een domein.");
-        String mode = Json.str(b, "mode");
+        if (domain.endsWith(".dedyn.io")) throw new IllegalArgumentException("Bij de dienst hoort een eigen domeinnaam of een gratis adres van de dienst. Kies eerst een adres.");
+        String mode = "sub".equals(Json.str(c, "console", "domainMode")) ? "sub" : Json.str(b, "mode");
         Map<String, Object> dom = Json.obj("mode", mode, "name", domain);
         String auth = Json.str(b, "authCode");
         if (auth != null && !auth.isEmpty()) dom.put("authCode", auth);
         Map<String, Object> body = Json.obj("bundle", b.get("bundle"), "domain", dom, "acceptTerms", true);
-        if (!"own".equals(mode) && b.get("registrant") != null) body.put("registrant", b.get("registrant"));
+        if (("register".equals(mode) || "transfer".equals(mode)) && b.get("registrant") != null) body.put("registrant", b.get("registrant"));
         Object r = dienst(base, "POST", "/v1/orders", body, token);
         d.put("orderId", Json.str(r, "orderId"));
         d.put("bundle", b.get("bundle"));
@@ -361,5 +363,139 @@ public final class Extras {
         con.put("spfExtra", Json.str(kit, "spfExtra") == null ? "" : Json.str(kit, "spfExtra"));
         d.put("applied", true);
         return Json.obj("ok", true, "stores", names, "nameservers", kit.get("nameservers"), "delegated", kit.get("delegated"));
+    }
+
+    // ───────── Eén sleutel bij Scaleway: de console regelt de rest ─────────
+    //
+    // Een account bij een aanbieder kan de app niet voor je aanmaken (naam, betaalmethode, soms een ID-check).
+    // Met één API-sleutel van Scaleway zet de console wel alles klaar: opslag in Amsterdam en Parijs, servers,
+    // en het versturen van mail (Transactional Email, met de DKIM-sleutel in je eigen DNS).
+
+    public static final String SCW_SIGNUP_URL = "https://account.scaleway.com/register";
+    public static final String SCW_KEYS_URL = "https://console.scaleway.com/iam/api-keys";
+    private static final String TEM = "/transactional-email/v1alpha1/regions/fr-par/domains";
+
+    private static String jsMessage(Object j, String fallback) {
+        Object m = Json.path(j, "message");
+        return m != null ? Json.jsString(m) : fallback;
+    }
+
+    private static Object scw(String method, String path, String secretKey, Object body) throws IOException {
+        Http.Response r;
+        try {
+            r = Http.request(method, Endpoints.SCALEWAY.replaceAll("/+$", "") + path, Http.headers("x-auth-token", secretKey, "content-type", "application/json"),
+                    body == null ? null : Bytes.utf8(Json.stringify(body)), 20_000);
+        } catch (IOException e) {
+            throw new IOException("Scaleway is niet bereikbaar (" + e.getMessage() + ")", e);
+        }
+        String t = r.text();
+        Object j;
+        try { j = t.isEmpty() ? null : Json.parse(t); } catch (RuntimeException e) { j = Json.obj("error", Bytes.head(t, 200)); }
+        if (r.status == 401) throw new HttpException("Scaleway accepteert deze sleutel niet. Kopieer de geheime sleutel opnieuw (hij wordt maar één keer getoond).", 401, t);
+        if (r.status == 403) throw new HttpException("Deze sleutel mag dit niet bij Scaleway (" + jsMessage(j, "geen toegang") + ")", 403, t);
+        if (!r.ok()) throw new HttpException("Scaleway antwoordt " + r.status + ": " + Bytes.head(jsMessage(j, Json.stringify(j)), 160), r.status, t);
+        return j;
+    }
+
+    /** JavaScript's \s (ASCII whitespace plus the Unicode spaces), without relying on (?U) (not on Android). */
+    private static final String JS_WS = "[\\s\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]";
+    private static final Pattern WS_EDGES = Pattern.compile("^" + JS_WS + "+|" + JS_WS + "+$"), WS = Pattern.compile(JS_WS + "+");
+    private static final Pattern SCW_ACCESS = Pattern.compile("^SCW[A-Z0-9]{17}$");
+    private static final Pattern UUID = Pattern.compile("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    private static final Pattern PROJECT_ID = Pattern.compile("^[0-9a-f-]{36}$");
+
+    private static String clean(String v) {
+        String s = WS_EDGES.matcher(v == null ? "" : v).replaceAll("");
+        s = s.replaceAll("^[\"']|[\"']$", "");
+        return WS.matcher(s).replaceAll("");
+    }
+
+    /** Sleutels uit wat de gebruiker plakte: spaties en aanhalingstekens eraf, en de vorm controleren. Geeft {accessKey, secretKey}. */
+    public static String[] scwKeys(String accessKeyIn, String secretKeyIn) {
+        String accessKey = clean(accessKeyIn).toUpperCase(Locale.ROOT), secretKey = clean(secretKeyIn).toLowerCase(Locale.ROOT);
+        if (!SCW_ACCESS.matcher(accessKey).matches()) throw new IllegalArgumentException("De toegangssleutel begint met SCW en heeft 20 tekens");
+        if (!UUID.matcher(secretKey).matches()) throw new IllegalArgumentException("De geheime sleutel ziet eruit als 8-4-4-4-12 tekens met streepjes");
+        return new String[] {accessKey, secretKey};
+    }
+
+    /** Het project waar de sleutel bij hoort (het standaardproject van de sleutel). */
+    public static String scwProject(String accessKey, String secretKey, String projectId) throws IOException {
+        if (projectId != null && PROJECT_ID.matcher(projectId.trim()).matches()) return projectId.trim();
+        Object k;
+        try {
+            k = scw("GET", "/iam/v1alpha1/api-keys/" + Bytes.encodeURIComponent(accessKey), secretKey, null);
+        } catch (HttpException e) {
+            if (e.status == 403 || e.status == 404) throw new IOException("Kon het project van deze sleutel niet opzoeken. Maak de sleutel aan voor jezelf (niet voor een applicatie), of vul het project-ID in.", e);
+            throw e;
+        }
+        Object sk = Json.path(k, "secret_key");
+        if (Json.truthy(sk) && !secretKey.equals(sk)) throw new IOException("Deze geheime sleutel hoort niet bij deze toegangssleutel");
+        Object id = Json.path(k, "default_project_id");
+        if (!Json.truthy(id)) throw new IOException("Deze sleutel heeft geen standaardproject. Vul het project-ID in (Scaleway-console → Project → Instellingen).");
+        return Json.jsString(id);
+    }
+
+    /** Recordnaam (relatief of volledig) → subname binnen de zone (src/tem.ts subnameOf). */
+    public static String subnameOf(String name, String zone) {
+        String n = name.replaceFirst("\\.$", "").toLowerCase(Locale.ROOT);
+        if (n.equals(zone) || n.equals("@") || n.isEmpty()) return "";
+        return n.endsWith("." + zone) ? n.substring(0, n.length() - zone.length() - 1) : n;
+    }
+
+    /** Records uit een TEM-domein, ook bij oudere vormen (spf_config/dkim_config): {dkim: {name, value}|null, dmarc, spfExtra}. */
+    public static Map<String, Object> temRecords(Object dom, String projectId) {
+        Object r = Json.path(dom, "records");
+        Map<String, Object> dkim = temPick(Json.path(r, "dkim"));
+        if (dkim == null && Json.truthy(Json.path(dom, "dkim_config"))) dkim = Json.obj("name", projectId + "._domainkey", "value", Json.jsString(Json.path(dom, "dkim_config")));
+        Map<String, Object> dmarc = temPick(Json.path(r, "dmarc"));
+        Map<String, Object> spfRec = temPick(Json.path(r, "spf"));
+        String spf = spfRec != null ? (String) spfRec.get("value") : Json.truthy(Json.path(dom, "spf_config")) ? Json.jsString(Json.path(dom, "spf_config")) : "";
+        List<String> inc = new ArrayList<>();
+        for (String tok : WS.split(spf)) if (tok.startsWith("include:")) inc.add(tok);
+        return Json.obj("dkim", dkim, "dmarc", dmarc, "spfExtra", String.join(" ", inc));
+    }
+
+    private static Map<String, Object> temPick(Object x) {
+        Map<String, Object> m = Json.asMap(x);
+        if (m == null || !Json.truthy(m.get("value"))) return null;
+        return Json.obj("name", m.get("name") == null ? "" : Json.jsString(m.get("name")), "value", Json.jsString(m.get("value")));
+    }
+
+    /** Mail versturen via Scaleway: maildomein aanmelden, relay instellen, DKIM-record voor de cloud klaarzetten. */
+    public static Map<String, Object> scwMail(Map<String, Object> c, String secretKey, String projectId) throws IOException {
+        String d = Json.truthy(c.get("domain")) ? Json.jsString(c.get("domain")) : null;
+        if (d == null) throw new IOException("Nog geen domein");
+        Map<String, Object> con = console(c);
+        Object dom = null;
+        String known = Json.str(con, "temDomainId");
+        if (known != null && !known.isEmpty()) {
+            try { dom = scw("GET", TEM + "/" + known, secretKey, null); } catch (IOException e) { dom = null; }
+        }
+        if (dom != null && (!d.equals(Json.path(dom, "name")) || "revoked".equals(Json.path(dom, "status")))) dom = null;
+        if (dom == null) {
+            Object list = scw("GET", TEM + "?project_id=" + Bytes.encodeURIComponent(projectId) + "&name=" + Bytes.encodeURIComponent(d), secretKey, null);
+            for (Object x : Json.listAt(list, "domains")) {
+                if (d.equals(Json.path(x, "name")) && !"revoked".equals(Json.path(x, "status"))) { dom = x; break; }
+            }
+        }
+        if (dom == null) dom = scw("POST", TEM, secretKey, Json.obj("project_id", projectId, "domain_name", d, "accept_tos", true));
+        if (!Json.truthy(Json.path(dom, "id"))) throw new IOException("Scaleway gaf geen maildomein terug");
+        Map<String, Object> rec = temRecords(dom, projectId);
+        Map<String, Object> dkim = Json.asMap(rec.get("dkim"));
+        con.put("temDomainId", Json.jsString(Json.path(dom, "id")));
+        con.put("mailRelay", "smtp://" + Bytes.encodeURIComponent(projectId) + ":" + Bytes.encodeURIComponent(secretKey) + "@smtp.tem.scaleway.com:587");
+        String spfExtra = (String) rec.get("spfExtra");
+        con.put("spfExtra", spfExtra.isEmpty() ? "include:_spf.tem.scaleway.com" : spfExtra);
+        con.put("extraDns", dkim != null ? Json.list(Json.obj("sub", subnameOf((String) dkim.get("name"), d), "type", "TXT", "value", dkim.get("value"))) : Json.list());
+        return Json.obj("ok", true, "detail", dkim != null ? "Je cloud zet de handtekening (DKIM) zelf in je DNS; Scaleway keurt het domein daarna goed" : "Maildomein aangemeld");
+    }
+
+    /** Bij opnieuw beginnen: het maildomein bij Scaleway intrekken. Null als er niets in te trekken is. */
+    public static String scwRevokeMail(Map<String, Object> c) throws IOException {
+        String secret = Json.str(c, "providers", "scaleway", "secretKey");
+        String id = Json.str(c, "console", "temDomainId");
+        if (id == null || id.isEmpty() || secret == null || secret.isEmpty()) return null;
+        scw("POST", TEM + "/" + id + "/revoke", secret, Json.obj());
+        return "Maildomein bij Scaleway ingetrokken";
     }
 }

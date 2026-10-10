@@ -20,7 +20,7 @@ export function bundleOf(ctx: Ctx, id: string): Bundle | undefined { return ctx.
 const STEP_LABELS = (mode: OrderRow["domain_mode"]): [string, string][] => [
   ["payment", "Betaling"],
   ["dns-zone", "DNS-zone aanmaken"],
-  ["domain", mode === "register" ? "Domeinnaam registreren" : mode === "transfer" ? "Domeinnaam verhuizen" : "Je eigen domeinnaam koppelen"],
+  ["domain", mode === "register" ? "Domeinnaam registreren" : mode === "transfer" ? "Domeinnaam verhuizen" : mode === "sub" ? "Je gratis adres aanzetten" : "Je eigen domeinnaam koppelen"],
   ["scaleway-project", "Eigen project bij Scaleway"],
   ["scaleway-iam", "Toegangssleutel voor jouw servers"],
   ["mail", "Mail versturen instellen"],

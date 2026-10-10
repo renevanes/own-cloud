@@ -19,7 +19,7 @@ import { DEFAULT_POLICY, keysFor, type Placement } from "../cluster/config.js";
 import { randomKeyHex } from "../cluster/crypto.js";
 import { hashPassword } from "../auth.js";
 import { makeProvider } from "../cluster/providers.js";
-import { makeStore, type StoreConfig } from "../cluster/stores.js";
+import { makeStore, S3Store, type StoreConfig } from "../cluster/stores.js";
 import { restoreFromAny, restoreFromStore } from "../cluster/backup.js";
 import { rpc } from "../cluster/transport.js";
 import * as extras from "./extras.js";
@@ -36,9 +36,12 @@ const serverOffers = (): ServerOffer[] => LOCAL
       { id: "fra", label: "Frankfurt (test)", country: "DE", city: "Frankfurt" },
       { id: "hel", label: "Helsinki (test)", country: "FI", city: "Helsinki" }], fields: [], signupUrl: "" }]
   : SERVER_OFFERS;
+// Alleen voor tests: alle S3-opslag naar één nepserver (EIGEN_TEST_S3).
+const TEST_S3 = process.env.EIGEN_TEST_S3;
+const BASE_STORES = TEST_S3 ? STORE_OFFERS.map((o) => ({ ...o, regions: o.regions.map((r) => ({ ...r, endpoint: r.endpoint ? TEST_S3 : r.endpoint })) })) : STORE_OFFERS;
 const storeOffers = (): StoreOffer[] => LOCAL
-  ? [...STORE_OFFERS, { id: "localfs", name: "Map op deze computer (test)", owner: "Jijzelf", regions: [{ id: "nl", label: "Lokaal", country: "NL", endpoint: "" }], help: "", signupUrl: "" }]
-  : STORE_OFFERS;
+  ? [...BASE_STORES, { id: "localfs", name: "Map op deze computer (test)", owner: "Jijzelf", regions: [{ id: "nl", label: "Lokaal", country: "NL", endpoint: "" }], help: "", signupUrl: "" }]
+  : BASE_STORES;
 
 // ───────── Sessie ─────────
 
@@ -90,6 +93,7 @@ function sanitized(c: AdminConfig) {
     policy: c.policy, preset: c.console.preset ?? null,
     domainMode: c.console.domainMode ?? "own",
     desec: c.console.desec ? { email: c.console.desec.email, at: c.console.desec.at } : null,
+    quick: c.console.quick ?? null,
     dienst: c.console.dienst ? { email: c.console.dienst.email ?? null, loggedIn: !!c.console.dienst.token, orderId: c.console.dienst.orderId ?? null, bundle: c.console.dienst.bundle ?? null, applied: !!c.console.dienst.applied } : null,
   };
 }
@@ -167,7 +171,8 @@ async function addStore(b: StoreInput) {
     if (!endpoint || !/^https?:\/\//.test(endpoint)) throw new Error("Vul de endpoint-URL in (begint met https://)");
     store = {
       name, type: "s3", purpose: b.purpose, country: region.country, endpoint, region: region.id === "eigen" ? "us-east-1" : region.id,
-      bucket: b.bucket || `${cfg().cluster}-${b.purpose === "backup" ? "backup" : "data"}-${crypto.randomBytes(3).toString("hex")}`,
+      // Zelfde plek opnieuw koppelen (bijv. de assistent nog eens doorlopen): dezelfde bucket houden.
+      bucket: b.bucket || (existing?.endpoint === endpoint ? existing?.bucket : undefined) || `${cfg().cluster}-${b.purpose === "backup" ? "backup" : "data"}-${crypto.randomBytes(3).toString("hex")}`,
       accessKey: b.accessKey || existing?.accessKey, secretKey: b.secretKey || existing?.secretKey,
     };
     if (!store.accessKey || !store.secretKey) throw new Error("Vul de toegangssleutel en geheime sleutel in");
@@ -179,6 +184,52 @@ async function addStore(b: StoreInput) {
     save();
   }
   return { ok, steps, name };
+}
+
+/** Aanbieder van servers koppelen: inloggen controleren en de live formaten en prijzen per regio ophalen. */
+async function linkProvider(id: string, fieldsIn: Record<string, string>) {
+  const offer = serverOffers().find((o) => o.id === id);
+  if (!offer) throw new Error("Onbekende aanbieder");
+  const fields = { ...(cfg().providers[offer.id] ?? {}) };
+  for (const [k, v] of Object.entries(fieldsIn)) if (v && !v.startsWith("••")) fields[k] = v.trim();
+  if (offer.id === "local" && !fields.baseDir) fields.baseDir = path.join(path.dirname(vault.file), "servers");
+  try {
+    await makeProvider(offer.id, fields).list(cfg().cluster);
+  } catch (e) {
+    throw new Error(`Inloggen bij ${offer.name} lukt niet: ${(e as Error).message.replace(/https?:\/\/\S+/, "").slice(0, 160)}`);
+  }
+  const regions: { region: string; data?: SizeOption; witness?: SizeOption; error?: string }[] = [];
+  await Promise.all(offer.regions.map(async (r) => {
+    try {
+      const sizes = await fetchSizes(offer.id, fields, r.id);
+      regions.push({ region: r.id, data: pickSize(sizes, "data"), witness: pickSize(sizes, "witness") });
+    } catch (e) {
+      regions.push({ region: r.id, error: (e as Error).message });
+    }
+  }));
+  regions.sort((a, b) => offer.regions.findIndex((r) => r.id === a.region) - offer.regions.findIndex((r) => r.id === b.region));
+  cfg().providers[offer.id] = fields;
+  const cat = (cfg().console.catalog ??= {});
+  cat[offer.id] = Object.fromEntries(regions.filter((r) => r.data).map((r) => [r.region, { data: r.data, witness: r.witness }]));
+  save();
+  return { ok: true, regions };
+}
+
+/** Verspreiding kiezen; extra plekken als reserve voor zelfherstel (lagere voorkeur). */
+function choosePreset(id: string) {
+  const cat = cfg().console.catalog ?? {};
+  const available = serverOffers().flatMap((o) => o.regions.filter((r) => cat[o.id]?.[r.id]).map((r) => ({ provider: o.id, region: r, ...cat[o.id][r.id] })));
+  const p = buildPresets(available).find((x) => x.id === id);
+  if (!p || !p.placement.length) throw new Error(p?.missing ?? "Onbekende keuze");
+  const reserve: Placement[] = available.flatMap((a) => [
+    ...(a.data ? [{ provider: a.provider, region: a.region.id, size: a.data.size, country: a.region.country, kind: "data" as const }] : []),
+    ...(a.witness ? [{ provider: a.provider, region: a.region.id, size: a.witness.size, country: a.region.country, kind: "witness" as const }] : []),
+  ]).filter((r) => id !== "nl" || r.country === "NL");
+  const seen = new Set<string>();
+  cfg().policy = { ...cfg().policy, placement: [...p.placement, ...reserve].filter((x) => { const k = `${x.kind}/${x.provider}/${x.region}`; if (seen.has(k)) return false; seen.add(k); return true; }) };
+  cfg().console.preset = p.id;
+  save();
+  return p;
 }
 
 /** DNS koppelen bij deSEC of Hetzner (of handmatig). */
@@ -227,7 +278,7 @@ function normalizeDomain(input: string | undefined, mode: string) {
     if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(d)) throw new Error("Kies een naam met letters, cijfers en streepjes, zoals vanes");
     return `${d}.dedyn.io`;
   }
-  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d)) throw new Error("Vul een domeinnaam in, zoals vanes.nl");
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d)) throw new Error(mode === "sub" ? "Kies eerst een vrije naam" : "Vul een domeinnaam in, zoals vanes.nl");
   return d;
 }
 
@@ -250,6 +301,7 @@ export async function buildConsole() {
     offers: { stores: storeOffers(), servers: serverOffers() },
     dienst: !!extras.DIENST_URL(),
     domainMode: vault.config?.console.domainMode ?? null,
+    scaleway: { signup: extras.SCW_SIGNUP_URL, keys: extras.SCW_KEYS_URL },
   }));
 
   // Openbaar (ook vóór de kluis): de dienst en domeinbeschikbaarheid tonen in de eerste stap.
@@ -260,7 +312,7 @@ export async function buildConsole() {
     try { return await extras.dienstCheck(req.query.name ?? ""); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
   });
 
-  app.post<{ Body: { passphrase: string; domain: string; domainMode?: "own" | "free" | "buy"; mailbox: string; alertEmail?: string; appPassword: string } }>("/api/setup/create", async (req, reply) => {
+  app.post<{ Body: { passphrase: string; domain: string; domainMode?: "own" | "free" | "buy" | "sub"; mailbox: string; alertEmail?: string; appPassword: string } }>("/api/setup/create", async (req, reply) => {
     if (vault.exists()) return reply.code(409).send({ error: "Er is al een kluis. Ontgrendel hem." });
     const b = req.body;
     const mode = b.domainMode ?? "own";
@@ -381,30 +433,7 @@ export async function buildConsole() {
 
     // ── Servers ──
     s.post<{ Body: { id: string; fields: Record<string, string> } }>("/api/providers", async (req, reply) => {
-      const offer = serverOffers().find((o) => o.id === req.body.id);
-      if (!offer) return reply.code(400).send({ error: "Onbekende aanbieder" });
-      const fields = { ...(cfg().providers[offer.id] ?? {}) };
-      for (const [k, v] of Object.entries(req.body.fields ?? {})) if (v && !v.startsWith("••")) fields[k] = v.trim();
-      if (offer.id === "local" && !fields.baseDir) fields.baseDir = path.join(path.dirname(vault.file), "servers");
-      try {
-        await makeProvider(offer.id, fields).list(cfg().cluster);
-      } catch (e) {
-        return reply.code(400).send({ error: `Inloggen bij ${offer.name} lukt niet: ${(e as Error).message.replace(/https?:\/\/\S+/, "").slice(0, 160)}` });
-      }
-      const regions: { region: string; data?: SizeOption; witness?: SizeOption; error?: string }[] = [];
-      await Promise.all(offer.regions.map(async (r) => {
-        try {
-          const sizes = await fetchSizes(offer.id, fields, r.id);
-          regions.push({ region: r.id, data: pickSize(sizes, "data"), witness: pickSize(sizes, "witness") });
-        } catch (e) {
-          regions.push({ region: r.id, error: (e as Error).message });
-        }
-      }));
-      cfg().providers[offer.id] = fields;
-      const cat = (cfg().console.catalog ??= {});
-      cat[offer.id] = Object.fromEntries(regions.filter((r) => r.data).map((r) => [r.region, { data: r.data, witness: r.witness }]));
-      save();
-      return { ok: true, regions };
+      try { return await linkProvider(req.body.id, req.body.fields ?? {}); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     });
     s.delete<{ Params: { id: string } }>("/api/providers/:id", async (req) => {
       delete cfg().providers[req.params.id];
@@ -419,20 +448,62 @@ export async function buildConsole() {
       return { presets: buildPresets(available), chosen: cfg().console.preset ?? null };
     });
     s.post<{ Body: { id: string } }>("/api/presets/choose", async (req, reply) => {
-      const cat = cfg().console.catalog ?? {};
-      const available = serverOffers().flatMap((o) => o.regions.filter((r) => cat[o.id]?.[r.id]).map((r) => ({ provider: o.id, region: r, ...cat[o.id][r.id] })));
-      const p = buildPresets(available).find((x) => x.id === req.body.id);
-      if (!p || !p.placement.length) return reply.code(400).send({ error: p?.missing ?? "Onbekende keuze" });
-      // Extra plekken als reserve voor zelfherstel (lagere voorkeur).
-      const reserve: Placement[] = available.flatMap((a) => [
-        ...(a.data ? [{ provider: a.provider, region: a.region.id, size: a.data.size, country: a.region.country, kind: "data" as const }] : []),
-        ...(a.witness ? [{ provider: a.provider, region: a.region.id, size: a.witness.size, country: a.region.country, kind: "witness" as const }] : []),
-      ]).filter((r) => req.body.id !== "nl" || r.country === "NL");
-      const seen = new Set<string>();
-      cfg().policy = { ...cfg().policy, placement: [...p.placement, ...reserve].filter((x) => { const k = `${x.kind}/${x.provider}/${x.region}`; if (seen.has(k)) return false; seen.add(k); return true; }) };
-      cfg().console.preset = p.id;
-      save();
-      return { ok: true, preset: p };
+      try { return { ok: true, preset: choosePreset(req.body.id) }; } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+
+    // ── Eén sleutel bij Scaleway: de console regelt opslag, servers en mail ──
+    s.post<{ Body: { accessKey?: string; secretKey?: string; projectId?: string } }>("/api/quick/scaleway", async (req, reply) => {
+      const c = cfg();
+      const steps: { label: string; ok: boolean; detail?: string }[] = [];
+      try {
+        const { accessKey, secretKey } = extras.scwKeys(req.body ?? {});
+        const projectId = await extras.scwProject(accessKey, secretKey, req.body?.projectId);
+        steps.push({ label: "Sleutel werkt", ok: true });
+        const linked = await linkProvider("scaleway", { secretKey, projectId });
+        const priced = linked.regions.filter((r) => r.data);
+        if (!priced.length) throw new Error(`Scaleway gaf geen serverprijzen: ${linked.regions.map((r) => r.error).filter(Boolean)[0] ?? "onbekend"}`);
+        steps.push({ label: "Servers en prijzen opgehaald", ok: true });
+        for (const [region, purpose, label] of [["nl-ams", "replica", "Opslag in Amsterdam"], ["fr-par", "backup", "Back-up in Parijs, 30 dagen niet te wissen"]] as const) {
+          const r = await addStore({ offer: "scaleway", region, accessKey, secretKey, purpose });
+          if (!r.ok) throw new Error(`${label}: ${r.steps.filter((x) => !x.ok).map((x) => x.label + (x.detail ? ` (${x.detail})` : "")).join(", ")}`);
+          steps.push({ label, ok: true });
+        }
+        const preset = choosePreset("nl");
+        steps.push({ label: `Servers: ${preset.title}`, ok: true, detail: preset.monthly != null ? `ongeveer € ${preset.monthly.toFixed(2).replace(".", ",")} per maand bij Scaleway, plus een paar euro voor opslag` : undefined });
+        try {
+          const m = await extras.scwMail(c, secretKey, projectId);
+          steps.push({ label: "Mail versturen via Scaleway", ok: true, detail: m.detail });
+        } catch (e) {
+          steps.push({ label: "Mail versturen via Scaleway", ok: false, detail: `${(e as Error).message}. Je kunt dit later bij Mail regelen; je cloud werkt ook zonder.` });
+        }
+        c.console.quick = "scaleway";
+        c.console.preset = preset.id;
+        save();
+        return { ok: true, steps, monthly: preset.monthly };
+      } catch (e) {
+        save();
+        return reply.code(400).send({ error: (e as Error).message, steps });
+      }
+    });
+    /** Terug naar "zelf per onderdeel": de één-sleutel-markering eraf (gekoppelde dingen blijven staan). */
+    s.post("/api/quick/off", async () => { delete cfg().console.quick; save(); return { ok: true }; });
+
+    // ── Opnieuw beginnen (alleen vóór de start) ──
+    s.post<{ Body: { cleanup?: boolean } }>("/api/setup/reset", async (req, reply) => {
+      const c = cfg();
+      if (c.console.done || c.console.firstLaunch) return reply.code(409).send({ error: "Je cloud is al gestart. Opnieuw beginnen kan dan niet meer vanuit de assistent." });
+      const done: string[] = [], left: string[] = [];
+      if (req.body?.cleanup) {
+        for (const st of c.stores) {
+          if (st.type !== "s3") continue;
+          const why = await (makeStore(st) as S3Store).destroyBucket().catch((e: Error) => e.message);
+          if (why) left.push(`${st.bucket}: ${why}`); else done.push(`Bucket ${st.bucket} verwijderd`);
+        }
+        try { const r = await extras.scwRevokeMail(c); if (r) done.push(r); } catch (e) { left.push(`Maildomein: ${(e as Error).message}`); }
+      }
+      vault.destroy();
+      session = null;
+      return { ok: true, done, left };
     });
 
     // ── DNS ──
@@ -445,10 +516,17 @@ export async function buildConsole() {
     });
 
     // ── Domein wijzigen (vóór de start) ──
-    s.post<{ Body: { domain: string; domainMode: "own" | "free" | "buy" } }>("/api/setup/domain", async (req, reply) => {
+    s.post<{ Body: { domain: string; domainMode: "own" | "free" | "buy" | "sub" } }>("/api/setup/domain", async (req, reply) => {
       const c = cfg();
       if (c.console.done) return reply.code(409).send({ error: "Je cloud draait al; het domein wijzigen kan dan niet meer hier" });
+      const before = c.domain;
       try { extras.changeDomain(c, normalizeDomain(req.body.domain, req.body.domainMode), req.body.domainMode); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+      // Mail via Scaleway hoort bij het domein: bij een ander domein opnieuw aanmelden.
+      if (c.console.quick && c.domain !== before && c.providers.scaleway?.secretKey && c.providers.scaleway.projectId) {
+        await extras.scwRevokeMail(c).catch(() => null);
+        delete c.console.temDomainId;
+        await extras.scwMail(c, c.providers.scaleway.secretKey, c.providers.scaleway.projectId).catch(() => { c.console.mailRelay = ""; c.console.extraDns = []; });
+      }
       save();
       return { ok: true, domain: c.domain };
     });
@@ -662,6 +740,7 @@ async function startLaunch(c: AdminConfig, first: { provider: string; region: st
     if (c.console.alertEmail) initialSettings.alert_email = c.console.alertEmail;
     if (c.console.mailRelay) initialSettings.mail_relay = c.console.mailRelay;
     if (c.console.spfExtra) initialSettings.spf_extra = c.console.spfExtra;
+    if (c.console.extraDns?.length) initialSettings.extra_dns = JSON.stringify(c.console.extraDns);
     const r = await provisionFirstNode(c, { ...first, term, initialSettings: term ? undefined : initialSettings });
     setStep("server", "done", r.info.ipv4 ? `IP-adres ${r.info.ipv4}` : "");
     c.console.firstLaunch = { at: Date.now(), nodeId: r.nodeId, provider: first.provider, region: first.region, clusterUrl: r.clusterUrl, apiUrl: r.info.apiUrl };

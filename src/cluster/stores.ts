@@ -244,6 +244,36 @@ export class S3Store implements ObjectStore {
     if (r.statusCode >= 300 && !/BucketAlreadyOwnedByYou/.test(text)) throw new Error(`Bucket aanmaken mislukt: ${r.statusCode} ${text.slice(0, 200)}`);
   }
 
+  /**
+   * Bucket helemaal weghalen (bij opnieuw beginnen vóór de start): alle versies wissen, ook die onder
+   * object-lock in GOVERNANCE-modus, en dan de bucket zelf. Geeft een uitleg terug als het niet kan.
+   */
+  async destroyBucket(): Promise<string | null> {
+    for (let round = 0; round < 50; round++) {
+      const r = await this.req("GET", "", { versions: "" });
+      const xml = await r.body.text();
+      if (r.statusCode === 404) return null;
+      if (r.statusCode >= 300) return `Inhoud opvragen mislukt (${r.statusCode})`;
+      const items = [...xml.matchAll(/<(?:Version|DeleteMarker)>([\s\S]*?)<\/(?:Version|DeleteMarker)>/g)].map((m) => ({
+        key: (/<Key>([\s\S]*?)<\/Key>/.exec(m[1])?.[1] ?? "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">"),
+        version: /<VersionId>([\s\S]*?)<\/VersionId>/.exec(m[1])?.[1] ?? "",
+      }));
+      if (!items.length) break;
+      const pfx = this.config.prefix ? this.config.prefix.replace(/\/$/, "") + "/" : "";
+      for (const it of items) {
+        // req() zet het voorvoegsel er zelf voor; de lijst geeft volledige sleutels.
+        const k = pfx && it.key.startsWith(pfx) ? it.key.slice(pfx.length) : it.key;
+        const d = await this.req("DELETE", k, it.version && it.version !== "null" ? { versionId: it.version } : {}, undefined, undefined, { "x-amz-bypass-governance-retention": "true" });
+        const t = await d.body.text();
+        if (d.statusCode >= 300 && d.statusCode !== 404) return `Bestand ${it.key} kan (nog) niet weg: ${/<Code>([^<]+)/.exec(t)?.[1] ?? d.statusCode}`;
+      }
+    }
+    const r = await this.req("DELETE", "");
+    const t = await r.body.text();
+    if (r.statusCode >= 300 && r.statusCode !== 404) return `Bucket verwijderen mislukt: ${/<Code>([^<]+)/.exec(t)?.[1] ?? r.statusCode}`;
+    return null;
+  }
+
   /** Bucket-instelling (versioning, object-lock, lifecycle). Geeft false als de aanbieder het niet ondersteunt. */
   async putBucketConfig(sub: "versioning" | "object-lock" | "lifecycle", xml: string): Promise<boolean> {
     const body = Buffer.from(xml);

@@ -444,6 +444,7 @@ public final class Admin {
         if (con != null) {
             settings.put("mail_relay", con.get("mailRelay") != null ? con.get("mailRelay") : "");
             settings.put("spf_extra", con.get("spfExtra") != null ? con.get("spfExtra") : "");
+            settings.put("extra_dns", Json.stringify(con.get("extraDns") != null ? con.get("extraDns") : Json.list()));
             if (Json.truthy(con.get("alertEmail"))) settings.put("alert_email", con.get("alertEmail"));
         }
         Map<String, Object> update = Json.obj();

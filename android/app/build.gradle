@@ -24,7 +24,7 @@ android {
         // Updates komen als OCI-pakket van ghcr.io (openbaar te lezen, ook als de repository privé is).
         buildConfigField "String", "UPDATE_IMAGE", "\"${System.getenv("EIGEN_UPDATE_IMAGE") ?: "renevanes/eigen-cloud-app"}\""
         // Adres van de Eigen Cloud Dienst (centrale betaalde dienst); leeg = optie verborgen.
-        buildConfigField "String", "DIENST_URL", "\"${System.getenv("EIGEN_DIENST_URL") ?: ""}\""
+        buildConfigField "String", "DIENST_URL", "\"${System.getenv("EIGEN_DIENST_URL") ?: file("../../DIENST_URL").readLines().collect { it.trim() }.find { it && !it.startsWith("#") } ?: ""}\""
     }
 
     buildFeatures { buildConfig true }

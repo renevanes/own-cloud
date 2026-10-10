@@ -3,6 +3,7 @@
  * Formaten en prijzen worden waar mogelijk live bij de aanbieder opgehaald; anders indicatief.
  */
 import type { Placement } from "../cluster/config.js";
+import { scwApi } from "../cluster/providers.js";
 
 export interface RegionInfo { id: string; label: string; country: string; city: string }
 
@@ -122,7 +123,7 @@ export async function fetchSizes(provider: string, cfg: Record<string, string>, 
       .sort((a, b) => (a.monthly ?? 0) - (b.monthly ?? 0));
   }
   if (provider === "scaleway") {
-    const j = await get(`https://api.scaleway.com/instance/v1/zones/${region}/products/servers?per_page=100`, { "x-auth-token": cfg.secretKey });
+    const j = await get(`${scwApi()}/instance/v1/zones/${region}/products/servers?per_page=100`, { "x-auth-token": cfg.secretKey });
     return Object.entries(j.servers as Record<string, any>)
       .filter(([name, s]) => /^(DEV1|PLAY2|PRO2|GP1|STARDUST|POP2)/i.test(name) && s.arch === "x86_64")
       .map(([name, s]) => ({ size: name, label: `${s.ncpus} vCPU, ${Math.round(s.ram / 1024 ** 3)} GB`, ramGb: Math.round(s.ram / 1024 ** 3), cpus: s.ncpus, monthly: s.monthly_price ?? (s.hourly_price ? Math.round(s.hourly_price * 730 * 100) / 100 : null) }))

@@ -1,0 +1,3 @@
+# Adres van de Eigen Cloud Dienst (bijv. https://dienst.eigencloud.nl). Vul het in zodra de dienst draait
+# (zie BROKER.md): dan bieden de app en de console hem aan nieuwe gebruikers aan. Leeg = optie verborgen.
+# EIGEN_DIENST_URL (omgeving of GitHub-variabele) gaat voor.

@@ -4,7 +4,8 @@ import Database from "better-sqlite3";
 import { seal, open } from "../cluster/crypto.js";
 
 export type OrderStatus = "awaiting_payment" | "paid" | "provisioning" | "ready" | "failed" | "payment_problem" | "cancelled" | "suspended";
-export type DomainMode = "register" | "transfer" | "own";
+/** sub = gratis adres onder de zone van de dienst (naam.<BROKER_FREE_ZONE>). */
+export type DomainMode = "register" | "transfer" | "own" | "sub";
 
 export interface OrderRow {
   id: string;

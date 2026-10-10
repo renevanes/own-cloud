@@ -202,13 +202,14 @@ export async function prepareStore(cfg: StoreConfig): Promise<StepResult[]> {
 }
 
 /** Stuurt gewijzigde beheerinstellingen naar het draaiende cluster (ondertekend). */
-export async function pushAdminConfig(c: ClusterConfig & { console?: { mailRelay?: string; spfExtra?: string; alertEmail?: string } }) {
+export async function pushAdminConfig(c: ClusterConfig & { console?: { mailRelay?: string; spfExtra?: string; alertEmail?: string; extraDns?: unknown[] } }) {
   const st = await clusterStatus(c);
   if (!st.leaderUrl) return false;
   const settings: Record<string, string> = {};
   if (c.console) {
     settings.mail_relay = c.console.mailRelay ?? "";
     settings.spf_extra = c.console.spfExtra ?? "";
+    settings.extra_dns = JSON.stringify(c.console.extraDns ?? []);
     if (c.console.alertEmail) settings.alert_email = c.console.alertEmail;
   }
   const update = { stores: c.stores, providers: c.providers, dns: c.dns, placement: c.policy.placement, settings };

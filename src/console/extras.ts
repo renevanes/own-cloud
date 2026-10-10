@@ -5,11 +5,25 @@
  * De Android-app heeft dezelfde stappen in Java (android/core ConsoleApi).
  */
 import crypto from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { AdminConfig } from "./vault.js";
 import { DEFAULT_POLICY, type Placement } from "../cluster/config.js";
+import { temRecords, subnameOf } from "../tem.js";
+import { scwApi } from "../cluster/providers.js";
 
 export const DESEC_URL = () => (process.env.EIGEN_DESEC_URL ?? "https://desec.io/api/v1").replace(/\/$/, "");
-export const DIENST_URL = () => (process.env.EIGEN_DIENST_URL ?? "").replace(/\/$/, "");
+/** Uit EIGEN_DIENST_URL, anders uit het bestand DIENST_URL in de repository (eerste regel zonder #). */
+export const DIENST_URL = () => (process.env.EIGEN_DIENST_URL || dienstFromFile()).replace(/\/$/, "");
+let dienstFile: string | null = null;
+function dienstFromFile() {
+  if (dienstFile === null) {
+    try {
+      const f = new URL("../../DIENST_URL", import.meta.url);
+      dienstFile = (readFileSync(f, "utf8").split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#")) ?? "");
+    } catch { dienstFile = ""; }
+  }
+  return dienstFile;
+}
 
 async function json(r: Response) {
   const t = await r.text();
@@ -72,7 +86,7 @@ export async function desecFinish(c: AdminConfig): Promise<string | null> {
 
 // ───────── Domein wijzigen (vóór de start) ─────────
 
-export function changeDomain(c: AdminConfig, domain: string, mode: "own" | "free" | "buy") {
+export function changeDomain(c: AdminConfig, domain: string, mode: "own" | "free" | "buy" | "sub") {
   const mailbox = (c.appEnv.MAIL_FROM ?? "").split("@")[0] || "post";
   if (c.console.alertEmail?.endsWith("@" + domain)) throw new Error("Je meldadres valt onder dit domein; kies eerst een ander meldadres");
   if (domain !== c.domain) {
@@ -106,7 +120,8 @@ export const dienstInfo = () => dienst("/v1/info");
 
 export async function dienstCheck(name: string) {
   const d = name.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
-  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d)) throw new Error("Vul een domeinnaam in, zoals vanes.nl");
+  // Zonder punt: een gratis adres van de dienst (naam.<zone>); de dienst controleert de naam zelf.
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)*$/.test(d)) throw new Error("Vul een domeinnaam in, zoals vanes.nl");
   return dienst(`/v1/domains/check?name=${encodeURIComponent(d)}`);
 }
 
@@ -129,7 +144,7 @@ export async function dienstVerify(c: AdminConfig, code: string) {
 export interface OrderInput {
   bundle: string;
   /** register = nieuw domein, transfer = verhuizen naar de dienst, own = blijft bij je eigen registrar */
-  mode: "register" | "transfer" | "own";
+  mode: "register" | "transfer" | "own" | "sub";
   authCode?: string;
   registrant?: Record<string, string>;
   acceptTerms: boolean;
@@ -139,10 +154,11 @@ export async function dienstOrder(c: AdminConfig, b: OrderInput) {
   const token = c.console.dienst?.token;
   if (!token) throw new Error("Log eerst in bij de dienst");
   if (!b.acceptTerms) throw new Error("Ga akkoord met de voorwaarden om verder te gaan");
-  if (c.domain?.endsWith(".dedyn.io")) throw new Error("Bij de dienst hoort een eigen domeinnaam. Kies eerst een domein.");
+  if (c.domain?.endsWith(".dedyn.io")) throw new Error("Bij de dienst hoort een eigen domeinnaam of een gratis adres van de dienst. Kies eerst een adres.");
+  const mode = c.console.domainMode === "sub" ? "sub" : b.mode;
   const r = await dienst("/v1/orders", {
     token,
-    body: { bundle: b.bundle, domain: { mode: b.mode, name: c.domain, authCode: b.authCode || undefined }, registrant: b.mode === "own" ? undefined : b.registrant, acceptTerms: true },
+    body: { bundle: b.bundle, domain: { mode, name: c.domain, authCode: b.authCode || undefined }, registrant: mode === "register" || mode === "transfer" ? b.registrant : undefined, acceptTerms: true },
   });
   c.console.dienst = { ...(c.console.dienst ?? {}), orderId: r.orderId, bundle: b.bundle, applied: false };
   return { ok: true, orderId: r.orderId, checkoutUrl: r.checkoutUrl };
@@ -263,4 +279,78 @@ export async function dienstApply(c: AdminConfig, addStore: (b: { offer: string;
   c.console.spfExtra = kit.spfExtra ?? "";
   c.console.dienst = { ...d, applied: true };
   return { ok: true, stores: results.map((r) => r.name), nameservers: kit.nameservers, delegated: kit.delegated };
+}
+
+// ───────── Eén sleutel bij Scaleway: de console regelt de rest ─────────
+//
+// Een account bij een aanbieder kan de app niet voor je aanmaken (naam, betaalmethode, soms een ID-check).
+// Met één API-sleutel van Scaleway zet de console wel alles klaar: opslag in Amsterdam en Parijs, servers,
+// en het versturen van mail (Transactional Email, met de DKIM-sleutel in je eigen DNS).
+
+export const SCW_SIGNUP_URL = "https://account.scaleway.com/register";
+export const SCW_KEYS_URL = "https://console.scaleway.com/iam/api-keys";
+
+async function scw(method: string, pathname: string, secretKey: string, body?: unknown) {
+  let r: Response;
+  try {
+    r = await fetch(`${scwApi()}${pathname}`, { method, headers: { "x-auth-token": secretKey, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20_000) });
+  } catch (e) {
+    throw new Error(`Scaleway is niet bereikbaar (${(e as Error).message})`);
+  }
+  const j = await json(r);
+  if (r.status === 401) throw Object.assign(new Error("Scaleway accepteert deze sleutel niet. Kopieer de geheime sleutel opnieuw (hij wordt maar één keer getoond)."), { status: 401 });
+  if (r.status === 403) throw Object.assign(new Error(`Deze sleutel mag dit niet bij Scaleway (${String((j as { message?: string })?.message ?? "geen toegang")})`), { status: 403 });
+  if (!r.ok) throw Object.assign(new Error(`Scaleway antwoordt ${r.status}: ${String((j as { message?: string })?.message ?? JSON.stringify(j)).slice(0, 160)}`), { status: r.status });
+  return j as any;
+}
+
+/** Sleutels uit wat de gebruiker plakte: spaties en aanhalingstekens eraf, en de vorm controleren. */
+export function scwKeys(b: { accessKey?: string; secretKey?: string }) {
+  const clean = (v?: string) => (v ?? "").trim().replace(/^["']|["']$/g, "").replace(/\s+/g, "");
+  const accessKey = clean(b.accessKey).toUpperCase(), secretKey = clean(b.secretKey).toLowerCase();
+  if (!/^SCW[A-Z0-9]{17}$/.test(accessKey)) throw new Error("De toegangssleutel begint met SCW en heeft 20 tekens");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(secretKey)) throw new Error("De geheime sleutel ziet eruit als 8-4-4-4-12 tekens met streepjes");
+  return { accessKey, secretKey };
+}
+
+/** Het project waar de sleutel bij hoort (het standaardproject van de sleutel). */
+export async function scwProject(accessKey: string, secretKey: string, projectId?: string) {
+  if (projectId && /^[0-9a-f-]{36}$/.test(projectId.trim())) return projectId.trim();
+  const k = await scw("GET", `/iam/v1alpha1/api-keys/${encodeURIComponent(accessKey)}`, secretKey).catch((e) => {
+    if ((e as { status?: number }).status === 403 || (e as { status?: number }).status === 404) throw new Error("Kon het project van deze sleutel niet opzoeken. Maak de sleutel aan voor jezelf (niet voor een applicatie), of vul het project-ID in.");
+    throw e;
+  });
+  if (k?.secret_key && k.secret_key !== secretKey) throw new Error("Deze geheime sleutel hoort niet bij deze toegangssleutel");
+  const id = k?.default_project_id as string | undefined;
+  if (!id) throw new Error("Deze sleutel heeft geen standaardproject. Vul het project-ID in (Scaleway-console → Project → Instellingen).");
+  return id;
+}
+
+/** Mail versturen via Scaleway: maildomein aanmelden, relay instellen, DKIM-record voor de cloud klaarzetten. */
+export async function scwMail(c: AdminConfig, secretKey: string, projectId: string) {
+  const d = c.domain;
+  if (!d) throw new Error("Nog geen domein");
+  const base = "/transactional-email/v1alpha1/regions/fr-par/domains";
+  let dom: any = c.console.temDomainId ? await scw("GET", `${base}/${c.console.temDomainId}`, secretKey).catch(() => null) : null;
+  if (dom && (dom.name !== d || dom.status === "revoked")) dom = null;
+  if (!dom) {
+    const list = await scw("GET", `${base}?project_id=${encodeURIComponent(projectId)}&name=${encodeURIComponent(d)}`, secretKey);
+    dom = (list?.domains ?? []).find((x: any) => x.name === d && x.status !== "revoked") ?? null;
+  }
+  if (!dom) dom = await scw("POST", base, secretKey, { project_id: projectId, domain_name: d, accept_tos: true });
+  if (!dom?.id) throw new Error("Scaleway gaf geen maildomein terug");
+  const rec = temRecords(dom, projectId);
+  c.console.temDomainId = dom.id;
+  c.console.mailRelay = `smtp://${encodeURIComponent(projectId)}:${encodeURIComponent(secretKey)}@smtp.tem.scaleway.com:587`;
+  c.console.spfExtra = rec.spfExtra || "include:_spf.tem.scaleway.com";
+  c.console.extraDns = rec.dkim ? [{ sub: subnameOf(rec.dkim.name, d), type: "TXT", value: rec.dkim.value }] : [];
+  return { ok: true, detail: rec.dkim ? "Je cloud zet de handtekening (DKIM) zelf in je DNS; Scaleway keurt het domein daarna goed" : "Maildomein aangemeld" };
+}
+
+/** Bij opnieuw beginnen: het maildomein bij Scaleway intrekken. */
+export async function scwRevokeMail(c: AdminConfig) {
+  const secret = c.providers.scaleway?.secretKey;
+  if (!c.console.temDomainId || !secret) return null;
+  await scw("POST", `/transactional-email/v1alpha1/regions/fr-par/domains/${c.console.temDomainId}/revoke`, secret, {});
+  return "Maildomein bij Scaleway ingetrokken";
 }

@@ -54,7 +54,7 @@ async function api(path, opts = {}) {
     if (state) { state.unlocked = false; clearInterval(timer); $("#lockBtn").hidden = true; renderLock(); }
     throw new Error("De kluis is op slot");
   }
-  if (!r.ok) throw new Error(j?.error ?? r.statusText);
+  if (!r.ok) throw Object.assign(new Error(j?.error ?? r.statusText), { data: j });
   return j;
 }
 
@@ -76,19 +76,24 @@ let state = null, config = null, timer = null, dienstTimer = null;
 const BASE_STEPS = [
   { id: "jij", label: "Jij en je adres" },
   { id: "sleutel", label: "Herstelsleutel" },
-  { id: "regelen", label: "Zelf of via de dienst" },
+  { id: "regelen", label: "Waar je cloud draait" },
   { id: "opslag", label: "Opslag voor back-ups" },
   { id: "servers", label: "Servers" },
   { id: "domein", label: "Domein koppelen" },
   { id: "mail", label: "Mail versturen" },
   { id: "starten", label: "Starten" },
 ];
-/** De stap "Zelf of via de dienst" alleen als deze versie een Eigen Cloud Dienst kent. */
-let STEPS = BASE_STEPS.filter((x) => x.id !== "regelen");
+/** Met één sleutel of via de dienst regelt de console opslag, servers en mail zelf: die stappen vallen dan weg. */
+let STEPS = BASE_STEPS;
+function stepsFor(c) {
+  const auto = c?.quick || c?.dienst?.applied;
+  return BASE_STEPS.filter((x) => !(auto && ["opslag", "servers", "mail"].includes(x.id)));
+}
+const nextOf = (id) => STEPS[STEPS.findIndex((s) => s.id === id) + 1]?.id ?? "starten";
+const prevOf = (id) => STEPS[STEPS.findIndex((s) => s.id === id) - 1]?.id ?? null;
 
 async function boot() {
   state = await api("/api/state");
-  STEPS = BASE_STEPS.filter((x) => x.id !== "regelen" || state.dienst);
   render();
 }
 
@@ -99,9 +104,10 @@ async function render() {
   if (!state.vault) return renderStart();
   if (!state.unlocked) return renderLock();
   config = await api("/api/config");
+  STEPS = stepsFor(config);
   const hash = location.hash.slice(1);
   if (state.done && !STEPS.some((s) => s.id === hash)) return renderDash();
-  renderStep(STEPS.some((s) => s.id === hash) && hash !== "jij" ? hash : state.step ?? "sleutel");
+  renderStep(STEPS.some((s) => s.id === hash) ? hash : state.step ?? "sleutel");
 }
 
 $("#lockBtn").onclick = async () => { await api("/api/lock", { method: "POST" }); location.hash = ""; boot(); };
@@ -166,8 +172,49 @@ function wizardShell(current, inner) {
   const idx = STEPS.findIndex((s) => s.id === current);
   return `<div class="wizard"><ol class="trail" aria-label="Stappen">
     ${STEPS.map((s, i) => `<li class="${i < idx ? "done" : i === idx ? "now" : ""}" ${i === idx ? 'aria-current="step"' : ""}>
-      <span class="pip">${i < idx ? "✓" : ""}</span>${i < idx && s.id !== "jij" ? `<a href="#${s.id}">${s.label}</a>` : `<span class="t">${s.label}</span>`}</li>`).join("")}
-  </ol><section class="pane">${inner}</section></div>`;
+      <span class="pip">${i < idx ? "✓" : ""}</span>${i < idx && (s.id !== "jij" || state?.vault) ? `<a href="#${s.id}">${s.label}</a>` : `<span class="t">${s.label}</span>`}</li>`).join("")}
+  </ol><section class="pane">${inner}
+    ${state?.vault && !state.done ? `<nav class="wiz-nav">${idx > 0 ? `<button type="button" class="link" data-wiz="prev">Vorige stap</button>` : "<span></span>"}<button type="button" class="link quiet" data-wiz="reset">Opnieuw beginnen</button></nav>` : ""}
+  </section></div>`;
+}
+
+// Vorige stap en opnieuw beginnen werken in elke stap (niet via root.onclick: dat gebruiken de stappen zelf).
+document.addEventListener("click", (e) => {
+  const w = e.target.closest?.("[data-wiz]")?.dataset.wiz;
+  if (!w) return;
+  e.preventDefault();
+  clearTimeout(dienstTimer);
+  if (w === "prev") { const cur = location.hash.slice(1) || state.step; const p = prevOf(cur); if (p) location.hash = p; }
+  if (w === "reset") resetDialog();
+});
+
+function resetDialog() {
+  const hasCloud = config?.stores?.some((s) => s.type === "s3") || !!config?.quick;
+  const dlg = document.createElement("dialog");
+  dlg.className = "confirm";
+  dlg.innerHTML = `<h2>Opnieuw beginnen?</h2>
+    <p>Alles wat je in de assistent hebt ingevuld, wordt van ${DEVICE} gewist, ook je herstelsleutel. Je begint daarna bij de eerste stap met een nieuwe sleutel.</p>
+    ${hasCloud ? `<p>Wat al bij de aanbieder is aangemaakt (opslag${config?.quick ? " en het maildomein" : ""}), kan de console ook opruimen. Servers zijn er nog niet: die komen pas bij Starten.</p>` : ""}
+    <p class="msg"></p>
+    <div class="row">${hasCloud ? `<button class="btn danger" data-r="clean">Wissen en opruimen</button><button class="btn" data-r="local">Alleen hier wissen</button>` : `<button class="btn danger" data-r="local">Wissen</button>`}<button class="btn quiet" data-r="cancel">Annuleren</button></div>`;
+  document.body.append(dlg);
+  dlg.showModal();
+  dlg.onclick = async (e) => {
+    const r = e.target.dataset?.r;
+    if (!r) return;
+    if (r === "cancel") { dlg.close(); dlg.remove(); return; }
+    try {
+      const res = await busy(e.target, () => api("/api/setup/reset", { method: "POST", body: { cleanup: r === "clean" } }));
+      if (res.left?.length) {
+        dlg.innerHTML = `<h2>Gewist</h2><p>Een paar dingen bij de aanbieder konden niet weg:</p><ul>${res.left.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+          <p class="muted">Een back-up is 30 dagen beschermd tegen wissen. Hij kost vrijwel niets; daarna kun je hem in de console van de aanbieder verwijderen.</p><div class="row"><button class="btn primary" data-r="ok">Verder</button></div>`;
+        dlg.onclick = (ev) => { if (ev.target.dataset?.r) { dlg.close(); dlg.remove(); location.hash = ""; boot(); } };
+        return;
+      }
+      dlg.close(); dlg.remove(); location.hash = ""; boot();
+    } catch (err) { const m = dlg.querySelector(".msg"); m.textContent = err.message; m.className = "msg err"; }
+  };
+  dlg.addEventListener("cancel", () => dlg.remove());
 }
 
 const DOMAIN_HINTS = {
@@ -335,7 +382,7 @@ async function go(step) {
 }
 
 function renderStep(id) {
-  const fn = ({ sleutel: stepKey, regelen: stepRegelen, opslag: stepStores, servers: stepServers, domein: stepDns, mail: stepMail, starten: stepLaunch, klaar: renderDash })[id] ?? stepKey;
+  const fn = ({ jij: stepJij, sleutel: stepKey, regelen: stepRegelen, opslag: stepStores, servers: stepServers, domein: stepDns, mail: stepMail, starten: stepLaunch, klaar: renderDash })[id] ?? stepKey;
   fn();
 }
 
@@ -358,7 +405,7 @@ async function stepKey() {
   if (k.confirmed) { f.g3.value = k.groups[2]; f.g7.value = k.groups[6]; }
   f.onsubmit = async (e) => {
     e.preventDefault();
-    try { await api("/api/key/confirm", { method: "POST", body: { g3: f.g3.value, g7: f.g7.value } }); go(state.dienst ? "regelen" : "opslag"); }
+    try { await api("/api/key/confirm", { method: "POST", body: { g3: f.g3.value, g7: f.g7.value } }); go("regelen"); }
     catch (err) { formMsg(f, err.message); }
   };
 }
@@ -369,22 +416,140 @@ let dienstInfoCache = null, lastCheckout = null;
 
 async function stepRegelen() {
   if (config.dienst?.orderId) return dienstProgress();
-  dienstInfoCache = await api("/api/dienst/info").catch(() => null);
+  dienstInfoCache = state.dienst ? await api("/api/dienst/info").catch(() => null) : null;
   const info = dienstInfoCache;
-  root.innerHTML = wizardShell("regelen", `
-    <h1>Zelf regelen of via de dienst?</h1>
-    <p class="lead">Je cloud heeft opslag, servers, DNS en een mail-relay nodig. Die kun je zelf afsluiten, of in één abonnement laten regelen. Je gegevens zijn in beide gevallen versleuteld met jouw sleutel; ook de dienst kan ze niet lezen.</p>
-    <div class="choices">
-      <button class="choice" id="zelf"><b>Zelf regelen</b><span class="muted">Je maakt accounts bij Europese aanbieders en betaalt hen rechtstreeks. DNS kan gratis via deSEC. Meestal het goedkoopst, wel meer stappen.</span></button>
-    </div>
-    <h2>Alles geregeld door de Eigen Cloud Dienst</h2>
-    ${info ? `<p class="muted" style="margin:0 0 12px">Servers en opslag in Amsterdam en Parijs (Scaleway), je domein, DNS en mail-relay. Eén bedrag per maand, maandelijks opzegbaar. Je kunt later alles meenemen naar je eigen accounts.</p>
+  const q = config.quick === "scaleway";
+  const dienstHtml = info ? `<section class="dienst">
+      <h2>${q ? "De Eigen Cloud Dienst" : "Wij regelen alles"}</h2>
+      <p class="muted" style="margin:0 0 12px">Geen account en geen sleutels: servers en opslag in Amsterdam en Parijs, ${info.freeZone ? `een gratis adres (naam.${esc(info.freeZone)}) of je eigen domein` : "je domein"}, DNS en mail. Eén bedrag per maand, betalen met iDEAL, maandelijks opzegbaar. Je kunt later alles meenemen naar je eigen accounts.</p>
       <div class="presets">${info.bundles.map((b) => `<button class="preset" data-bundle="${esc(b.id)}">
         <b>${esc(b.title)}</b><span class="price">${eurStr(b.monthly)} per maand</span><p>${esc(b.description)}</p>
-        <p><small>${b.includes.dataServers} dataservers en ${b.includes.witnesses} witness · ${b.includes.storageGb} GB opslag${b.includes.domain ? " · domein" : ""}${b.includes.mail ? " · mail-relay" : ""}</small></p></button>`).join("")}</div>`
-      : `<p class="note warn">De dienst is nu niet bereikbaar. Probeer het later opnieuw, of regel het zelf.</p>`}`);
-  $("#zelf").onclick = () => go("opslag");
+        <p><small>${b.includes.dataServers} dataservers en ${b.includes.witnesses} witness · ${b.includes.storageGb} GB opslag${b.includes.domain ? " · domein" : ""}${b.includes.mail ? " · mail-relay" : ""}</small></p></button>`).join("")}</div>
+    </section>` : state.dienst ? `<p class="note warn">De Eigen Cloud Dienst is nu niet bereikbaar. Je kunt het ook zelf regelen.</p>` : "";
+  const quickHtml = `<section class="quick" id="quick">
+      <h2>${q ? "✓ Alles staat klaar bij Scaleway" : info ? "Of zelf, met één sleutel bij Scaleway" : "Eén sleutel, de app regelt de rest"}</h2>
+      ${q ? `<p class="muted">Opslag in Amsterdam en Parijs, servers in Amsterdam${config.mailRelay ? " en mail via Scaleway" : ""}. Je betaalt Scaleway rechtstreeks.</p>
+        <div class="next"><button class="btn primary" id="qnext">Verder</button><button class="link" id="qagain">Andere sleutel gebruiken</button></div>`
+      : quickForm()}
+    </section>`;
+  root.innerHTML = wizardShell("regelen", `
+    <h1>Waar draait je cloud?</h1>
+    <p class="lead">Je cloud heeft servers, opslag voor back-ups en een manier om mail te versturen nodig. ${info ? "Dat kunnen wij voor je regelen, of de app zet het klaar bij een aanbieder van jezelf." : "De app zet dat zelf voor je klaar."} Je gegevens zijn altijd versleuteld met jouw sleutel${info ? "; ook de dienst kan ze niet lezen" : ""}.</p>
+    ${q ? quickHtml + dienstHtml : dienstHtml + quickHtml}
+    <p class="advanced"><button class="link" id="zelf">Zelf per onderdeel kiezen</button> <span class="muted">— voor wie aanbieders wil combineren (Hetzner, UpCloud, Exoscale, eigen opslag)</span></p>`);
+  $("#zelf").onclick = async () => { if (q) await api("/api/quick/off", { method: "POST" }); config = await api("/api/config"); go("opslag"); };
   root.onclick = (e) => { const b = e.target.closest?.("[data-bundle]")?.dataset.bundle; if (b) dienstLogin(b); };
+  if (q) {
+    $("#qnext").onclick = () => go(nextOf("regelen"));
+    $("#qagain").onclick = () => { $("#quick").innerHTML = `<h2>Een andere sleutel van Scaleway</h2>${quickForm()}`; wireQuick(); };
+  } else wireQuick();
+}
+
+function quickForm() {
+  return `<p class="muted" style="margin-top:0">Je maakt zelf een account aan; de app doet de rest. Bij Scaleway (Frankrijk, datacenters in Amsterdam en Parijs) staat straks alles: opslag, servers en mail. Je betaalt hen rechtstreeks, meestal tussen de 15 en 25 euro per maand.</p>
+    <ol class="guide">
+      <li><b>Maak een account bij Scaleway.</b> Daarvoor heb je je naam en een betaalmethode nodig; dat kan de app niet voor je doen.
+        <div><button type="button" class="btn" data-open="${esc(state.scaleway.signup)}">Account maken</button> <span class="muted">Heb je er al een? Dan kun je deze stap overslaan.</span></div></li>
+      <li><b>Maak een API-sleutel.</b> Kies <i>Generate API key</i>, laat hem voor jezelf gelden (je eigen gebruiker) en bij <i>Object Storage</i> voor je standaardproject. Kopieer de twee sleutels die Scaleway dan één keer laat zien.
+        <div><button type="button" class="btn" data-open="${esc(state.scaleway.keys)}">Sleutelpagina openen</button></div></li>
+      <li><b>Kom terug.</b> ${NATIVE ? "De app vult gekopieerde sleutels vanzelf in." : "Plak de sleutels hieronder."}</li>
+    </ol>
+    <form class="fields" id="qf">
+      <label>Toegangssleutel (access key)<div class="paste"><input name="accessKey" placeholder="SCW…" autocomplete="off" autocapitalize="characters" spellcheck="false" required><button type="button" class="btn" data-paste>Plakken</button></div></label>
+      <label>Geheime sleutel (secret key)<div class="paste"><input name="secretKey" type="password" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off" spellcheck="false" required><button type="button" class="btn" data-paste>Plakken</button></div></label>
+      <details class="adv"><summary>Project kiezen (meestal niet nodig)</summary><label>Project-ID<input name="projectId" autocomplete="off" spellcheck="false" placeholder="leeg = het standaardproject van de sleutel"></label></details>
+      <ul class="results" id="qres"></ul>
+      <p class="msg"></p>
+      <div class="next"><button class="btn primary big">Alles klaarzetten</button></div>
+    </form>`;
+}
+
+const SCW_ACCESS = /SCW[A-Z0-9]{17}/, SCW_SECRET = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+/** Gekopieerde sleutels herkennen en in het juiste veld zetten. Geeft true als er iets is ingevuld. */
+function fillKeys(f, text) {
+  if (!text || !f?.isConnected) return false;
+  let hit = false;
+  const a = SCW_ACCESS.exec(text.toUpperCase()), sec = SCW_SECRET.exec(text);
+  if (a && f.accessKey.value !== a[0]) { f.accessKey.value = a[0]; hit = true; }
+  if (sec && f.secretKey.value.toLowerCase() !== sec[0].toLowerCase()) { f.secretKey.value = sec[0].toLowerCase(); hit = true; }
+  if (hit) formMsg(f, f.accessKey.value && f.secretKey.value ? "Beide sleutels zijn ingevuld." : "Ingevuld. Kopieer nu ook de andere sleutel.", true);
+  return hit;
+}
+
+async function readClipboard() {
+  if (NATIVE?.clipboard) return NATIVE.clipboard();
+  try { return await navigator.clipboard.readText(); } catch { return ""; }
+}
+
+let quickWatch = null;
+function wireQuick() {
+  const f = $("#qf");
+  root.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => (NATIVE ? NATIVE.openUrl(b.dataset.open) : window.open(b.dataset.open, "_blank", "noopener")));
+  f.querySelectorAll("[data-paste]").forEach((b) => b.onclick = async () => {
+    const t = await readClipboard();
+    if (!fillKeys(f, t)) {
+      const input = b.previousElementSibling;
+      if (t) input.value = t.trim(); else formMsg(f, "Het klembord is leeg, of de browser geeft het niet. Plak met lang drukken in het veld.");
+    }
+  });
+  f.accessKey.addEventListener("paste", (e) => { if (fillKeys(f, e.clipboardData?.getData("text"))) e.preventDefault(); });
+  f.secretKey.addEventListener("paste", (e) => { if (fillKeys(f, e.clipboardData?.getData("text"))) e.preventDefault(); });
+  // Terug uit de Scaleway-console: in de app het klembord bekijken (in een browser zou dat elke keer om toestemming vragen).
+  if (NATIVE?.clipboard) {
+    window.removeEventListener("focus", quickWatch);
+    document.removeEventListener("visibilitychange", quickWatch);
+    quickWatch = () => { if (document.visibilityState === "visible" && $("#qf")) fillKeys($("#qf"), NATIVE.clipboard()); };
+    window.addEventListener("focus", quickWatch);
+    document.addEventListener("visibilitychange", quickWatch);
+  }
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const res = $("#qres");
+    res.innerHTML = `<li class="busy">Bezig: sleutel controleren, opslag aanmaken, servers en prijzen ophalen, mail aanmelden…</li>`;
+    try {
+      const r = await busy($("button.primary", f), () => api("/api/quick/scaleway", { method: "POST", body: { accessKey: f.accessKey.value, secretKey: f.secretKey.value, projectId: f.projectId.value } }));
+      res.innerHTML = resultItems(r.steps);
+      config = await api("/api/config");
+      STEPS = stepsFor(config);
+      setTimeout(() => stepRegelen(), 1600);
+    } catch (err) {
+      res.innerHTML = resultItems(err.data?.steps ?? []);
+      formMsg(f, err.message);
+    }
+  };
+}
+
+const resultItems = (steps) => steps.map((x) => `<li class="${x.ok ? "" : "bad"}">${esc(x.label)}${x.detail ? `<small>${esc(x.detail)}</small>` : ""}</li>`).join("");
+
+/** Stap 1 opnieuw, nadat de kluis er al is: alleen het adres kan nog anders. */
+function stepJij() {
+  root.innerHTML = wizardShell("jij", `
+    <h1>Jij en je adres</h1>
+    <p class="lead">Je adres is nu <b>${esc(config.domain)}</b> (mail: ${esc(config.mailFrom ?? "")}). Je kunt het hier nog veranderen.</p>
+    <form class="fields" id="f">
+      <fieldset class="radios">
+        <label class="check"><input type="radio" name="domainMode" value="own"> Ik heb een eigen domein</label>
+        ${state.dienst ? `<label class="check"><input type="radio" name="domainMode" value="buy"> Nieuw domein kopen</label>` : ""}
+        <label class="check"><input type="radio" name="domainMode" value="free"> Gratis adres</label>
+      </fieldset>
+      <label><span id="domTitle">Domeinnaam</span><div class="suffix"><input name="domain" autocomplete="off" autocapitalize="off" required><span id="domSuffix" hidden>.dedyn.io</span></div><small id="domHint"></small></label>
+      <p class="msg"></p>
+      <div class="next"><button class="btn primary">Verder</button></div>
+    </form>
+    <p class="muted"><small>Je wachtwoord en meldadres pas je later aan in je cloud, bij Instellingen. Wil je je wachtwoordzin of herstelsleutel anders, kies dan Opnieuw beginnen.</small></p>`);
+  const f = $("#f");
+  const mode = config.domainMode ?? "own";
+  (f.querySelector(`[value="${mode}"]`) ?? f.querySelector('[value="own"]')).checked = true;
+  f.domain.value = mode === "free" ? config.domain.replace(/\.dedyn\.io$/, "") : config.domain;
+  const upd = () => { const m = f.domainMode.value; $("#domTitle").textContent = m === "free" ? "Kies een naam" : "Domeinnaam"; $("#domSuffix").hidden = m !== "free"; $("#domHint").textContent = DOMAIN_HINTS[m]; };
+  f.onchange = upd;
+  upd();
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    try { await busy($("button", f), () => api("/api/setup/domain", { method: "POST", body: { domain: f.domain.value, domainMode: f.domainMode.value } })); go("sleutel"); }
+    catch (err) { formMsg(f, err.message); }
+  };
 }
 
 function dienstShell(inner) {
@@ -419,22 +584,38 @@ function dienstOrder(bundle) {
   const info = dienstInfoCache;
   const b = info?.bundles.find((x) => x.id === bundle);
   const mode = config.domainMode;
-  if (mode === "free") {
+  if (mode === "free" || (mode === "sub" && !config.domain?.endsWith(`.${info?.freeZone}`))) {
+    const zone = info?.freeZone;
+    const label = (config.domain ?? "").split(".")[0];
     dienstShell(`
-      <h1>Kies een domeinnaam</h1>
-      <p class="lead">Bij de dienst hoort een eigen domein, zoals vanes.nl, in plaats van ${esc(config.domain)}. De registratie zit in je abonnement.</p>
-      <form class="fields" id="f"><label>Domeinnaam<input name="domain" placeholder="vanes.nl" autocapitalize="off" required></label>
-        <label class="check"><input type="checkbox" name="mine"> Dit domein heb ik al</label>
+      <h1>Kies je adres</h1>
+      <p class="lead">${zone ? `Neem een gratis adres van de dienst, of een eigen domein zoals vanes.nl.` : `Bij de dienst hoort een eigen domein, zoals vanes.nl, in plaats van ${esc(config.domain)}. De registratie zit in je abonnement.`}</p>
+      <form class="fields" id="f">
+        ${zone ? `<fieldset class="radios">
+          <label class="check"><input type="radio" name="kind" value="sub" checked> Gratis adres van de dienst</label>
+          <label class="check"><input type="radio" name="kind" value="domain"> Eigen domein</label>
+        </fieldset>` : `<input type="hidden" name="kind" value="domain">`}
+        <label class="sub"><span>Naam</span><div class="suffix"><input name="label" value="${esc(label)}" autocapitalize="off" autocomplete="off"><span>.${esc(zone ?? "")}</span></div><small>Je mail wordt dan bijvoorbeeld ${esc(config.mailFrom?.split("@")[0] ?? "post")}@<b id="subPreview">${esc(label)}.${esc(zone ?? "")}</b></small></label>
+        <label class="dom">Domeinnaam<input name="domain" placeholder="vanes.nl" autocapitalize="off"></label>
+        <label class="check dom"><input type="checkbox" name="mine"> Dit domein heb ik al</label>
         <p class="msg"></p><div><button class="btn primary">Verder</button></div></form>`);
     const f = $("#f");
+    const upd = () => { const sub = f.kind.value === "sub"; $(".sub", f).hidden = !sub; $$(".dom", f).forEach((x) => (x.hidden = sub)); f.domain.required = !sub; f.label.required = sub; if ($("#subPreview")) $("#subPreview").textContent = `${f.label.value.trim().toLowerCase() || "naam"}.${zone}`; };
+    f.oninput = upd; f.onchange = upd; upd();
     f.onsubmit = async (e) => {
       e.preventDefault();
       try {
-        if (!f.mine.checked) {
-          const r = await api(`/api/dienst/check?name=${encodeURIComponent(f.domain.value)}`);
-          if (!r.available) return formMsg(f, `${r.domain} is al bezet. Kies een andere naam, of vink aan dat hij van jou is.`);
+        if (f.kind.value === "sub") {
+          const r = await api(`/api/dienst/check?name=${encodeURIComponent(f.label.value)}`);
+          if (!r.available) return formMsg(f, `${r.domain} is al in gebruik. Kies een andere naam.`);
+          await busy($("button", f), () => api("/api/setup/domain", { method: "POST", body: { domain: r.domain, domainMode: "sub" } }));
+        } else {
+          if (!f.mine.checked) {
+            const r = await api(`/api/dienst/check?name=${encodeURIComponent(f.domain.value)}`);
+            if (!r.available) return formMsg(f, `${r.domain} is al bezet. Kies een andere naam, of vink aan dat hij van jou is.`);
+          }
+          await busy($("button", f), () => api("/api/setup/domain", { method: "POST", body: { domain: f.domain.value, domainMode: f.mine.checked ? "own" : "buy" } }));
         }
-        await busy($("button", f), () => api("/api/setup/domain", { method: "POST", body: { domain: f.domain.value, domainMode: f.mine.checked ? "own" : "buy" } }));
         config = await api("/api/config");
         dienstOrder(bundle);
       } catch (err) { formMsg(f, err.message); }
@@ -444,9 +625,10 @@ function dienstOrder(bundle) {
   const countries = { NL: "Nederland", BE: "België", DE: "Duitsland", FR: "Frankrijk", LU: "Luxemburg" };
   dienstShell(`
     <h1>${esc(b?.title ?? "Abonnement")} — ${eurStr(b?.monthly)} per maand</h1>
-    <p class="lead">Nog een paar gegevens, dan reken je af met iDEAL. Daarna wordt alles voor ${esc(config.domain)} klaargezet.</p>
+    <p class="lead">${mode === "sub" ? "Ga akkoord met de voorwaarden" : "Nog een paar gegevens"}, dan reken je af met iDEAL. Daarna wordt alles voor ${esc(config.domain)} klaargezet.</p>
     <form class="fields" id="f">
-      ${mode === "own" ? `<fieldset class="radios">
+      ${mode === "sub" ? `<input type="hidden" name="dmode" value="sub"><p class="note" style="margin:0">Je adres wordt <b>${esc(config.domain)}</b>. Geen domein nodig, geen gegevens voor een register. <button type="button" class="link" id="otherName">Andere naam</button></p>`
+      : mode === "own" ? `<fieldset class="radios">
           <label class="check"><input type="radio" name="dmode" value="transfer" checked> Domein verhuizen naar de dienst (dan regelt de dienst ook de verlenging)</label>
           <label class="check"><input type="radio" name="dmode" value="own"> Domein blijft waar hij staat; ik zet zelf de nameservers om</label>
         </fieldset>
@@ -470,11 +652,12 @@ function dienstOrder(bundle) {
   const upd = () => {
     const m = f.dmode.value;
     const auth = $(".auth", f); if (auth) auth.hidden = m !== "transfer";
-    $(".reg", f).hidden = m === "own";
-    $$(".reg input:not([name=company])", f).forEach((i) => (i.required = m !== "own"));
+    $(".reg", f).hidden = m === "own" || m === "sub";
+    $$(".reg input:not([name=company])", f).forEach((i) => (i.required = m !== "own" && m !== "sub"));
   };
   f.onchange = upd;
   upd();
+  $("#otherName")?.addEventListener("click", async () => { await api("/api/setup/domain", { method: "POST", body: { domain: `${(config.domain ?? "naam").split(".")[0]}.dedyn.io`, domainMode: "free" } }); config = await api("/api/config"); dienstOrder(bundle); });
   f.onsubmit = async (e) => {
     e.preventDefault();
     const m = f.dmode.value;
@@ -503,8 +686,8 @@ async function dienstProgress() {
     ${st.steps?.length ? launchView(st) : ""}
     ${st.status === "awaiting_payment" && lastCheckout ? `<p><a class="btn" href="${esc(lastCheckout)}" target="_blank" rel="noopener">Naar de betaalpagina</a></p>` : ""}
     <p class="msg" id="dmsg"></p>
-    ${st.status === "ready" && config.dienst?.applied ? `<div class="next"><button class="btn primary" id="nx">Verder naar starten</button></div>` : ""}`);
-  $("#nx")?.addEventListener("click", () => go("starten"));
+    ${st.status === "ready" && config.dienst?.applied ? `<div class="next"><button class="btn primary" id="nx">Verder</button></div>` : ""}`);
+  $("#nx")?.addEventListener("click", () => go(nextOf("regelen")));
   if (st.status === "ready" && !config.dienst?.applied) {
     try { await api("/api/dienst/apply", { method: "POST" }); config = await api("/api/config"); return dienstProgress(); }
     catch (err) { $("#dmsg").textContent = err.message; $("#dmsg").className = "msg err"; dienstTimer = setTimeout(dienstProgress, 15000); return; }
@@ -624,7 +807,7 @@ async function stepDns() {
       <div id="nsBox"></div>
       <div class="next"><button class="btn primary" id="nx">Verder</button></div>`);
     api("/api/dns/check").then((r) => nsPanel(r, d, "de dienst")).catch(() => {});
-    $("#nx").onclick = () => go("mail");
+    $("#nx").onclick = () => go(nextOf("domein"));
     return;
   }
   const free = config.domainMode === "free";
@@ -675,7 +858,7 @@ async function stepDns() {
       } catch (err) { formMsg(f, err.message); }
     };
   }
-  $("#nx").onclick = () => go("mail");
+  $("#nx").onclick = () => go(nextOf("domein"));
 }
 
 /** Waar je domein naar moet wijzen, en of dat al zo is. */

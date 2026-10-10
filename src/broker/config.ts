@@ -27,6 +27,8 @@ export interface BrokerConfig {
   /** Welke proxy's het echte IP-adres mogen doorgeven (X-Forwarded-For). */
   trustProxy: string;
   publicUrl: string;
+  /** Zone van de dienst voor gratis adressen (BROKER_FREE_ZONE, bijv. "eigencloud.nl" → naam.eigencloud.nl); null = uit. */
+  freeZone: string | null;
   termsUrl: string | null;
   privacyUrl: string | null;
   mollie: { apiKey: string; url: string };
@@ -49,6 +51,9 @@ export interface BrokerConfig {
 }
 
 export const NAMESERVERS = ["ns1.desec.io", "ns2.desec.org"];
+
+/** Namen die niet als gratis adres uitgedeeld worden (van de dienst zelf, of verwarrend). */
+export const RESERVED_LABELS = new Set(["www", "mail", "cloud", "api", "dienst", "admin", "beheer", "app", "ns1", "ns2", "smtp", "imap", "_acme", "status", "help", "support", "info", "test"]);
 
 /** Voorbeeldbundels. De prijzen zijn plaatshouders: stel ze zelf in via bundles.json. */
 export const DEFAULT_BUNDLES: Bundle[] = [
@@ -118,6 +123,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BrokerConfig {
     host: env.BROKER_HOST || "0.0.0.0",
     trustProxy: env.BROKER_TRUST_PROXY || "loopback,uniquelocal",
     publicUrl: trim(env.BROKER_PUBLIC_URL || `http://localhost:${port}`),
+    freeZone: env.BROKER_FREE_ZONE ? env.BROKER_FREE_ZONE.trim().toLowerCase().replace(/^\.|\.$/g, "") : null,
     termsUrl: env.BROKER_TERMS_URL || null,
     privacyUrl: env.BROKER_PRIVACY_URL || null,
     mollie: { apiKey: env.MOLLIE_API_KEY || "", url: trim(env.MOLLIE_API_URL || "https://api.mollie.com/v2") },

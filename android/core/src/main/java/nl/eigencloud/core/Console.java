@@ -230,7 +230,10 @@ public final class Console {
         String sk = secretKey != null && !secretKey.isEmpty() ? secretKey : existing != null ? Json.str(existing, "secretKey") : null;
         Map<String, Object> store = Json.obj("name", name, "type", "s3", "purpose", purpose, "country", region.get("country"), "endpoint", ep,
                 "region", "eigen".equals(regionId) ? "us-east-1" : regionId,
-                "bucket", bucket != null && !bucket.isEmpty() ? bucket : Json.jsString(c.get("cluster")) + "-" + (isBackup ? "backup" : "data") + "-" + Bytes.hex(Bytes.random(3)));
+                // Zelfde plek opnieuw koppelen (bijv. de assistent nog eens doorlopen): dezelfde bucket houden.
+                "bucket", bucket != null && !bucket.isEmpty() ? bucket
+                        : existing != null && ep.equals(existing.get("endpoint")) && Json.truthy(existing.get("bucket")) ? Json.str(existing, "bucket")
+                        : Json.jsString(c.get("cluster")) + "-" + (isBackup ? "backup" : "data") + "-" + Bytes.hex(Bytes.random(3)));
         if (ak != null) store.put("accessKey", ak);
         if (sk != null) store.put("secretKey", sk);
         if (ak == null || ak.isEmpty() || sk == null || sk.isEmpty()) throw new IllegalArgumentException("Vul de toegangssleutel en geheime sleutel in");
@@ -375,6 +378,8 @@ public final class Console {
         if (Json.truthy(con.get("alertEmail"))) s.put("alert_email", con.get("alertEmail"));
         if (Json.truthy(con.get("mailRelay"))) s.put("mail_relay", con.get("mailRelay"));
         if (Json.truthy(con.get("spfExtra"))) s.put("spf_extra", con.get("spfExtra"));
+        List<Object> extra = Json.asList(con.get("extraDns"));
+        if (extra != null && !extra.isEmpty()) s.put("extra_dns", Json.stringify(extra));
         return s;
     }
 

@@ -1,5 +1,16 @@
 [
   {
+    "version": "1.2",
+    "date": "2026-10-10",
+    "changes": [
+      "Nieuwe gebruikers hoeven bij Waar je cloud draait geen sleutels meer over te typen: kies Wij regelen alles (de Eigen Cloud Dienst) of geef één sleutel van Scaleway, dan zet de app opslag, servers en mail zelf klaar",
+      "De app opent de juiste pagina's bij Scaleway en vult gekopieerde sleutels vanzelf in",
+      "Bij de Eigen Cloud Dienst kun je een gratis adres kiezen (naam.domein-van-de-dienst), zonder domein te kopen",
+      "In elke stap van het opzetten: Vorige stap en Opnieuw beginnen, desgewenst met opruimen van wat al bij de aanbieder is aangemaakt",
+      "Verander je je adres na het kiezen van Scaleway, dan wordt het versturen van mail vanzelf opnieuw aangemeld"
+    ]
+  },
+  {
     "version": "1.1",
     "date": "2026-10-10",
     "changes": [

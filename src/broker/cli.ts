@@ -58,7 +58,7 @@ try {
       const st = orderState(o);
       console.log(`Bestelling ${o.id}`);
       console.log(`  Klant:       ${c.email} (${o.customer_id})`);
-      console.log(`  Domein:      ${o.domain} (${{ register: "registreren", transfer: "verhuizen", own: "eigen domein" }[o.domain_mode]})`);
+      console.log(`  Domein:      ${o.domain} (${{ register: "registreren", transfer: "verhuizen", own: "eigen domein", sub: "gratis adres" }[o.domain_mode]})`);
       console.log(`  Bundel:      ${o.bundle}, € ${o.amount.replace(".", ",")} per maand`);
       console.log(`  Status:      ${STATUS[o.status] ?? o.status}${o.error ? ` — ${o.error}` : ""}`);
       console.log(`  Besteld:     ${when(o.created_at)}   betaald: ${when(o.paid_at)}   opgezegd: ${when(o.cancelled_at)}${o.ends_at ? ` (loopt tot ${o.ends_at})` : ""}`);

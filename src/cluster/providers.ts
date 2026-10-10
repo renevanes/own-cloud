@@ -43,6 +43,9 @@ export interface Provider {
   country(region: string): string;
 }
 
+/** Basisadres van de Scaleway-API (in tests een nepserver via EIGEN_SCW_API). */
+export const scwApi = () => (process.env.EIGEN_SCW_API ?? "https://api.scaleway.com").replace(/\/$/, "");
+
 async function api(url: string, init: RequestInit & { okStatus?: number[] } = {}) {
   const r = await fetch(url, { ...init, signal: AbortSignal.timeout(60_000) });
   const text = await r.text();
@@ -113,14 +116,14 @@ export class ScalewayProvider implements Provider {
     return { "x-auth-token": this.cfg.secretKey, "content-type": ct };
   }
   private base(zone: string) {
-    return `https://api.scaleway.com/instance/v1/zones/${zone}`;
+    return `${scwApi()}/instance/v1/zones/${zone}`;
   }
   country(region: string) {
     return region.startsWith("nl-") ? "NL" : region.startsWith("pl-") ? "PL" : "FR";
   }
   private async image(zone: string) {
     const label = this.cfg.imageLabel ?? "ubuntu_noble";
-    const { json } = await api(`https://api.scaleway.com/marketplace/v2/local-images?image_label=${label}&zone=${zone}&type=instance_sbs`, { headers: this.h() });
+    const { json } = await api(`${scwApi()}/marketplace/v2/local-images?image_label=${label}&zone=${zone}&type=instance_sbs`, { headers: this.h() });
     const id = json.local_images?.[0]?.id;
     if (!id) throw new Error(`Scaleway: geen image ${label} in ${zone}`);
     return id as string;

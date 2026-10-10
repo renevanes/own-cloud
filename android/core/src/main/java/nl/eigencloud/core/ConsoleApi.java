@@ -217,6 +217,7 @@ public final class ConsoleApi {
                 "policy", c.get("policy"), "preset", con == null ? null : con.get("preset"),
                 "domainMode", con == null || con.get("domainMode") == null ? "own" : con.get("domainMode"),
                 "desec", Json.map(con, "desec") == null ? null : Json.obj("email", Json.str(con, "desec", "email"), "at", Json.path(con, "desec", "at")),
+                "quick", con == null ? null : con.get("quick"),
                 "dienst", Json.map(con, "dienst") == null ? null : Json.obj("email", Json.str(con, "dienst", "email"), "loggedIn", Json.str(con, "dienst", "token") != null,
                         "orderId", Json.str(con, "dienst", "orderId"), "bundle", Json.path(con, "dienst", "bundle"), "applied", Json.truthy(Json.path(con, "dienst", "applied"))));
     }
@@ -229,6 +230,13 @@ public final class ConsoleApi {
     private static Reply ok(Object j) { return new Reply(200, j); }
 
     private static Reply err(int status, String msg) { return new Reply(status, Json.obj("error", msg)); }
+
+    /** Error reply with extra fields (e.g. the steps done so far), like {@code reply.code(400).send({error, steps})}. */
+    private static Reply err(int status, String msg, Object... extra) {
+        Map<String, Object> j = Json.obj("error", msg);
+        j.putAll(Json.obj(extra));
+        return new Reply(status, j);
+    }
 
     public synchronized boolean unlocked() {
         if (vault.isUnlocked() && System.currentTimeMillis() - lastUse > idleMs && lastUse > 0) vault.lock();
@@ -267,7 +275,8 @@ public final class ConsoleApi {
                         "done", con != null && Json.truthy(con.get("done")), "domain", vault.isUnlocked() ? cfg().get("domain") : null,
                         "offers", Json.obj("stores", catalog.storeOffers(), "servers", catalog.serverOffers()),
                         "phone", true, "biometric", biometric, "dienst", dienstUrl != null && !dienstUrl.isEmpty(),
-                        "domainMode", con == null ? null : con.get("domainMode")));
+                        "domainMode", con == null ? null : con.get("domainMode"),
+                        "scaleway", Json.obj("signup", Extras.SCW_SIGNUP_URL, "keys", Extras.SCW_KEYS_URL)));
             }
             case "GET /api/dienst/info":
                 return ok(Extras.dienstInfo(dienstUrl));
@@ -391,6 +400,38 @@ public final class ConsoleApi {
                 return ok(Json.obj("ok", true, "preset", chosen));
             }
 
+            // ── Eén sleutel bij Scaleway: de console regelt opslag, servers en mail ──
+            case "POST /api/quick/scaleway":
+                return quickScaleway(c, b);
+            case "POST /api/quick/off":
+                // Terug naar "zelf per onderdeel": de één-sleutel-markering eraf (gekoppelde dingen blijven staan).
+                Json.map(c, "console").remove("quick");
+                save();
+                return ok(Json.obj("ok", true));
+
+            // ── Opnieuw beginnen (alleen vóór de start) ──
+            case "POST /api/setup/reset": {
+                Map<String, Object> con = Json.map(c, "console");
+                if (Json.truthy(Json.path(con, "done")) || Json.truthy(Json.path(con, "firstLaunch"))) return err(409, "Je cloud is al gestart. Opnieuw beginnen kan dan niet meer vanuit de assistent.");
+                List<Object> done = new ArrayList<>(), left = new ArrayList<>();
+                if (Json.truthy(b.get("cleanup"))) {
+                    for (Map<String, Object> st : ClusterConfig.stores(c)) {
+                        if (!"s3".equals(st.get("type"))) continue;
+                        String why;
+                        try { why = new S3Store(st).destroyBucket(); } catch (IOException | RuntimeException e) { why = e.getMessage(); }
+                        if (why != null) left.add(Json.jsString(st.get("bucket")) + ": " + why); else done.add("Bucket " + Json.jsString(st.get("bucket")) + " verwijderd");
+                    }
+                    try {
+                        String r = Extras.scwRevokeMail(c);
+                        if (r != null) done.add(r);
+                    } catch (IOException | RuntimeException e) {
+                        left.add("Maildomein: " + e.getMessage());
+                    }
+                }
+                vault.destroy();
+                return ok(Json.obj("ok", true, "done", done, "left", left));
+            }
+
             case "POST /api/dns": {
                 DnsSetup.Result r = DnsSetup.configure(c, Json.str(b, "mode"), Json.str(b, "token"));
                 save();
@@ -419,7 +460,21 @@ public final class ConsoleApi {
             case "POST /api/setup/domain": {
                 if (Json.truthy(Json.path(c, "console", "done"))) return err(409, "Je cloud draait al; het domein wijzigen kan dan niet meer hier");
                 String mode = Json.str(b, "domainMode") == null ? "own" : Json.str(b, "domainMode");
+                Object before = c.get("domain");
                 Extras.changeDomain(c, Extras.normalizeDomain(Json.str(b, "domain"), mode), mode);
+                // Mail via Scaleway hoort bij het domein: bij een ander domein opnieuw aanmelden.
+                Map<String, Object> con = Json.map(c, "console");
+                String scwSecret = Json.str(c, "providers", "scaleway", "secretKey"), scwProject = Json.str(c, "providers", "scaleway", "projectId");
+                if (Json.truthy(con.get("quick")) && !c.get("domain").equals(before) && Json.truthy(scwSecret) && Json.truthy(scwProject)) {
+                    try { Extras.scwRevokeMail(c); } catch (IOException | RuntimeException ignored) { /* zoals .catch(() => null) */ }
+                    con.remove("temDomainId");
+                    try {
+                        Extras.scwMail(c, scwSecret, scwProject);
+                    } catch (IOException | RuntimeException e) {
+                        con.put("mailRelay", "");
+                        con.put("extraDns", Json.list());
+                    }
+                }
                 save();
                 return ok(Json.obj("ok", true, "domain", c.get("domain")));
             }
@@ -551,6 +606,71 @@ public final class ConsoleApi {
             return ok(Json.obj("ok", true));
         }
         return err(404, "Onbekend: " + key);
+    }
+
+    private static Map<String, Object> step(String label, boolean ok, String detail) {
+        Map<String, Object> s = Json.obj("label", label, "ok", ok);
+        if (detail != null) s.put("detail", detail);
+        return s;
+    }
+
+    /** "ongeveer € 13,34": toFixed(2) met een komma. */
+    static String euro(double v) {
+        return new java.math.BigDecimal(v).setScale(2, java.math.RoundingMode.HALF_UP).toPlainString().replace(".", ",");
+    }
+
+    /** POST /api/quick/scaleway: met één sleutel opslag (Amsterdam + Parijs), servers en mail bij Scaleway klaarzetten. */
+    private Reply quickScaleway(Map<String, Object> c, Map<String, Object> b) throws IOException {
+        List<Object> steps = new ArrayList<>();
+        try {
+            String[] keys = Extras.scwKeys(Json.str(b, "accessKey"), Json.str(b, "secretKey"));
+            String accessKey = keys[0], secretKey = keys[1];
+            String projectId = Extras.scwProject(accessKey, secretKey, Json.str(b, "projectId"));
+            steps.add(step("Sleutel werkt", true, null));
+            Map<String, String> fields = new HashMap<>();
+            fields.put("secretKey", secretKey);
+            fields.put("projectId", projectId);
+            List<Console.RegionSizes> regions = Console.connectProvider(c, catalog, "scaleway", fields);
+            vault.save();
+            boolean priced = false;
+            String firstError = null;
+            for (Console.RegionSizes r : regions) {
+                if (r.data != null) priced = true;
+                if (firstError == null && r.error != null && !r.error.isEmpty()) firstError = r.error;
+            }
+            if (!priced) throw new IOException("Scaleway gaf geen serverprijzen: " + (firstError != null ? firstError : "onbekend"));
+            steps.add(step("Servers en prijzen opgehaald", true, null));
+            String[][] stores = {{"nl-ams", "replica", "Opslag in Amsterdam"}, {"fr-par", "backup", "Back-up in Parijs, 30 dagen niet te wissen"}};
+            for (String[] s : stores) {
+                Console.StoreSetup r = Console.addStore(c, catalog, "scaleway", s[0], null, accessKey, secretKey, null, s[1]);
+                if (!r.ok) {
+                    List<String> why = new ArrayList<>();
+                    for (Admin.StepResult x : r.steps) if (!x.ok) why.add(x.label + (x.detail != null && !x.detail.isEmpty() ? " (" + x.detail + ")" : ""));
+                    throw new IOException(s[2] + ": " + String.join(", ", why));
+                }
+                vault.save();
+                steps.add(step(s[2], true, null));
+            }
+            Console.choosePreset(c, catalog, "nl");
+            vault.save();
+            Catalog.Preset preset = null;
+            for (Catalog.Preset pr : Console.presets(c, catalog)) if (pr.id.equals("nl")) preset = pr;
+            steps.add(step("Servers: " + preset.title, true, preset.monthly != null ? "ongeveer € " + euro(preset.monthly) + " per maand bij Scaleway, plus een paar euro voor opslag" : null));
+            try {
+                Map<String, Object> m = Extras.scwMail(c, secretKey, projectId);
+                steps.add(step("Mail versturen via Scaleway", true, Json.str(m, "detail")));
+            } catch (IOException | RuntimeException e) {
+                steps.add(step("Mail versturen via Scaleway", false, e.getMessage() + ". Je kunt dit later bij Mail regelen; je cloud werkt ook zonder."));
+            }
+            Map<String, Object> con = Json.map(c, "console");
+            con.put("quick", "scaleway");
+            con.put("preset", preset.id);
+            save();
+            return ok(Json.obj("ok", true, "steps", steps, "monthly", preset.monthly));
+        } catch (IOException | RuntimeException e) {
+            save();
+            return err(400, e.getMessage(), "steps", steps);
+        }
     }
 
     /** The recovery sheet HTML (to print or save as PDF). */

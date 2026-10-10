@@ -5,7 +5,7 @@
 import crypto from "node:crypto";
 import dnsp from "node:dns/promises";
 import Fastify, { type FastifyRequest, type FastifyReply } from "fastify";
-import { type BrokerConfig, NAMESERVERS } from "./config.js";
+import { type BrokerConfig, NAMESERVERS, RESERVED_LABELS } from "./config.js";
 import { makeApis, type Apis } from "./apis.js";
 import { makeMailer, type Mailer } from "./mail.js";
 import { openDb, Secrets, sha256, type CustomerRow, type OrderRow, type DomainMode, getOrder, getCustomer, event } from "./db.js";
@@ -100,6 +100,23 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     authcodeCustomer: new RateLimit(10, 60 * 60_000),
   };
 
+  /** Gratis adres: "vanes" of "vanes.<freeZone>" → volledige naam; null als het geen gratis adres is (of het uit staat). */
+  const freeName = (raw: unknown): { domain: string } | { error: string } | null => {
+    const z = cfg.freeZone;
+    if (!z) return null;
+    const v = normDomain(raw);
+    const label = v.endsWith(`.${z}`) ? v.slice(0, -(z.length + 1)) : v.includes(".") ? null : v;
+    if (label === null) return null;
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(label) || label.length < 3) return { error: "Kies een naam van 3 tot 32 letters, cijfers of streepjes" };
+    if (RESERVED_LABELS.has(label) || /^xn--/.test(label)) return { error: "Deze naam is gereserveerd. Kies een andere." };
+    return { domain: `${label}.${z}` };
+  };
+  /** Vrij als er geen lopende bestelling voor is en de zone (nog) niet bestaat. */
+  const freeAvailable = async (domain: string) => {
+    if (db.prepare("SELECT 1 FROM orders WHERE domain = ? AND status NOT IN ('awaiting_payment','failed')").get(domain)) return false;
+    return !(await ctx.apis.desec.getZone(domain));
+  };
+
   const auth = (req: FastifyRequest): CustomerRow | null => {
     const m = /^Bearer ([0-9a-f]{64})$/i.exec(req.headers.authorization ?? "");
     if (!m) return null;
@@ -123,6 +140,7 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     bundles: cfg.bundles.map((b) => ({ id: b.id, title: b.title, description: b.description, monthly: b.monthly, includes: b.includes, placement: b.placement })),
     termsUrl: cfg.termsUrl,
     privacyUrl: cfg.privacyUrl,
+    freeZone: cfg.freeZone,
   }));
 
   // ── Inloggen met een code per mail ──
@@ -173,6 +191,13 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
 
   // ── Domein controleren ──
   app.get<{ Querystring: { name?: string } }>("/v1/domains/check", async (req, reply) => {
+    const sub = freeName(req.query.name);
+    if (sub) {
+      if ("error" in sub) return httpError(reply, 400, sub.error);
+      if (!limits.checkIp.ok(req.ip)) return httpError(reply, 429, "Even rustig aan: probeer het over een minuut opnieuw.");
+      try { return { domain: sub.domain, available: await freeAvailable(sub.domain), price: null, free: true }; }
+      catch (e) { console.error(`[dienst] adrescheck: ${(e as Error).message}`); return httpError(reply, 502, "De controle werkt nu even niet. Probeer het zo opnieuw."); }
+    }
     const domain = normDomain(req.query.name);
     if (!DOMAIN.test(domain)) return httpError(reply, 400, "Dat is geen geldige domeinnaam (bijvoorbeeld: jouwnaam.nl)");
     if (!limits.checkIp.ok(req.ip)) return httpError(reply, 429, "Even rustig aan: probeer het over een minuut opnieuw.");
@@ -194,13 +219,24 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     if (!bundle) return httpError(reply, 400, "Kies een bundel");
     if (b.acceptTerms !== true) return httpError(reply, 400, "Ga akkoord met de voorwaarden om te bestellen");
     const mode = b.domain?.mode as DomainMode;
-    if (!["register", "transfer", "own"].includes(mode)) return httpError(reply, 400, "Kies of je een nieuwe domeinnaam wilt, er een verhuist of je eigen domeinnaam houdt");
-    const domain = normDomain(b.domain?.name);
-    if (!DOMAIN.test(domain)) return httpError(reply, 400, "Dat is geen geldige domeinnaam (bijvoorbeeld: jouwnaam.nl)");
+    if (!["register", "transfer", "own", "sub"].includes(mode)) return httpError(reply, 400, "Kies of je een nieuwe domeinnaam wilt, er een verhuist of je eigen domeinnaam houdt");
+    let domain: string;
+    if (mode === "sub") {
+      const sub = freeName(b.domain?.name);
+      if (!sub) return httpError(reply, 400, "Gratis adressen staan uit bij deze dienst");
+      if ("error" in sub) return httpError(reply, 400, sub.error);
+      domain = sub.domain;
+      try { if (!(await freeAvailable(domain))) return httpError(reply, 409, `${domain} is al in gebruik. Kies een andere naam.`); }
+      catch { return httpError(reply, 502, "De controle werkt nu even niet. Probeer het zo opnieuw."); }
+    } else {
+      domain = normDomain(b.domain?.name);
+      if (!DOMAIN.test(domain)) return httpError(reply, 400, "Dat is geen geldige domeinnaam (bijvoorbeeld: jouwnaam.nl)");
+      if (cfg.freeZone && (domain === cfg.freeZone || domain.endsWith(`.${cfg.freeZone}`))) return httpError(reply, 400, "Kies voor een adres van de dienst de optie Gratis adres");
+    }
     const authCode = typeof b.domain?.authCode === "string" ? b.domain.authCode.trim() : "";
     if (mode === "transfer" && !authCode) return httpError(reply, 400, "Vul de verhuiscode (autorisatiecode) van je huidige registrar in");
     let registrant: Registrant | undefined;
-    if (mode !== "own") {
+    if (mode === "register" || mode === "transfer") {
       const r = b.registrant ?? {};
       const need: [keyof Registrant, string][] = [["firstName", "voornaam"], ["lastName", "achternaam"], ["street", "straat"], ["number", "huisnummer"], ["zipcode", "postcode"], ["city", "plaats"], ["country", "land"], ["phone", "telefoonnummer"], ["email", "e-mailadres"]];
       const missing = need.filter(([k]) => !String(r[k] ?? "").trim()).map(([, l]) => l);
@@ -275,7 +311,7 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     // Ook bij een betalingsprobleem blijft het pakket beschikbaar: de cloud draait gewoon door.
     if (!["ready", "payment_problem"].includes(o.status) || !o.kit_enc) return httpError(reply, 409, "Je cloud is nog niet klaar. Even geduld.");
     const kit = readKit(ctx, o)!;
-    kit.delegated = o.domain_mode === "register" ? true : await nsDelegated(o.domain);
+    kit.delegated = o.domain_mode === "register" || o.domain_mode === "sub" ? true : await nsDelegated(o.domain);
     return kit;
   });
 

@@ -797,3 +797,72 @@ test("Eigen Cloud Dienst: van inloggen tot opruimen", { timeout: 60_000 }, async
     assert.equal((await api("POST", `/v1/orders/${orderId}/resume`, undefined, tokenA)).status, 409);
   });
 });
+
+test("Eigen Cloud Dienst: gratis adres naam.<zone van de dienst>, zonder domein en zonder houdergegevens", { timeout: 60_000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dienst-sub-"));
+  const smtp = await smtpSink();
+  const up = fakeUpstream();
+  const U = `http://127.0.0.1:${await up.listening}`;
+  const port = await freePort();
+  const PUBLIC = `http://127.0.0.1:${port}`;
+  // De zone van de dienst bestaat al bij deSEC.
+  up.st.desec.zones.set("eigencloud.test", { name: "eigencloud.test", keys: [], rrsets: new Map() });
+  const broker = await createBroker(loadConfig({
+    BROKER_DATA_DIR: dir, BROKER_PORT: String(port), BROKER_PUBLIC_URL: PUBLIC, BROKER_FREE_ZONE: "EigenCloud.test.",
+    MOLLIE_API_KEY: "test_mollie", MOLLIE_API_URL: `${U}/mollie`,
+    OPENPROVIDER_USERNAME: "rene", OPENPROVIDER_PASSWORD: "op-geheim", OPENPROVIDER_URL: `${U}/op`,
+    DESEC_TOKEN: "desec-dienst", DESEC_URL: `${U}/desec`,
+    SCW_SECRET_KEY: "scw-org-geheim", SCW_ORGANIZATION_ID: "org-1", SCW_API_URL: `${U}/scw`,
+    BROKER_SMTP_URL: `smtp://127.0.0.1:${smtp.port}`, BROKER_MAIL_FROM: "Eigen Cloud Dienst <dienst@dienst.test>", BROKER_LOOP_MS: "20",
+  }));
+  await broker.app.listen({ port, host: "127.0.0.1" });
+  t.after(async () => { await broker.close(); await up.close(); await smtp.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const api = async (method: string, p: string, body?: unknown, token?: string) => {
+    const r = await fetch(PUBLIC + p, { method, headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: body !== undefined ? JSON.stringify(body) : undefined });
+    const text = await r.text();
+    let json: any = null; try { json = JSON.parse(text); } catch { /* */ }
+    return { status: r.status, json, text };
+  };
+  assert.equal((await api("GET", "/v1/info")).json.freeZone, "eigencloud.test");
+
+  // Vrij of niet, zonder Openprovider
+  let r = await api("GET", "/v1/domains/check?name=Vanes");
+  assert.deepEqual(r.json, { domain: "vanes.eigencloud.test", available: true, price: null, free: true });
+  assert.equal(up.count("POST", /^\/op\/domains\/check/), 0, "geen registrar nodig");
+  assert.match((await api("GET", "/v1/domains/check?name=mail")).json.error, /gereserveerd/);
+  assert.match((await api("GET", "/v1/domains/check?name=a_b")).json.error, /3 tot 32/);
+
+  assert.equal((await api("POST", "/v1/auth/start", { email: "nieuw@elders.test" })).status, 202);
+  let m; for (let i = 0; i < 100 && !m; i++) { m = smtp.mails.find((x) => /inlogcode: \d{6}/.test(x.data)); if (!m) await new Promise((res) => setTimeout(res, 30)); }
+  const token = (await api("POST", "/v1/auth/verify", { email: "nieuw@elders.test", code: /inlogcode: (\d{6})/.exec(m!.data)![1] })).json.token as string;
+
+  r = await api("POST", "/v1/orders", { bundle: "compleet", domain: { mode: "own", name: "iets.eigencloud.test" }, acceptTerms: true }, token);
+  assert.match(r.json.error, /Gratis adres/, "de zone van de dienst is geen eigen domein");
+  r = await api("POST", "/v1/orders", { bundle: "compleet", domain: { mode: "sub", name: "vanes" }, acceptTerms: true }, token);
+  assert.equal(r.status, 200, r.text);
+  const orderId = r.json.orderId as string;
+  const pay = [...up.st.mollie.payments.values()].find((p) => p.metadata.orderId === orderId)!;
+  Object.assign(pay, { status: "paid", mandateId: "mdt_9", method: "ideal", paidAt: new Date().toISOString() });
+  up.st.mollie.mandates.push(fakeMandate("mdt_9", up.st.mollie.customers[0].id, "directdebit"));
+  await fetch(`${PUBLIC}/v1/mollie/webhook`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: `id=${pay.id}` });
+  let o: any;
+  for (let i = 0; i < 100; i++) { await broker.idle(); o = (await api("GET", `/v1/orders/${orderId}`, undefined, token)).json; if (o.status === "ready") break; await new Promise((res) => setTimeout(res, 30)); }
+  assert.equal(o.status, "ready", JSON.stringify(o));
+  assert.equal(o.domain, "vanes.eigencloud.test");
+  assert.equal(o.steps.find((s: any) => s.id === "domain").detail, "Je adres werkt, met DNSSEC");
+  assert.equal(up.count("POST", /^\/op\//), 0, "niets geregistreerd bij Openprovider");
+
+  // De zone van de dienst wijst door naar de eigen zone van de klant, met DNSSEC
+  const parent = up.st.desec.zones.get("eigencloud.test")!;
+  assert.deepEqual(parent.rrsets.get("vanes/NS")?.records, ["ns1.desec.io.", "ns2.desec.org."]);
+  assert.deepEqual(parent.rrsets.get("vanes/DS")?.records, ["12345 13 2 abcdef"]);
+  assert.ok(up.st.desec.zones.has("vanes.eigencloud.test"), "eigen zone voor de klant");
+  const kit = (await api("GET", `/v1/orders/${orderId}/kit`, undefined, token)).json;
+  assert.equal(kit.domain, "vanes.eigencloud.test");
+  assert.equal(kit.delegated, true);
+  assert.equal(kit.dns.zone, "vanes.eigencloud.test");
+
+  assert.equal((await api("GET", "/v1/domains/check?name=vanes")).json.available, false, "nu bezet");
+  assert.equal((await api("POST", "/v1/orders", { bundle: "compleet", domain: { mode: "sub", name: "vanes" }, acceptTerms: true }, token)).status, 409);
+  assert.match((await api("GET", `/v1/orders/${orderId}/authcode`, undefined, token)).json.error, /niet verhuizen/);
+});

@@ -17,6 +17,8 @@ import { freePort } from "../test/helpers/cluster.js";
 const out = process.argv[2];
 const smtp = await smtpSink();
 const up = fakeUpstream();
+// Gratis adressen onder de zone van de dienst
+up.st.desec.zones.set("eigencloud.test", { name: "eigencloud.test", keys: [], rrsets: new Map() });
 const U = `http://127.0.0.1:${await up.listening}`;
 const port = await freePort();
 const PUBLIC = `http://127.0.0.1:${port}`;
@@ -27,7 +29,7 @@ const broker = await createBroker(loadConfig({
   DESEC_TOKEN: "desec-dienst", DESEC_URL: `${U}/desec`,
   SCW_SECRET_KEY: "scw-org-geheim", SCW_ORGANIZATION_ID: "org-1", SCW_API_URL: `${U}/scw`,
   BROKER_SMTP_URL: `smtp://127.0.0.1:${smtp.port}`, BROKER_MAIL_FROM: "Eigen Cloud Dienst <dienst@dienst.test>",
-  BROKER_ADMIN_EMAIL: "beheer@dienst.test", BROKER_LOOP_MS: "20",
+  BROKER_ADMIN_EMAIL: "beheer@dienst.test", BROKER_LOOP_MS: "20", BROKER_FREE_ZONE: "eigencloud.test",
 }));
 await broker.app.listen({ port, host: "127.0.0.1" });
 

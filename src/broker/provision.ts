@@ -98,31 +98,8 @@ export function parseDnskey(s: string) {
   return { flags: Number(flags), protocol: Number(protocol), alg: Number(alg), pub_key: key.join("") };
 }
 
-/** TXT-waarde voor deSEC: tussen aanhalingstekens, in stukken van max. 255 tekens. */
-export function txtRecord(value: string) {
-  const v = value.replace(/^"|"$/g, "").replace(/"\s*"/g, "");
-  const parts: string[] = [];
-  for (let i = 0; i < v.length; i += 255) parts.push(`"${v.slice(i, i + 255).replace(/"/g, '\\"')}"`);
-  return parts.join(" ") || '""';
-}
-
-/** Recordnaam (relatief of volledig) → deSEC-subname binnen de zone. */
-export function subnameOf(name: string, zone: string) {
-  const n = name.replace(/\.$/, "").toLowerCase();
-  if (n === zone || n === "@" || n === "") return "";
-  return n.endsWith(`.${zone}`) ? n.slice(0, -(zone.length + 1)) : n;
-}
-
-/** Records uit een TEM-domein, ook bij oudere vormen (spf_config/dkim_config). */
-export function temRecords(dom: any, projectId: string) {
-  const r = dom?.records ?? {};
-  const pick = (x: any) => (x && typeof x === "object" && x.value ? { name: String(x.name ?? ""), value: String(x.value) } : null);
-  const dkim = pick(r.dkim) ?? (dom?.dkim_config ? { name: `${projectId}._domainkey`, value: String(dom.dkim_config) } : null);
-  const dmarc = pick(r.dmarc);
-  const spf = pick(r.spf)?.value ?? (dom?.spf_config ? String(dom.spf_config) : "");
-  const spfExtra = spf.split(/\s+/).filter((t) => /^include:/.test(t)).join(" ");
-  return { dkim, dmarc, spfExtra };
-}
+export { txtRecord, subnameOf, temRecords } from "../tem.js";
+import { txtRecord, subnameOf, temRecords } from "../tem.js";
 
 // ───────── De stappen ─────────
 
@@ -140,12 +117,25 @@ const STEPS: [string, StepFn][] = [
       }
     }
     const dnskeys = ((z.keys ?? []) as any[]).map((k) => k.dnskey).filter(Boolean);
-    patchState(ctx.db, o.id, { zone: true, dnskeys });
+    const ds = ((z.keys ?? []) as any[]).flatMap((k) => k.ds ?? []).filter(Boolean);
+    patchState(ctx.db, o.id, { zone: true, dnskeys, ds });
     return dnskeys.length ? "Zone aangemaakt, met DNSSEC" : "Zone aangemaakt";
   }],
 
   ["domain", async (ctx, o) => {
     if (o.domain_mode === "own") return `Zet bij je eigen registrar de nameservers op ${NAMESERVERS.join(" en ")}`;
+    if (o.domain_mode === "sub") {
+      // Gratis adres: in de zone van de dienst naar de eigen zone van de klant wijzen (NS), met DNSSEC (DS).
+      const parent = ctx.cfg.freeZone;
+      if (!parent || !o.domain.endsWith(`.${parent}`)) throw new ApiError("Dienst", 400, "Gratis adressen staan uit bij deze dienst");
+      const label = o.domain.slice(0, -(parent.length + 1));
+      const ds = (orderState(o).ds ?? []) as string[];
+      await ctx.apis.desec.putRrsets(parent, [
+        { subname: label, type: "NS", ttl: 3600, records: NAMESERVERS.map((n) => `${n}.`) },
+        ...(ds.length ? [{ subname: label, type: "DS", ttl: 3600, records: ds }] : []),
+      ]);
+      return ds.length ? "Je adres werkt, met DNSSEC" : "Je adres werkt";
+    }
     const st = orderState(o);
     const op = ctx.apis.openprovider;
     const transferMsg = "Verhuizing aangevraagd. Je huidige registrar moet die nog goedkeuren; dat duurt meestal een paar dagen";
@@ -300,7 +290,7 @@ export function saveKit(ctx: Ctx, orderId: string): Kit {
   const kit: Kit = {
     domain: o.domain,
     nameservers: NAMESERVERS,
-    delegated: o.domain_mode === "register",
+    delegated: o.domain_mode === "register" || o.domain_mode === "sub",
     provider: { id: "scaleway", fields: { secretKey: s.apiKey.secretKey, projectId: st.projectId } },
     storage: b.storage.map((x) => ({ offer: "scaleway" as const, region: x.region, accessKey: s.apiKey!.accessKey, secretKey: s.apiKey!.secretKey, purpose: x.purpose })),
     placement: b.placement.map((p) => ({ provider: p.provider, region: p.region, size: p.size, country: p.country, kind: p.kind })),

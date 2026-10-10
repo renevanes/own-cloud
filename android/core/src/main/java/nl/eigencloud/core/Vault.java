@@ -123,6 +123,13 @@ public final class Vault {
         config = null;
     }
 
+    /** Opnieuw beginnen: kluisbestand weg (de herstelsleutel is daarmee ook van dit toestel weg). */
+    public void destroy() {
+        lock();
+        if (file.exists() && !file.delete()) file.deleteOnExit();
+        new File(file.getPath() + ".tmp").delete();
+    }
+
     private void requireUnlocked() {
         if (key == null || salt == null || config == null) throw new IllegalStateException("Kluis is op slot");
     }

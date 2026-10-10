@@ -87,6 +87,7 @@ het risico op wanbetaling, de btw en je eigen tijd.
 | `BROKER_TRUST_PROXY` | `loopback,uniquelocal` | Welke proxy het IP-adres van de bezoeker mag doorgeven |
 | `BROKER_SECRET` | — | 64 hex-tekens; anders wordt `geheim.key` gemaakt. **Bewaar een kopie veilig**: zonder deze sleutel zijn de pakketten niet meer te lezen |
 | `BROKER_TERMS_URL`, `BROKER_PRIVACY_URL` | — | Links naar je voorwaarden en privacyverklaring |
+| `BROKER_FREE_ZONE` | uit | Domein van de dienst voor gratis adressen, bijv. `eigencloud.nl`: klanten kiezen dan alleen een naam (`vanes.eigencloud.nl`), zonder domein te kopen. Zie hieronder |
 | `MOLLIE_API_KEY` | — | `test_…` of `live_…` |
 | `MOLLIE_API_URL` | `https://api.mollie.com/v2` | |
 | `OPENPROVIDER_USERNAME`, `OPENPROVIDER_PASSWORD` | — | |
@@ -127,6 +128,20 @@ docker run -d --name dienst --restart unless-stopped \
 
 Zet er een reverse proxy met HTTPS voor (bijv. Caddy: `dienst.jouwbedrijf.nl { reverse_proxy 127.0.0.1:4100 }`).
 Mollie moet `https://dienst.jouwbedrijf.nl/v1/mollie/webhook` kunnen bereiken.
+
+### 4. Gratis adressen (`BROKER_FREE_ZONE`)
+
+Zo hoeft een nieuwe klant geen domein te kopen en geen houdergegevens in te vullen:
+
+1. Neem een domein voor de dienst, bijvoorbeeld `eigencloud.nl`, en maak het bij deSEC aan (in hetzelfde account als `DESEC_TOKEN`).
+2. Zet bij je registrar de nameservers van dat domein op `ns1.desec.io` en `ns2.desec.org` (en de DS-records van deSEC voor DNSSEC).
+3. Zet `BROKER_FREE_ZONE=eigencloud.nl`.
+
+Per klant maakt de dienst een eigen zone `naam.eigencloud.nl` bij deSEC (met een eigen DNS-token, net als bij een eigen domein) en zet in `eigencloud.nl` de verwijzing ernaartoe (NS en DS). Namen van 3 tot 32 tekens; een paar namen zijn gereserveerd (`www`, `mail`, `cloud`, `api`, `dienst`, …, zie `RESERVED_LABELS` in `src/broker/config.ts`). Let op: deSEC heeft een standaardlimiet op het aantal zones per account; vraag deSEC om een hogere limiet voordat je veel klanten hebt. Na opzeggen en opruimen blijft de zone staan (naam bezet) tot je hem zelf weghaalt.
+
+### 5. De app laten weten waar de dienst staat
+
+Zet het adres (bijv. `https://dienst.eigencloud.nl`) in het bestand `DIENST_URL` in de repository, of als GitHub-variabele `EIGEN_DIENST_URL`. Vanaf de volgende versie bieden de app en de console de dienst aan nieuwe gebruikers aan als eerste keuze ("Wij regelen alles"); zonder adres zien ze alleen de route met hun eigen Scaleway-sleutel.
 
 Maak dagelijks een back-up van de datamap (de database `dienst.sqlite` met `sqlite3 dienst.sqlite ".backup …"`)
 en bewaar `BROKER_SECRET` / `geheim.key` apart.

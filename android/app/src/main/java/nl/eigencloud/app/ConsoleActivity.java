@@ -1,6 +1,8 @@
 package nl.eigencloud.app;
 
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
@@ -171,6 +173,21 @@ public final class ConsoleActivity extends Activity {
                 startActivity(new Intent(ConsoleActivity.this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP));
             } catch (IllegalArgumentException e) {
                 openExternal(Uri.parse(url));
+            }
+        }
+
+        /** Tekst op het klembord (voor "Plakken" bij de Scaleway-sleutels); leeg als er niets is of het niet mag. */
+        @JavascriptInterface
+        public String clipboard() {
+            if (!onOurPage()) return "";
+            try {
+                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                ClipData clip = cm == null ? null : cm.getPrimaryClip();
+                if (clip == null || clip.getItemCount() == 0) return "";
+                CharSequence t = clip.getItemAt(0).coerceToText(ConsoleActivity.this);
+                return t == null ? "" : t.toString();
+            } catch (RuntimeException e) {
+                return ""; // geen focus of geen toestemming (Android 10+): niets
             }
         }
 

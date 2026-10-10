@@ -291,6 +291,52 @@ public final class S3Store implements ObjectStore {
         if (r.status >= 300 && !text.contains("BucketAlreadyOwnedByYou")) throw new IOException("Bucket aanmaken mislukt: " + r.status + " " + Bytes.head(text, 200));
     }
 
+    private static final Pattern VERSION = Pattern.compile("<(?:Version|DeleteMarker)>([\\s\\S]*?)</(?:Version|DeleteMarker)>");
+    private static final Pattern VERSION_ID = Pattern.compile("<VersionId>([\\s\\S]*?)</VersionId>");
+    private static final Pattern CODE = Pattern.compile("<Code>([^<]+)");
+
+    private static String code(String xml, int status) {
+        Matcher m = CODE.matcher(xml);
+        return m.find() ? m.group(1) : String.valueOf(status);
+    }
+
+    /**
+     * Bucket helemaal weghalen (bij opnieuw beginnen vóór de start): alle versies wissen, ook die onder
+     * object-lock in GOVERNANCE-modus, en dan de bucket zelf. Geeft null, of een uitleg als het niet kan.
+     * (Sleutels uit de versielijst zijn volledig; anders dan de TS-versie wordt het opslagvoorvoegsel er
+     * dus niet nog een keer voor gezet.)
+     */
+    public String destroyBucket() throws IOException {
+        Map<String, Object> c = Json.copy(config);
+        c.remove("prefix");
+        S3Store raw = new S3Store(c).timeout(timeoutMs);
+        Map<String, String> versions = new LinkedHashMap<>();
+        versions.put("versions", "");
+        for (int round = 0; round < 50; round++) {
+            Http.Response r = raw.req("GET", "", versions, null, none());
+            String xml = r.text();
+            if (r.status == 404) return null;
+            if (r.status >= 300) return "Inhoud opvragen mislukt (" + r.status + ")";
+            List<String[]> items = new ArrayList<>();
+            Matcher m = VERSION.matcher(xml);
+            while (m.find()) {
+                Matcher km = KEY.matcher(m.group(1));
+                Matcher vm = VERSION_ID.matcher(m.group(1));
+                items.add(new String[] {xmlUnescape(km.find() ? km.group(1) : ""), vm.find() ? vm.group(1) : ""});
+            }
+            if (items.isEmpty()) break;
+            for (String[] it : items) {
+                Map<String, String> q = new LinkedHashMap<>();
+                if (!it[1].isEmpty() && !"null".equals(it[1])) q.put("versionId", it[1]);
+                Http.Response d = raw.req("DELETE", it[0], q, null, Http.headers("x-amz-bypass-governance-retention", "true"));
+                if (d.status >= 300 && d.status != 404) return "Bestand " + it[0] + " kan (nog) niet weg: " + code(d.text(), d.status);
+            }
+        }
+        Http.Response r = raw.req("DELETE", "", none(), null, none());
+        if (r.status >= 300 && r.status != 404) return "Bucket verwijderen mislukt: " + code(r.text(), r.status);
+        return null;
+    }
+
     /** Bucket sub-resource ("versioning", "object-lock", "lifecycle"); false when the provider refuses it. */
     public boolean putBucketConfig(String sub, String xml) throws IOException {
         byte[] body = Bytes.utf8(xml);

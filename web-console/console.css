@@ -156,3 +156,34 @@ label small { color: var(--muted); }
 dialog.invoice[open] { width: min(860px, 96vw); height: min(90vh, 1100px); padding: 12px; border: 0; border-radius: var(--radius-l); display: grid; grid-template-rows: 1fr auto; gap: 10px; }
 dialog.invoice iframe { width: 100%; height: 100%; border: 1px solid var(--line); border-radius: var(--radius-s); background: #fff; }
 dialog.invoice::backdrop { background: #0006; }
+
+/* ── Waar je cloud draait: één sleutel ── */
+.quick { border: 1.5px solid var(--accent); border-radius: var(--radius-l); background: var(--panel); padding: 18px 20px 20px; margin: 4px 0 26px; }
+.quick h2 { margin: 0 0 8px; }
+.guide { margin: 0 0 18px; padding-left: 22px; display: grid; gap: 14px; }
+.guide li { padding-left: 4px; }
+.guide li > div { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.guide li > div .muted { font-size: var(--fs-small); }
+.paste { display: flex; gap: 8px; }
+.paste input { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .02em; }
+.paste .btn { flex: 0 0 auto; padding: 8px 14px; }
+details.adv summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+details.adv label { margin-top: 8px; }
+.results li.busy::before { content: "…"; color: var(--muted); }
+h2.or { margin-top: 8px; }
+.advanced { margin-top: 26px; font-size: 14px; }
+
+/* ── Vorige stap / opnieuw beginnen ── */
+.wiz-nav { display: flex; justify-content: space-between; align-items: center; margin-top: 34px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 14px; }
+.link.quiet { color: var(--muted); }
+.link.quiet:hover { color: var(--danger); }
+.btn.quiet { border-color: transparent; background: none; }
+dialog.confirm[open] { width: min(520px, 92vw); border: 0; border-radius: var(--radius-l); padding: 22px 24px; background: var(--panel); color: var(--text); display: grid; gap: 8px; }
+dialog.confirm h2 { margin: 0; }
+dialog.confirm p { margin: 0; }
+dialog.confirm .row { margin-top: 10px; }
+dialog.confirm .row > * { flex: 0 1 auto; }
+dialog::backdrop { background: rgb(0 0 0 / .35); }
+.dienst { border: 1.5px solid var(--accent); border-radius: var(--radius-l); background: var(--panel); padding: 18px 20px 20px; margin: 4px 0 26px; }
+.dienst h2 { margin: 0 0 8px; }
+.dienst + .quick { border-color: var(--line); }

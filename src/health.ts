@@ -118,6 +118,12 @@ export function expectedRecords(info: Pick<ClusterInfo, "ips4" | "ips6">): DnsRe
   recs.push({ sub: "", type: "TXT", values: [txt(`v=spf1 a:mail.${d}${extra ? " " + extra : ""} -all`)], ttl: 3600 });
   const pub = dkimPublic();
   if (pub) recs.push({ sub: `${dkimSelector()}._domainkey`, type: "TXT", values: [txt(`v=DKIM1; k=rsa; p=${pub}`)], ttl: 3600 });
+  // Extra records uit de beheerconsole (bijv. de DKIM-sleutel van de mail-relay bij Scaleway).
+  try {
+    for (const x of JSON.parse(getSetting("extra_dns") || "[]") as { sub: string; type: string; value: string }[]) {
+      if (x.type === "TXT" && typeof x.sub === "string" && x.sub && !recs.some((r) => r.sub === x.sub && r.type === "TXT")) recs.push({ sub: x.sub, type: "TXT", values: [txt(x.value)], ttl: 3600 });
+    }
+  } catch { /* ongeldige instelling: negeren */ }
   const rua = getSetting("alert_email") || ownAddress();
   recs.push({ sub: "_dmarc", type: "TXT", values: [txt(`v=DMARC1; p=quarantine; rua=mailto:${rua}`)], ttl: 3600 });
   return recs;

@@ -101,6 +101,7 @@ if wait_for 60 test -s "$BUILD/dienst-info.json"; then
 else
   echo "   dienst niet gestart:"; tail -30 "$BUILD/dienst.log"; RESULTS+=("FAIL ConsoleExtrasTest"); FAILED=1
 fi
+jrun QuickSetupTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
 run golden-verify.ts npx tsx scripts/golden-verify.ts "$BUILD"
 
 echo "== Wachten op de cluster-node (leider)"

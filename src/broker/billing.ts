@@ -234,6 +234,7 @@ export async function resumeSubscription(ctx: Ctx, orderId: string) {
 export async function domainAuthCode(ctx: Ctx, orderId: string) {
   const o = getOrder(ctx.db, orderId)!;
   if (o.domain_mode === "own") throw new UserError(409, "Dit domein staat niet bij ons geregistreerd. Je beheert het zelf bij je eigen registrar.");
+  if (o.domain_mode === "sub") throw new UserError(409, "Een gratis adres van de dienst kun je niet verhuizen. Wil je je eigen domein? Neem dan een domein en zet je mail daarnaartoe over.");
   if (!transferable(o)) throw new UserError(409, "Een verhuiscode kun je opvragen als je cloud klaar is of als je hebt opgezegd");
   const st = orderState(o);
   let id = st.opDomainId as number | undefined;
