@@ -66,7 +66,8 @@ public final class MainActivity extends Activity {
         web.setDownloadListener((url, ua, disposition, mime, length) -> download(url, disposition, mime));
         if (b != null) web.restoreState(b);
         else open(getIntent());
-        if (Prefs.cloudUrl(this) != null) SyncJob.schedule(this);
+        // Altijd inplannen: ook zonder cloud (tijdens het opzetten) moet de app zichzelf bijwerken.
+        SyncJob.schedule(this);
         WhatsNew.maybeShow(this);
     }
 
@@ -89,11 +90,13 @@ public final class MainActivity extends Activity {
         // Bij openen meteen bijwerken (mail, agenda, nieuwe foto's), niet pas na een kwartier.
         if (Prefs.cloudUrl(this) != null && CloudApi.sessionToken(Prefs.cloudUrl(this)) != null) SyncJob.runNow(this);
         event(Json.obj("type", "changed")); // bijv. terug uit de instelling "onbekende apps installeren"
+        UpdateCheck.resumed(this);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
+        UpdateCheck.paused(this);
         CookieManager.getInstance().flush();
     }
 

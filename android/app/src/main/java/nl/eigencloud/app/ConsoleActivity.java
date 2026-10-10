@@ -85,6 +85,7 @@ public final class ConsoleActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        UpdateCheck.paused(this);
         wasUnlocked = backend.unlocked();
     }
 
@@ -101,6 +102,7 @@ public final class ConsoleActivity extends Activity {
     protected void onResume() {
         super.onResume();
         paid();
+        UpdateCheck.resumed(this);
         // Is de kluis intussen op slot gegaan (15 minuten niets gedaan)? Dan meteen het slotscherm.
         if (wasUnlocked && !backend.unlocked()) { autoBio = true; web.reload(); }
     }

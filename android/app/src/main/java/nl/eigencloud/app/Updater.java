@@ -275,10 +275,10 @@ final class Updater {
         return r;
     }
 
-    /** Vanuit de achtergrondtaak: hooguit elke 6 uur kijken, en via wifi meteen installeren. */
+    /** Vanuit de achtergrondtaak: hooguit elke 3 uur kijken, en via wifi meteen installeren. */
     static void periodic(Context c) {
         if (!Prefs.flag(c, Prefs.UPDATES)) return;
-        if (System.currentTimeMillis() - Prefs.num(c, "update.checked") < 6 * 3_600_000L) return;
+        if (System.currentTimeMillis() - Prefs.num(c, "update.checked") < 3 * 3_600_000L) return;
         try {
             Release r = check(c);
             if (r == null) return;

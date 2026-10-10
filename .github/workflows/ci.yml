@@ -134,6 +134,15 @@ jobs:
           oras push "$IMG:latest" --artifact-type application/vnd.eigencloud.app.v1 \
             update.json:application/json eigen-cloud.apk:application/vnd.android.package-archive
           oras tag "$IMG:latest" "v${{ needs.versie.outputs.name }}"
+      - name: Kunnen telefoons en servers de updates ophalen? (anoniem, zoals zij dat doen)
+        run: |
+          for P in eigen-cloud-app eigen-cloud eigen-caddy; do
+            IMG="${{ github.repository_owner }}/$P"
+            T=$(curl -sS "https://ghcr.io/token?service=ghcr.io&scope=repository:$IMG:pull" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))' 2>/dev/null || true)
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" -H "Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json" "https://ghcr.io/v2/$IMG/manifests/latest")
+            if [ "$CODE" = 200 ]; then echo "$P: openbaar, updates werken"
+            else echo "::warning title=Pakket $P is niet openbaar::Telefoons en servers kunnen $P niet ophalen (HTTP $CODE). Zet het één keer op Public: github.com/users/${{ github.repository_owner }}/packages/container/package/$P/settings → Change visibility → Public."; fi
+          done
       - name: GitHub Release (elke versie een eigen release, met de APK)
         env: { GH_TOKEN: "${{ github.token }}", V: "${{ needs.versie.outputs.name }}" }
         run: |

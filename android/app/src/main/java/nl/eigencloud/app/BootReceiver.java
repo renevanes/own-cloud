@@ -8,6 +8,7 @@ import android.content.Intent;
 public final class BootReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context c, Intent intent) {
-        if (Prefs.cloudUrl(c) != null) SyncJob.schedule(c);
+        // Ook zonder cloud: de achtergrondtaak kijkt dan alleen naar updates van de app.
+        SyncJob.schedule(c);
     }
 }

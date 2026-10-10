@@ -23,6 +23,11 @@ public final class InstallReceiver extends BroadcastReceiver {
             Intent confirm = intent.getParcelableExtra(Intent.EXTRA_INTENT);
             if (confirm == null) return;
             confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            // Staat de app open (je tikte net op Bijwerken)? Dan meteen de vraag van Android tonen.
+            android.app.Activity open = UpdateCheck.visible;
+            if (open != null && !open.isFinishing()) {
+                try { open.startActivity(confirm); return; } catch (RuntimeException ignored) { /* dan via een melding */ }
+            }
             PendingIntent pi = PendingIntent.getActivity(c, 5, confirm, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
             Notification n = Notify.builder(c, Notify.UPDATE).setContentTitle("Versie " + version + " is klaar").setContentText("Tik om bij te werken")
                     .setContentIntent(pi).setAutoCancel(true).build();
