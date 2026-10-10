@@ -23,9 +23,25 @@ en op een nieuwe telefoon herstellen met alleen je e-mailadres, de code uit de m
 Je sleutels staan in een kluis op de telefoon (PBKDF2 + AES-256-GCM), te ontgrendelen met je wachtwoordzin of vingerafdruk
 (Android Keystore). Schermafbeeldingen van de beheerconsole zijn geblokkeerd; Google-back-up van de app staat uit.
 
+## Versies
+
+Elke wijziging is een nieuwe versie: 1.1, 1.2, … (`VERSION` in de hoofdmap; app en servers hebben hetzelfde nummer).
+Bij elke versie hoort een paar regels in `changelog.json`. De app laat die na een update één keer zien
+(*Nieuw in versie X.Y*), de updatemelding noemt wat er nieuw is, en onder **Instellingen → Telefoon → Wat is er nieuw**
+staat het hele overzicht. Elke versie is één commit *Versie X.Y* en krijgt een eigen release `vX.Y` op GitHub met
+`Eigen-Cloud-vX.Y.apk`.
+
+```sh
+scripts/bump.sh "Wat er voor de gebruiker veranderd is" "Nog iets"   # versie +0.1 en regels in het wijzigingslog
+scripts/publish.sh                                                    # tests, commit "Versie X.Y", push naar main
+```
+`publish.sh` stopt als het wijzigingslog niet bij `VERSION` past of als er intussen een nieuwere versie op GitHub
+staat (een andere sessie): eerst `git pull --rebase`, dan opnieuw `scripts/bump.sh`. De CI weigert een push waarvan de
+versie al bestaat.
+
 ## Automatische updates
 
-Elke build op `main` is een nieuwe versie. GitHub Actions zet hem als pakket `eigen-cloud-app` op ghcr.io; de app
+Elke versie op `main` wordt door GitHub Actions gebouwd en gepubliceerd. GitHub Actions zet hem als pakket `eigen-cloud-app` op ghcr.io; de app
 kijkt elke paar uur, downloadt een nieuwe versie via wifi, controleert de SHA-256 en of hij met dezelfde sleutel is
 ondertekend, en installeert hem zelf. Vanaf Android 12 gebeurt dat zonder tik (na de eerste keer en nadat je de app
 eenmalig toestemming geeft om apps te installeren); op oudere Android-versies krijg je een melding om bij te werken.
@@ -36,7 +52,7 @@ server-image bevat de app van dezelfde build), met dezelfde SHA-256- en handteke
 ## Installeren
 
 Eerste keer: download de app van je eigen cloud (**Instellingen → Telefoon → App downloaden**, ingelogd), of de
-nieuwste `eigen-cloud-x.y.z.apk` bij de [Releases](https://github.com/renevanes/own-cloud/releases/latest), en open
+nieuwste `Eigen-Cloud-vX.Y.apk` bij de [Releases](https://github.com/renevanes/own-cloud/releases/latest), en open
 hem (sta *installeren uit deze bron* toe). Daarna werkt de app zichzelf bij.
 
 Eerste keer: vul het adres van je cloud in (bijv. `vanes.nl` → `https://cloud.vanes.nl`) en log in. Blijf ingelogd:

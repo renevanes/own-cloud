@@ -144,6 +144,13 @@ android/core/test.sh # Java-kern van de Android-app tegen de TypeScript-code, mo
 android/compile-check.sh  # app-code compileren tegen de Android-API (zonder Android Studio)
 ```
 
+## Versies
+
+Eén versienummer voor de app en de servers, en bij elke wijziging omhoog: 1.1, 1.2, … Wat er per versie nieuw is
+staat in [changelog.json](changelog.json); de app toont het na een update. Elke versie heeft een eigen
+[release](https://github.com/renevanes/own-cloud/releases) met de APK. Werkwijze: `scripts/bump.sh "wat er veranderd is"`
+en daarna `scripts/publish.sh` (zie [android/README.md](android/README.md#versies)).
+
 ## Meerdere servers, verhuizen en slapen
 
 Zie **[CLUSTER.md](CLUSTER.md)**: Eigen Cloud als cluster over meerdere Europese aanbieders, met failover, zelfherstel, versleutelde back-ups (ook naar een tijdstip), verhuizen, en slapen/wekken.

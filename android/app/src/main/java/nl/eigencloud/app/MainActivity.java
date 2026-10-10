@@ -67,6 +67,7 @@ public final class MainActivity extends Activity {
         if (b != null) web.restoreState(b);
         else open(getIntent());
         if (Prefs.cloudUrl(this) != null) SyncJob.schedule(this);
+        WhatsNew.maybeShow(this);
     }
 
     @Override
@@ -297,6 +298,12 @@ public final class MainActivity extends Activity {
         public void openConsole() {
             if (!trusted()) return;
             ConsoleActivity.open(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public void whatsNew() {
+            if (!trusted()) return;
+            main.post(() -> WhatsNew.showAll(MainActivity.this));
         }
 
         @JavascriptInterface

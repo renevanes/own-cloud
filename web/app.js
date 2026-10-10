@@ -993,13 +993,14 @@ function renderPhone() {
     <div class="phone-block">
       <h3>App</h3>
       <p>Versie ${esc(i.version)}${i.updates.status.available ? ` · <b>versie ${esc(i.updates.status.available)} is beschikbaar</b>` : ""}</p>
+      ${i.updates.status.available && i.updates.status.notes?.length ? `<ul class="phone-notes">${i.updates.status.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
       ${sw("updates", i.updates.on, "Automatisch bijwerken", "Nieuwe versies komen van je eigen project op GitHub, niet uit de Play Store.")}
       ${i.updates.on ? `<div class="phone-sub">
         ${sw("autoInstall", i.updates.status.auto, "Zelf installeren via wifi", "Zonder tik vanaf Android 12, na de eerste keer.")}
         ${i.updates.status.auto && !i.updates.status.canInstall ? `<p class="phone-state warn">Android moet Eigen Cloud nog toestaan om updates te installeren.</p>
           <div class="row-actions"><button class="primary" id="phoneAllow">Toestaan</button></div>` : ""}
       </div>` : ""}
-      <div class="row-actions">${i.updates.status.available ? `<button class="primary" id="phoneInstall">Nu bijwerken</button>` : ""}<button class="ghost" id="phoneCheck">Zoeken naar nieuwe versie</button></div>
+      <div class="row-actions">${i.updates.status.available ? `<button class="primary" id="phoneInstall">Nu bijwerken</button>` : ""}<button class="ghost" id="phoneCheck">Zoeken naar nieuwe versie</button>${typeof phone.whatsNew === "function" ? `<button class="ghost" id="phoneNews">Wat is er nieuw</button>` : ""}</div>
       ${phoneUpdateMsg || i.updates.status.error ? `<p class="phone-state${i.updates.status.error && !phoneUpdateMsg ? " warn" : ""}">${esc(phoneUpdateMsg || i.updates.status.error)}</p>` : ""}
       <p><button class="link danger" id="phoneForget">Deze telefoon loskoppelen</button></p>
     </div>`;
@@ -1013,5 +1014,6 @@ function renderPhone() {
   $("#phoneCheck").onclick = (e) => { e.target.textContent = "Bezig…"; e.target.disabled = true; phoneUpdateMsg = ""; phone.checkUpdate(); };
   $("#phoneInstall")?.addEventListener("click", (e) => { e.target.textContent = "Bezig…"; e.target.disabled = true; phone.installUpdate(); });
   $("#phoneAllow")?.addEventListener("click", () => phone.allowInstalls());
+  $("#phoneNews")?.addEventListener("click", () => phone.whatsNew());
   $("#phoneForget").onclick = () => { if (confirm("Deze telefoon loskoppelen?\n\nDe app vergeet het adres en je inlog. Je cloud zelf blijft gewoon bestaan.")) phone.forget(); };
 }

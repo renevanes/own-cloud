@@ -42,6 +42,8 @@ final class Updater {
         final long code;
         final String version, apkDigest;
         final long size;
+        /** Wat er nieuw is in deze versie (uit update.json). */
+        java.util.List<String> notes = new java.util.ArrayList<>();
         /** Van je eigen cloud in plaats van ghcr.io (als die niet bereikbaar of niet openbaar is). */
         CloudApi viaCloud;
 
@@ -62,6 +64,7 @@ final class Updater {
         String sha = Json.str(j, "sha256");
         if (code == null || sha == null || !sha.matches("[0-9a-f]{64}")) throw new IOException("onvolledige update-informatie van je cloud");
         Release r = new Release(code.longValue(), Json.str(j, "version"), "sha256:" + sha, size == null ? -1 : size.longValue());
+        r.notes = WhatsNew.notesFrom(j, r.version);
         r.viaCloud = api;
         return r;
     }
@@ -115,7 +118,9 @@ final class Updater {
         byte[] info = blob(tok, infoDigest, 64 * 1024);
         Map<String, Object> j = Json.parseObject(Bytes.utf8(info));
         Number code = Json.num(j, "versionCode");
-        return new Release(code == null ? 0 : code.longValue(), Json.str(j, "version"), apkDigest, apkSize);
+        Release r = new Release(code == null ? 0 : code.longValue(), Json.str(j, "version"), apkDigest, apkSize);
+        r.notes = WhatsNew.notesFrom(j, r.version);
+        return r;
     }
 
     /** Haalt een blob op (volgt de omleiding naar de opslag van GitHub, zonder het token mee te sturen). */
@@ -263,8 +268,9 @@ final class Updater {
     static Release check(Context c) throws IOException {
         Release r = newest(c);
         Prefs.setNum(c, "update.checked", System.currentTimeMillis());
-        if (r.code <= BuildConfig.VERSION_CODE) { Prefs.setStr(c, "update.version", null); return null; }
+        if (r.code <= BuildConfig.VERSION_CODE) { Prefs.setStr(c, "update.version", null); Prefs.setStr(c, "update.notes", null); return null; }
         Prefs.setStr(c, "update.version", r.version);
+        Prefs.setStr(c, "update.notes", r.notes.isEmpty() ? null : String.join("\n", r.notes));
         Prefs.setStr(c, "update.error", null);
         return r;
     }
@@ -280,9 +286,13 @@ final class Updater {
             if (Prefs.flag(c, Prefs.AUTO_INSTALL) && canInstall(c) && !metered) { install(c, r); return; }
             if (r.version.equals(Prefs.str(c, "update.notified"))) return;
             Prefs.setStr(c, "update.notified", r.version);
+            String how = canInstall(c) ? "Wordt via wifi geïnstalleerd, of tik om nu bij te werken" : "Tik om bij te werken";
+            StringBuilder big = new StringBuilder();
+            for (String line : r.notes) big.append("• ").append(line).append('\n');
             Notification n = Notify.builder(c, Notify.UPDATE)
                     .setContentTitle("Nieuwe versie: " + r.version)
-                    .setContentText(canInstall(c) ? "Wordt via wifi geïnstalleerd, of tik om nu bij te werken" : "Tik om bij te werken")
+                    .setContentText(r.notes.isEmpty() ? how : r.notes.get(0))
+                    .setStyle(new Notification.BigTextStyle().bigText(big.append(how).toString()))
                     .setContentIntent(Notify.openApp(c, "#instellingen/telefoon", 3))
                     .setAutoCancel(true)
                     .build();
@@ -293,7 +303,11 @@ final class Updater {
     }
 
     static Map<String, Object> status(Context c) {
-        return Json.obj("current", BuildConfig.VERSION_NAME, "available", Prefs.str(c, "update.version"), "checked", Prefs.num(c, "update.checked"),
+        String notes = Prefs.str(c, "update.notes");
+        return Json.obj("current", BuildConfig.VERSION_NAME, "available", Prefs.str(c, "update.version"),
+                "notes", notes == null ? new java.util.ArrayList<>() : new java.util.ArrayList<Object>(java.util.Arrays.asList(notes.split("\n"))),
+                "currentNotes", new java.util.ArrayList<Object>(WhatsNew.changesOf(WhatsNew.log(c), BuildConfig.VERSION_NAME)),
+                "checked", Prefs.num(c, "update.checked"),
                 "auto", Prefs.flag(c, Prefs.AUTO_INSTALL), "canInstall", canInstall(c), "error", Prefs.str(c, "update.error"),
                 "installing", Prefs.str(c, "update.installing"));
     }

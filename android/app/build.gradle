@@ -2,10 +2,10 @@ plugins {
     id "com.android.application"
 }
 
-// Versie komt uit package.json van de cloud, zodat app en servers samen oplopen.
-def pkg = new groovy.json.JsonSlurper().parse(file("../../package.json"))
-// Elke build op main krijgt een hoger versienummer, zodat de app hem als update ziet.
-def ciBuild = (System.getenv("GITHUB_RUN_NUMBER") ?: "0").toInteger()
+// Versie komt uit het bestand VERSION in de repository: één nummer voor app en servers, bij elke wijziging omhoog
+// (scripts/bump.sh). Het wijzigingslog (changelog.json) gaat mee in de app voor "Wat is er nieuw".
+def versionProps = new Properties()
+file("../../VERSION").withInputStream { versionProps.load(it) }
 def signingProps = new Properties()
 def signingFile = file("../signing/signing.properties")
 if (signingFile.exists()) signingFile.withInputStream { signingProps.load(it) }
@@ -18,8 +18,8 @@ android {
         applicationId "nl.eigencloud.app"
         minSdk 26
         targetSdk 34
-        versionCode 2000000 + ciBuild
-        versionName ciBuild > 0 ? "${pkg.version}.${ciBuild}" : pkg.version
+        versionCode versionProps.getProperty("VERSION_CODE").toInteger()
+        versionName versionProps.getProperty("VERSION_NAME")
         buildConfigField "String", "UPDATE_REPO", "\"${System.getenv("EIGEN_UPDATE_REPO") ?: "renevanes/own-cloud"}\""
         // Updates komen als OCI-pakket van ghcr.io (openbaar te lezen, ook als de repository privé is).
         buildConfigField "String", "UPDATE_IMAGE", "\"${System.getenv("EIGEN_UPDATE_IMAGE") ?: "renevanes/eigen-cloud-app"}\""
@@ -78,6 +78,7 @@ def copyWeb = tasks.register("copyWebAssets", Sync) {
     from("../../web-console")
     from("../../web/shared") { into "shared" }
     from("../../web/fonts") { into "fonts" }
+    from("../../changelog.json")
     from("src/main/www")
 }
 preBuild.dependsOn copyWeb

@@ -1,4 +1,6 @@
 # Eén pijplijn voor alles. Bij elke push naar main:
+#   0. versie: elke push is een nieuwe versie (VERSION + changelog.json, zie scripts/bump.sh en scripts/publish.sh);
+#      bestaat versie X.Y al bij een andere commit, dan stopt alles hier
 #   1. testen (Node en de Java-kern van de app)
 #   2. de Android-app bouwen en ondertekenen (vaste sleutel, zie android/signing/README.md)
 #   3. de app publiceren als pakket op ghcr.io (eigen-cloud-app) — daar haalt de app zelf zijn updates op
@@ -14,7 +16,30 @@ permissions:
   contents: write
   packages: write
 jobs:
+  versie:
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.v.outputs.name }}
+      code: ${{ steps.v.outputs.code }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0 }
+      - id: v
+        name: Nieuwe versie?
+        run: |
+          source VERSION
+          TOP=$(python3 -c "import json;print(json.load(open('changelog.json',encoding='utf-8'))[0]['version'])")
+          if [ "$TOP" != "$VERSION_NAME" ]; then echo "::error::Het wijzigingslog begint bij $TOP, maar VERSION zegt $VERSION_NAME. Gebruik scripts/bump.sh."; exit 1; fi
+          TAGGED=$(git ls-remote --tags origin "refs/tags/v$VERSION_NAME" | cut -f1)
+          if [ -n "$TAGGED" ] && [ "$TAGGED" != "$GITHUB_SHA" ]; then
+            echo "::error::Versie $VERSION_NAME bestaat al (commit ${TAGGED:0:7}). Elke wijziging is een nieuwe versie: scripts/bump.sh \"wat er veranderd is\"."; exit 1
+          fi
+          echo "name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "Versie $VERSION_NAME (code $VERSION_CODE)"
+
   test:
+    needs: versie
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -26,6 +51,7 @@ jobs:
       - run: npm test
 
   core:
+    needs: versie
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -39,10 +65,8 @@ jobs:
         run: android/core/test.sh
 
   apk:
-    needs: core
+    needs: [versie, core]
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-java@v5
@@ -68,25 +92,33 @@ jobs:
           set -o pipefail
           gradle --no-daemon :app:lintRelease :app:assembleRelease 2>&1 | tee build.log || {
             grep -E "error:|e: |What went wrong|FAILURE|ERROR" -A4 build.log | head -60 | sed 's/^/::error::/'; exit 1; }
-      - id: meta
-        name: update.json
+      - name: update.json (met wat er nieuw is)
+        env: { V: "${{ needs.versie.outputs.name }}", CODE: "${{ needs.versie.outputs.code }}" }
         run: |
-          V="$(node -p 'require("./package.json").version').${GITHUB_RUN_NUMBER}"
           mkdir -p out && cp android/app/build/outputs/apk/release/app-release.apk out/eigen-cloud.apk
-          SHA=$(sha256sum out/eigen-cloud.apk | cut -d' ' -f1)
-          printf '{"version":"%s","versionCode":%d,"sha256":"%s","size":%d,"commit":"%s","date":"%s"}\n' "$V" $((2000000 + GITHUB_RUN_NUMBER)) "$SHA" "$(stat -c%s out/eigen-cloud.apk)" "$GITHUB_SHA" "$(date -u +%FT%TZ)" > out/update.json
+          python3 - <<'PY'
+          import hashlib, json, os, datetime
+          apk = open("out/eigen-cloud.apk", "rb").read()
+          log = json.load(open("changelog.json", encoding="utf-8"))
+          info = {"version": os.environ["V"], "versionCode": int(os.environ["CODE"]), "sha256": hashlib.sha256(apk).hexdigest(),
+                  "size": len(apk), "commit": os.environ["GITHUB_SHA"], "date": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "changelog": log[:10]}
+          json.dump(info, open("out/update.json", "w", encoding="utf-8"), ensure_ascii=False)
+          notes = "\n".join("- " + c for c in log[0]["changes"])
+          open("out/notes.md", "w", encoding="utf-8").write(notes + "\n")
+          PY
           cat out/update.json
-          echo "version=$V" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: app
           path: |
             out/eigen-cloud.apk
             out/update.json
+            out/notes.md
             android/app/build/reports/lint-results-release.html
 
   publish-app:
-    needs: [apk, test]
+    needs: [versie, apk, test]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -101,20 +133,21 @@ jobs:
           IMG="ghcr.io/${{ github.repository_owner }}/eigen-cloud-app"
           oras push "$IMG:latest" --artifact-type application/vnd.eigencloud.app.v1 \
             update.json:application/json eigen-cloud.apk:application/vnd.android.package-archive
-          oras tag "$IMG:latest" "v${{ needs.apk.outputs.version }}"
-      - name: GitHub Release (één per versie uit package.json)
-        env: { GH_TOKEN: "${{ github.token }}" }
+          oras tag "$IMG:latest" "v${{ needs.versie.outputs.name }}"
+      - name: GitHub Release (elke versie een eigen release, met de APK)
+        env: { GH_TOKEN: "${{ github.token }}", V: "${{ needs.versie.outputs.name }}" }
         run: |
-          V=$(node -p 'require("./package.json").version')
-          cp art/out/eigen-cloud.apk "eigen-cloud-$V.apk"
+          cp art/out/eigen-cloud.apk "Eigen-Cloud-v$V.apk"
+          cp art/out/eigen-cloud.apk "Eigen-Cloud.apk"
           if gh release view "v$V" >/dev/null 2>&1; then
-            gh release upload "v$V" "eigen-cloud-$V.apk" --clobber
+            # Opnieuw gedraaid voor dezelfde commit: bestanden vervangen
+            gh release upload "v$V" "Eigen-Cloud-v$V.apk" "Eigen-Cloud.apk" --clobber
           else
-            gh release create "v$V" "eigen-cloud-$V.apk" --target "$GITHUB_SHA" --title "Eigen Cloud v$V" --generate-notes
+            gh release create "v$V" "Eigen-Cloud-v$V.apk" "Eigen-Cloud.apk" --target "$GITHUB_SHA" --title "Eigen Cloud $V" --notes-file art/out/notes.md --latest
           fi
 
   images:
-    needs: [test, apk]
+    needs: [versie, test, apk]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -132,16 +165,18 @@ jobs:
         with:
           context: .
           push: true
-          build-args: EIGEN_VERSION=${{ needs.apk.outputs.version }}
-          labels: org.opencontainers.image.version=${{ needs.apk.outputs.version }}
+          build-args: EIGEN_VERSION=${{ needs.versie.outputs.name }}
+          labels: org.opencontainers.image.version=${{ needs.versie.outputs.name }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/eigen-cloud:latest
+            ghcr.io/${{ github.repository_owner }}/eigen-cloud:v${{ needs.versie.outputs.name }}
             ghcr.io/${{ github.repository_owner }}/eigen-cloud:${{ github.sha }}
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.caddy
           push: true
-          labels: org.opencontainers.image.version=${{ needs.apk.outputs.version }}
+          labels: org.opencontainers.image.version=${{ needs.versie.outputs.name }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/eigen-caddy:latest
+            ghcr.io/${{ github.repository_owner }}/eigen-caddy:v${{ needs.versie.outputs.name }}

@@ -1,0 +1,22 @@
+[
+  {
+    "version": "1.1",
+    "date": "2026-10-10",
+    "changes": [
+      "Elke wijziging is nu een eigen versie (1.1, 1.2, …) met dit overzicht van wat er nieuw is",
+      "Na een update laat de app eenmalig zien wat er veranderd is",
+      "Abonnement bij de Eigen Cloud Dienst helemaal in de app: facturen bekijken en afdrukken, bundel wisselen, betaalmethode wijzigen, achterstand betalen, opzeggen of terugdraaien, verhuiscode van je domein",
+      "Betalen met iDEAL gebeurt in de app zelf; je bank-app springt vanzelf open",
+      "Herstellen op een nieuwe telefoon via de dienst met alleen je e-mailadres, de code uit de mail en je herstelsleutel; zonder dienst mag de bucketnaam leeg blijven",
+      "Servers werken zichzelf om de beurt bij en zetten de vorige versie terug als de nieuwe niet goed opstart",
+      "Lukt een app-update van GitHub niet, dan haalt de app hem van je eigen cloud"
+    ]
+  },
+  {
+    "version": "1.0",
+    "date": "2026-10-09",
+    "changes": [
+      "Eerste versie: mail, agenda en foto's in je eigen cloud, beheer vanaf de telefoon, foto-back-up, agenda op je telefoon, meldingen en automatische updates"
+    ]
+  }
+]
