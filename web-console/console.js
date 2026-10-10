@@ -260,11 +260,12 @@ function renderRecover() {
   root.innerHTML = `<section class="center" style="max-width:620px">
     <h1>Herstellen met je sleutel</h1>
     <p class="lead">Met je herstelsleutel en de toegang tot één opslag haalt de console alle instellingen terug.</p>
+    ${state.dienst ? `<p><button type="button" class="btn" id="viaDienst">Herstellen via de Eigen Cloud Dienst</button><br><small>Heb je een pakket bij de dienst? Dan heb je alleen je e-mailadres en je herstelsleutel nodig.</small></p>` : ""}
     <form class="fields" id="f">
       <label>Herstelsleutel<input name="key" placeholder="8 groepen van 8 tekens" autocomplete="off" required><small>Spaties maken niet uit.</small></label>
       <h2 style="margin:8px 0 0">Een opslag waar je back-ups staan</h2>
       ${storeFields(offers)}
-      <label>Bucket<input name="bucket" required></label>
+      <label>Bucket<input name="bucket"><small>Weet je het niet meer? Laat leeg, dan zoekt de console zelf.</small></label>
       <h2 style="margin:8px 0 0">Nieuwe kluis op ${DEVICE}</h2>
       <label>Wachtwoordzin<input type="password" name="pass" minlength="12" required></label>
       <p class="msg"></p>
@@ -273,14 +274,55 @@ function renderRecover() {
   const f = $("#f");
   wireStoreFields(f, offers);
   $("#back").onclick = renderStart;
+  if ($("#viaDienst")) $("#viaDienst").onclick = renderRecoverDienst;
   f.onsubmit = async (e) => {
     e.preventDefault();
     const o = offers.find((x) => x.id === f.offer.value), r = o.regions.find((x) => x.id === f.region.value);
+    if (o.id === "localfs" && !f.bucket.value) return formMsg(f, "Vul de map in waar je back-ups staan");
     const store = o.id === "localfs"
       ? { name: "herstel", type: "fs", purpose: "replica", dir: f.bucket.value }
       : { name: "herstel", type: "s3", purpose: "replica", endpoint: o.customEndpoint ? f.endpoint.value : r.endpoint, region: r.id, bucket: f.bucket.value, accessKey: f.accessKey.value, secretKey: f.secretKey.value };
     try { await busy($("button", f), () => api("/api/setup/recover", { method: "POST", body: { masterKey: f.key.value, passphrase: f.pass.value, store } })); location.hash = ""; boot(); }
     catch (err) { formMsg(f, err.message); }
+  };
+}
+
+function renderRecoverDienst() {
+  root.innerHTML = `<section class="center" style="max-width:620px">
+    <h1>Herstellen via de Eigen Cloud Dienst</h1>
+    <p class="lead">De dienst weet waar je opslag staat. Jouw gegevens kan hij niet lezen: daarvoor is je herstelsleutel nodig.</p>
+    <form class="fields" id="f1">
+      <label>E-mailadres van je pakket<input type="email" name="email" autocomplete="email" required></label>
+      <p class="msg"></p>
+      <div><button class="btn primary">Stuur code</button> <button type="button" class="link" id="back">Terug</button></div>
+    </form>
+    <form class="fields" id="f2" hidden>
+      <label>Code uit de e-mail<input name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
+      <p class="msg"></p>
+      <div><button class="btn primary">Bevestigen</button></div>
+    </form>
+    <form class="fields" id="f3" hidden>
+      <label>Herstelsleutel<input name="key" placeholder="8 groepen van 8 tekens" autocomplete="off" required><small>Spaties maken niet uit.</small></label>
+      <label>Nieuwe wachtwoordzin voor ${DEVICE}<input type="password" name="pass" minlength="12" required></label>
+      <p class="msg"></p>
+      <div><button class="btn primary">Herstellen</button></div>
+    </form></section>`;
+  const f1 = $("#f1"), f2 = $("#f2"), f3 = $("#f3");
+  $("#back").onclick = renderRecover;
+  f1.onsubmit = async (e) => {
+    e.preventDefault();
+    try { await busy($("button", f1), () => api("/api/recover/dienst/login", { method: "POST", body: { email: f1.email.value } })); f1.hidden = true; f2.hidden = false; f2.code.focus(); }
+    catch (err) { formMsg(f1, err.message); }
+  };
+  f2.onsubmit = async (e) => {
+    e.preventDefault();
+    try { await busy($("button", f2), () => api("/api/recover/dienst/verify", { method: "POST", body: { code: f2.code.value } })); f2.hidden = true; f3.hidden = false; f3.key.focus(); }
+    catch (err) { formMsg(f2, err.message); }
+  };
+  f3.onsubmit = async (e) => {
+    e.preventDefault();
+    try { await busy($("button", f3), () => api("/api/setup/recover-dienst", { method: "POST", body: { masterKey: f3.key.value, passphrase: f3.pass.value } })); location.hash = ""; boot(); }
+    catch (err) { formMsg(f3, err.message); }
   };
 }
 
@@ -441,7 +483,7 @@ function dienstOrder(bundle) {
       const r = await busy($("button", f), () => api("/api/dienst/order", { method: "POST", body: { bundle, mode: m, authCode: f.authCode?.value, registrant, acceptTerms: f.terms.checked } }));
       lastCheckout = r.checkoutUrl;
       config = await api("/api/config");
-      if (NATIVE) NATIVE.openUrl(r.checkoutUrl); else window.open(r.checkoutUrl, "_blank", "noopener");
+      openCheckout(r.checkoutUrl);
       dienstProgress();
     } catch (err) { formMsg(f, err.message); }
   };
@@ -770,8 +812,88 @@ function launchView(l) {
   return `<ol class="progress">${l.steps.map((s) => `<li class="${s.state}"><span class="pip">${s.state === "done" ? "✓" : s.state === "fail" ? "!" : ""}</span><span class="lbl">${esc(s.label)}</span>${s.detail ? `<span class="det">${esc(s.detail)}</span>` : ""}</li>`).join("")}</ol>`;
 }
 
+/** Afrekenen bij Mollie: in de app zelf (en daarna vanzelf terug), op de computer in een nieuw tabblad. */
+function openCheckout(url) {
+  if (NATIVE?.openPay) NATIVE.openPay(url);
+  else if (NATIVE) NATIVE.openUrl(url);
+  else window.open(url, "_blank", "noopener");
+}
+window.__eigenPaid = () => { if (config?.dienst?.orderId) (document.querySelector("#abo") ? renderAbo() : dienstProgress()); };
+
+async function showInvoice(id) {
+  const { html } = await api(`/api/dienst/invoice?id=${encodeURIComponent(id)}`);
+  if (NATIVE?.printHtml) return NATIVE.printHtml(`Factuur ${id}`, html);
+  const dlg = document.createElement("dialog");
+  dlg.className = "invoice";
+  dlg.innerHTML = `<iframe title="Factuur"></iframe><div class="row"><button class="btn primary" id="ip">Afdrukken of opslaan als pdf</button><button class="btn" id="ic">Sluiten</button></div>`;
+  document.body.append(dlg);
+  dlg.querySelector("iframe").srcdoc = html;
+  dlg.querySelector("#ip").onclick = () => dlg.querySelector("iframe").contentWindow.print();
+  dlg.querySelector("#ic").onclick = () => { dlg.close(); dlg.remove(); };
+  dlg.showModal();
+}
+
+const PAY_STATUS = { paid: "betaald", failed: "mislukt", open: "open", pending: "bezig", expired: "verlopen", canceled: "afgebroken" };
+const day = (d) => new Date(typeof d === "number" ? d : d + "T12:00:00").toLocaleDateString("nl-NL", { day: "numeric", month: "long", year: "numeric" });
+
+/** Abonnement bij de Eigen Cloud Dienst: pakket, betaalmethode, betalingen en facturen, opzeggen. */
+async function renderAbo(msg) {
+  const box = $("#abo");
+  if (!box) return;
+  let b;
+  try { b = await api("/api/dienst/billing"); }
+  catch (err) { box.innerHTML = `<h2>Abonnement</h2><p class="msg err">${esc(err.message)}</p>`; return; }
+  const problem = b.status === "payment_problem";
+  const cancelled = b.status === "cancelled";
+  box.innerHTML = `<h2>Abonnement</h2>
+    <div class="panel abo">
+      <div><b>${esc(b.bundle.title)}</b> · ${eurStr(b.bundle.monthly)} per maand<br>
+        <span class="muted">${cancelled ? (b.endsAt ? `Opgezegd; loopt tot ${day(b.endsAt)}` : "Opgezegd") : b.nextPaymentDate ? `Volgende betaling ${day(b.nextPaymentDate)}` : ""}${b.mandate ? ` · ${esc(b.mandate.label ?? b.mandate.method)}` : ""}</span></div>
+      ${problem ? `<p class="note warn" style="margin:0">De laatste betaling is niet gelukt${b.outstanding ? ` (${eurStr(b.outstanding)} staat open)` : ""}. Je cloud draait gewoon door; reken het openstaande bedrag af of kies een andere betaalmethode.</p>
+        <div><button class="btn primary" data-a="settle">Nu betalen</button></div>` : ""}
+      <div class="actions" style="margin:0">
+        ${!cancelled ? `<button class="btn" data-a="bundle">Ander pakket</button><button class="btn" data-a="payment-method">Betaalmethode wijzigen</button>` : ""}
+        ${b.canResume ? `<button class="btn primary" data-a="resume">Toch doorgaan</button>` : ""}
+        ${b.domainTransferable ? `<button class="btn" data-a="authcode">Verhuiscode domein</button>` : ""}
+        ${!cancelled ? `<button class="btn danger" data-a="cancel">Opzeggen</button>` : ""}
+      </div>
+      <div id="aboExtra"></div>
+      <p class="msg ${msg?.ok ? "ok" : msg ? "err" : ""}" id="amsg">${esc(msg?.text ?? "")}</p>
+    </div>
+    ${b.payments?.length ? `<h2>Betalingen</h2><ul class="items">${b.payments.map((p) => `<li><span class="flag">${p.status === "paid" ? "✓" : p.status === "failed" ? "✕" : "·"}</span>
+      <b>${eurStr(p.amount)}</b><span class="sub">${day(p.date)} · ${esc(PAY_STATUS[p.status] ?? p.status)}${p.description ? " · " + esc(p.description) : ""}</span>
+      <span class="end">${p.invoiceId ? `<button class="link" data-invoice="${esc(p.invoiceId)}">Factuur</button>` : ""}</span></li>`).join("")}</ul>` : ""}`;
+  const extra = $("#aboExtra"), amsg = $("#amsg");
+  const fail = (err) => { amsg.textContent = err.message; amsg.className = "msg err"; };
+  box.onclick = async (e) => {
+    const inv = e.target.closest?.("[data-invoice]")?.dataset.invoice;
+    if (inv) return showInvoice(inv).catch(fail);
+    const a = e.target.closest?.("[data-a]")?.dataset.a;
+    if (!a) return;
+    if (a === "bundle") {
+      extra.innerHTML = `<form class="fields" id="bf"><fieldset class="radios">${b.bundles.map((x) => `<label class="check"><input type="radio" name="bundle" value="${esc(x.id)}" ${x.current ? "checked" : ""}> ${esc(x.title)} — ${eurStr(x.monthly)} per maand${x.current ? " (nu)" : ""}</label>`).join("")}</fieldset>
+        <p class="muted" style="margin:0"><small>Meer servers kun je meteen gebruiken; het nieuwe bedrag geldt vanaf de volgende betaling.</small></p>
+        <div><button class="btn primary">Pakket wijzigen</button></div></form>`;
+      $("#bf").onsubmit = async (ev) => {
+        ev.preventDefault();
+        try { const r = await busy($("#bf button"), () => api("/api/dienst/bundle", { method: "POST", body: { bundle: $("#bf").bundle.value } })); config = await api("/api/config"); renderAbo({ ok: true, text: `Gewijzigd naar ${r.bundle.title}; het nieuwe bedrag geldt vanaf ${day(r.effective)}. Je cloud past het aantal servers zelf aan.` }); }
+        catch (err) { fail(err); }
+      };
+      return;
+    }
+    if (a === "cancel" && !confirm("Je abonnement opzeggen?\n\nJe cloud blijft werken tot het einde van de betaalde periode. Daarna gaan de servers uit; je gegevens blijven nog 30 dagen bewaard. Tot die datum kun je het terugdraaien.")) return;
+    try {
+      const r = await busy(e.target, () => api(a === "authcode" ? "/api/dienst/authcode" : `/api/dienst/${a}`, a === "authcode" ? {} : { method: "POST" }));
+      if (r.checkoutUrl) { openCheckout(r.checkoutUrl); amsg.textContent = "Rond de betaling af; daarna wordt dit vanzelf bijgewerkt."; amsg.className = "msg ok"; return; }
+      if (a === "authcode") { extra.innerHTML = `<p style="margin:0">Verhuiscode voor <b>${esc(r.domain)}</b>:</p><div class="ns"><code>${esc(r.authCode)}</code></div><p class="muted" style="margin:0"><small>Geef deze code aan je nieuwe registrar. Het verhuizen kost daar meestal een jaar registratie.</small></p>`; return; }
+      renderAbo({ ok: true, text: a === "cancel" ? `Opgezegd. Je cloud loopt door tot ${r.endsAt ? day(r.endsAt) : "het einde van de periode"}.` : a === "resume" ? "Je abonnement loopt weer door." : "Gelukt." });
+    } catch (err) { fail(err); }
+  };
+}
+
 async function renderDash() {
-  root.innerHTML = `<div class="dash"><div class="mapwrap" id="map"></div><section id="side"><p class="muted">Status ophalen…</p></section></div>`;
+  root.innerHTML = `<div class="dash"><div class="mapwrap" id="map"></div><section><div id="side"><p class="muted">Status ophalen…</p></div>${config?.dienst?.orderId ? `<div id="abo"></div>` : ""}</section></div>`;
+  if (config?.dienst?.orderId) renderAbo();
   const draw = async () => {
     let s;
     try { s = await api("/api/status"); } catch { return; }

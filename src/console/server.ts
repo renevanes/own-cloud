@@ -23,6 +23,7 @@ import { makeStore, type StoreConfig } from "../cluster/stores.js";
 import { restoreFromAny, restoreFromStore } from "../cluster/backup.js";
 import { rpc } from "../cluster/transport.js";
 import * as extras from "./extras.js";
+import { findAdminConfig } from "../cluster/admin.js";
 import { clusterStatus, findLeader, prepareStore, probeCluster, provisionFirstNode, readManifest, recoverAdminConfig, saveAdminCopy, sendJob, adminProof, pushAdminConfig } from "../cluster/admin.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -42,6 +43,8 @@ const storeOffers = (): StoreOffer[] => LOCAL
 // ───────── Sessie ─────────
 
 let session: { token: string; lastUse: number } | null = null;
+/** Inloggen bij de dienst vóórdat er een kluis is (herstellen op een nieuw apparaat). Alleen in het geheugen. */
+let recoverDienst: { email: string; token?: string } | null = null;
 const IDLE_MS = 30 * 60_000;
 
 function newSession(reply: FastifyReply) {
@@ -287,9 +290,47 @@ export async function buildConsole() {
     const key = (req.body.masterKey ?? "").replace(/[^0-9a-f]/gi, "").toLowerCase();
     if (key.length !== 64) return reply.code(400).send({ error: "De sleutel bestaat uit 64 tekens (0–9 en a–f)" });
     try {
-      const recovered = await recoverAdminConfig(key, req.body.store);
+      // Bucketnaam vergeten? Dan zoeken we hem op met de sleutel van de opslag.
+      const { config: recovered } = await findAdminConfig(key, req.body.store);
       const cfg = { ...recovered, console: { ...(recovered as AdminConfig).console, step: "klaar", done: true, keyConfirmed: true } } as AdminConfig;
       vault.create(req.body.passphrase ?? "", cfg);
+      newSession(reply);
+      return { ok: true };
+    } catch (e) {
+      return reply.code(400).send({ error: (e as Error).message });
+    }
+  });
+
+  // Herstellen via de Eigen Cloud Dienst: inloggen met een code; opslag en sleutels komen uit je pakket.
+  app.post<{ Body: { email: string } }>("/api/recover/dienst/login", async (req, reply) => {
+    try { recoverDienst = { email: await extras.dienstStartLogin(req.body?.email) }; return { ok: true }; } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+  });
+  app.post<{ Body: { code: string } }>("/api/recover/dienst/verify", async (req, reply) => {
+    if (!recoverDienst) return reply.code(400).send({ error: "Vul eerst je e-mailadres in" });
+    try { recoverDienst.token = await extras.dienstFinishLogin(recoverDienst.email, req.body?.code); return { ok: true }; } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+  });
+  app.post<{ Body: { masterKey: string; passphrase: string } }>("/api/setup/recover-dienst", async (req, reply) => {
+    if (vault.exists()) return reply.code(409).send({ error: "Er is al een kluis op deze computer" });
+    if (!recoverDienst?.token) return reply.code(400).send({ error: "Log eerst in bij de dienst" });
+    const key = (req.body.masterKey ?? "").replace(/[^0-9a-f]/gi, "").toLowerCase();
+    if (key.length !== 64) return reply.code(400).send({ error: "De sleutel bestaat uit 64 tekens (0–9 en a–f)" });
+    try {
+      const { order, kit } = await extras.dienstOrderKit(recoverDienst.token);
+      let found: Awaited<ReturnType<typeof findAdminConfig>> | null = null, lastErr: Error | null = null;
+      for (const st of [...kit.storage].sort((a, b) => (a.purpose === "replica" ? -1 : 1) - (b.purpose === "replica" ? -1 : 1))) {
+        const offer = storeOffers().find((o) => o.id === st.offer);
+        const region = offer?.regions.find((r) => r.id === st.region);
+        if (!region) continue;
+        try {
+          found = await findAdminConfig(key, { name: `${st.offer}-${st.region}`, type: "s3", purpose: st.purpose, country: region.country, endpoint: region.endpoint, region: st.region, accessKey: st.accessKey, secretKey: st.secretKey });
+          break;
+        } catch (e) { lastErr = e as Error; }
+      }
+      if (!found) throw lastErr ?? new Error("Geen opslag gevonden in je pakket");
+      const rec = found.config as AdminConfig;
+      const cfg = { ...rec, console: { ...rec.console, step: "klaar", done: true, keyConfirmed: true, dienst: { email: recoverDienst.email, token: recoverDienst.token, orderId: order.id, bundle: order.bundle, applied: true } } } as AdminConfig;
+      vault.create(req.body.passphrase ?? "", cfg);
+      recoverDienst = null;
       newSession(reply);
       return { ok: true };
     } catch (e) {
@@ -441,6 +482,33 @@ export async function buildConsole() {
     });
     s.get("/api/dienst/status", async (_req, reply) => {
       try { return await extras.dienstStatus(cfg()); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+    s.get("/api/dienst/billing", async (_req, reply) => {
+      try { return await extras.dienstBilling(cfg()); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+    s.post<{ Body: { bundle: string } }>("/api/dienst/bundle", async (req, reply) => {
+      const c = cfg();
+      try {
+        const r = await extras.dienstChangeBundle(c, req.body?.bundle);
+        save();
+        // Een draaiend cluster krijgt de nieuwe aantallen meteen (de plekken gaan mee met save()).
+        if (c.console.done) {
+          const st = await clusterStatus(c).catch(() => null);
+          if (st?.leaderUrl) await rpc(keysFor(c).cluster, st.leaderUrl, { type: "setPolicy", policy: r.policy, proof: adminProof(c.masterKey!, r.policy) }, 5000).catch(() => null);
+        }
+        return r;
+      } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+    for (const action of ["payment-method", "settle", "cancel", "resume"] as const) {
+      s.post(`/api/dienst/${action}`, async (_req, reply) => {
+        try { return await extras.dienstAction(cfg(), action); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+      });
+    }
+    s.get("/api/dienst/authcode", async (_req, reply) => {
+      try { return await extras.dienstAuthcode(cfg()); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+    s.get<{ Querystring: { id?: string } }>("/api/dienst/invoice", async (req, reply) => {
+      try { return await extras.dienstInvoice(cfg(), req.query.id ?? ""); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     });
     s.post("/api/dienst/apply", async (_req, reply) => {
       const c = cfg();

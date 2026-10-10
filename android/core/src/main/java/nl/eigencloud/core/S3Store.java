@@ -257,6 +257,22 @@ public final class S3Store implements ObjectStore {
 
     // ───────── Bucket management (setup wizard) ─────────
 
+    private static final Pattern BUCKET_NAME = Pattern.compile("<Bucket>[\\s\\S]*?<Name>([^<]+)</Name>");
+
+    /** Alle buckets van deze sleutel (S3 ListBuckets), om bij herstellen de juiste te vinden. */
+    public List<String> listBuckets() throws IOException {
+        Map<String, Object> c = Json.copy(config);
+        c.put("bucket", "");
+        c.put("pathStyle", true);
+        c.remove("prefix");
+        Http.Response r = new S3Store(c).req("GET", "", none(), null, none());
+        if (r.status >= 300) throw new IOException(r.status == 403 ? "De sleutel geeft geen toegang" : "Buckets opvragen mislukt: " + r.status);
+        List<String> out = new ArrayList<>();
+        java.util.regex.Matcher m = BUCKET_NAME.matcher(r.text());
+        while (m.find()) out.add(m.group(1));
+        return out;
+    }
+
     public boolean bucketExists() throws IOException {
         Http.Response r = req("HEAD", "", none(), null, none());
         if (r.status == 404) return false;

@@ -46,7 +46,11 @@ Techniek: Node.js 22 + TypeScript, Fastify, SQLite (één bestand, makkelijk te 
 
 **Liever vanaf je telefoon?** Installeer de [Android-app](android/README.md) en kies *Nieuwe Eigen Cloud opzetten*: dezelfde stappen, en je sleutels staan versleuteld op je telefoon (ontgrendelen met vingerafdruk).
 
-Bewaar het bestand `~/.eigen-cloud/kluis.json` gerust in je back-up of synchronisatiemap: het is versleuteld met je wachtwoordzin. Op een andere computer kies je in de console **Ik heb al een Eigen Cloud** en vul je je herstelsleutel en de gegevens van één opslag in.
+Bewaar het bestand `~/.eigen-cloud/kluis.json` gerust in je back-up of synchronisatiemap: het is versleuteld met je wachtwoordzin. Op een andere computer of telefoon kies je in de console **Ik heb al een Eigen Cloud** en vul je je herstelsleutel en de gegevens van één opslag in (de bucketnaam mag je leeg laten; de console zoekt hem zelf). Heb je een abonnement bij de Eigen Cloud Dienst, dan is het nog eenvoudiger: **Herstellen via de Eigen Cloud Dienst** vraagt alleen je e-mailadres, de code uit de mail en je herstelsleutel.
+
+**Abonnement beheren** doe je in de console zelf (paneel *Abonnement* op het overzicht): facturen bekijken en afdrukken, een andere bundel kiezen (je cloud krijgt meteen de nieuwe aantallen servers), je betaalmethode wijzigen, een mislukte incasso alsnog betalen, opzeggen of het opzeggen terugdraaien, en de verhuiscode van je domein opvragen. In de app opent de betaalpagina van Mollie in de app zelf en springt je bank-app vanzelf open.
+
+**Bijwerken gaat vanzelf**: servers werken zichzelf rollend bij (zie [CLUSTER.md](CLUSTER.md)) en de Android-app haalt nieuwe versies op van ghcr.io, of van je eigen cloud als dat niet lukt.
 
 Meer over hoe het cluster werkt: [CLUSTER.md](CLUSTER.md).
 

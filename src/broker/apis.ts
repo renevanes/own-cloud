@@ -44,6 +44,14 @@ export class Mollie {
   getPayment(id: string) { return this.req("GET", `/payments/${encodeURIComponent(id)}`); }
   createSubscription(customerId: string, body: Record<string, unknown>) { return this.req("POST", `/customers/${encodeURIComponent(customerId)}/subscriptions`, body); }
   cancelSubscription(customerId: string, subId: string) { return this.req("DELETE", `/customers/${encodeURIComponent(customerId)}/subscriptions/${encodeURIComponent(subId)}`); }
+  getSubscription(customerId: string, subId: string) { return this.req("GET", `/customers/${encodeURIComponent(customerId)}/subscriptions/${encodeURIComponent(subId)}`); }
+  /** Bedrag, omschrijving of machtiging (mandateId) van een lopend abonnement wijzigen. */
+  updateSubscription(customerId: string, subId: string, body: Record<string, unknown>) { return this.req("PATCH", `/customers/${encodeURIComponent(customerId)}/subscriptions/${encodeURIComponent(subId)}`, body); }
+  async mandates(customerId: string): Promise<any[]> {
+    const j = await this.req("GET", `/customers/${encodeURIComponent(customerId)}/mandates?limit=250`);
+    return j?._embedded?.mandates ?? [];
+  }
+  createRefund(paymentId: string, body: Record<string, unknown>) { return this.req("POST", `/payments/${encodeURIComponent(paymentId)}/refunds`, body); }
 }
 
 // ───────── Openprovider ─────────
@@ -81,6 +89,31 @@ export class Openprovider {
     const p = res.price?.reseller ?? res.price?.product ?? null;
     const price = p && p.price !== undefined && p.price !== null ? { currency: String(p.currency ?? "EUR"), value: Number(p.price).toFixed(2) } : null;
     return { available: res.status === "free", price };
+  }
+
+  /** Id van een domein in ons reseller-account (of null). */
+  async findDomainId(domain: string): Promise<number | null> {
+    const j = await this.req("GET", `/domains?full_name=${encodeURIComponent(domain)}&limit=1`);
+    const found = (j?.data?.results ?? []).find((d: any) => `${d.domain?.name}.${d.domain?.extension}` === domain || d.full_name === domain);
+    return found?.id ?? null;
+  }
+
+  /**
+   * Verhuiscode (auth code) van een domein. Volgens de documentatie: GET /domains/{id}/authcode → data.auth_code;
+   * lukt dat niet (of is hij leeg), dan één keer POST /domains/{id}/authcode/reset. Nog niet getest met een echt account.
+   */
+  async authCode(domainId: number | string): Promise<string> {
+    const p = `/domains/${encodeURIComponent(String(domainId))}/authcode`;
+    let first: unknown = null;
+    try {
+      const code = (await this.req("GET", p))?.data?.auth_code;
+      if (code) return String(code);
+    } catch (e) { first = e; }
+    const r = await this.req("POST", `${p}/reset`, {});
+    let code = r?.data?.auth_code;
+    if (!code) code = (await this.req("GET", p))?.data?.auth_code;
+    if (!code) throw first ?? new ApiError("Openprovider", 502, "Openprovider gaf geen verhuiscode terug");
+    return String(code);
   }
 }
 

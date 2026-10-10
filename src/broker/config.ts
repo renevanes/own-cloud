@@ -42,6 +42,10 @@ export interface BrokerConfig {
   guardMs: number;
   enforce: boolean;
   bundles: Bundle[];
+  /** Btw-percentage op de facturen (BROKER_VAT_PERCENT, standaard 21). */
+  vatPercent: number;
+  /** Jouw bedrijfsgegevens op de facturen. Zonder naam: facturen tonen een duidelijke waarschuwing. */
+  company: { name: string | null; address: string[]; kvk: string | null; vat: string | null };
 }
 
 export const NAMESERVERS = ["ns1.desec.io", "ns2.desec.org"];
@@ -133,7 +137,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BrokerConfig {
     guardMs: Number(env.BROKER_GUARD_MS || 3_600_000),
     enforce: env.BROKER_ENFORCE === "1",
     bundles: loadBundles(dataDir),
+    vatPercent: loadVat(env.BROKER_VAT_PERCENT),
+    company: {
+      name: env.BROKER_COMPANY_NAME?.trim() || null,
+      // Meerdere regels: een echte regelovergang of "\n" in de variabele.
+      address: (env.BROKER_COMPANY_ADDRESS ?? "").replace(/\\n/g, "\n").split("\n").map((l) => l.trim()).filter(Boolean),
+      kvk: env.BROKER_COMPANY_KVK?.trim() || null,
+      vat: env.BROKER_COMPANY_VAT?.trim() || null,
+    },
   };
+}
+
+function loadVat(v: string | undefined): number {
+  if (v === undefined || v.trim() === "") return 21;
+  const n = Number(v.replace(",", "."));
+  if (!Number.isFinite(n) || n < 0 || n > 100) throw new Error("BROKER_VAT_PERCENT moet een getal tussen 0 en 100 zijn (bijv. 21)");
+  return n;
 }
 
 /** Wat ontbreekt er nog voor echt gebruik? (Wordt bij het starten gemeld, niet afgedwongen.) */
@@ -145,5 +164,6 @@ export function missingSettings(c: BrokerConfig, env: NodeJS.ProcessEnv = proces
   if (!c.scaleway.secretKey || !c.scaleway.organizationId) out.push("SCW_SECRET_KEY/SCW_ORGANIZATION_ID");
   if (!c.smtpUrl) out.push("BROKER_SMTP_URL");
   if (!env.BROKER_PUBLIC_URL) out.push("BROKER_PUBLIC_URL");
+  if (!c.company.name) out.push("BROKER_COMPANY_NAME (en BROKER_COMPANY_ADDRESS/_KVK/_VAT) voor de facturen");
   return out;
 }

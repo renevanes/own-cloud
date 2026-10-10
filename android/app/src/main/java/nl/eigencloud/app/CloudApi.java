@@ -91,6 +91,8 @@ final class CloudApi {
         if (!(r.status == 401 || r.status == 200) || !json) throw new IOException("Op dat adres draait geen Eigen Cloud");
     }
 
+    String token() { return token; }
+
     private Map<String, String> auth() { return Http.headers("authorization", "Bearer " + token, "accept", "application/json"); }
 
     Object getJson(String path) throws IOException {

@@ -35,6 +35,21 @@ export interface OrderRow {
   ends_at: string | null;
 }
 
+/** Soort betaling: eerste betaling, maandelijkse incasso, betaalmethode wijzigen (€ 0,01) of achterstand betalen. */
+export type PaymentKind = "first" | "recurring" | "mandate" | "settle" | "other";
+
+export interface PaymentRow {
+  id: string; order_id: string; status: string; sequence_type: string | null; subscription_id: string | null;
+  amount: string | null; updated_at: number; kind: PaymentKind | null; method: string | null; description: string | null;
+  created_at: number | null; paid_at: number | null; period_start: string | null;
+  /** Bij een betaling van een achterstand: JSON-lijst met de mislukte incasso's die ermee betaald worden. */
+  covers: string | null;
+  /** Bij een mislukte incasso: de betaling waarmee hij alsnog betaald is. */
+  settled_by: string | null;
+  /** Bijwerkingen (bijv. machtiging omzetten) zijn uitgevoerd. */
+  done_at: number | null;
+}
+
 export interface CustomerRow { id: string; email: string; mollie_customer_id: string | null; created_at: number }
 
 export function openDb(dataDir: string) {
@@ -65,7 +80,22 @@ export function openDb(dataDir: string) {
       amount TEXT, updated_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT, kind TEXT NOT NULL, detail TEXT, at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS invoices (
+      id TEXT PRIMARY KEY, number TEXT NOT NULL UNIQUE, year INTEGER NOT NULL, seq INTEGER NOT NULL,
+      order_id TEXT NOT NULL, customer_id TEXT NOT NULL, payment_id TEXT NOT NULL UNIQUE,
+      date TEXT NOT NULL, amount TEXT NOT NULL, data_enc BLOB NOT NULL, created_at INTEGER NOT NULL,
+      UNIQUE (year, seq));
+    CREATE INDEX IF NOT EXISTS invoices_order ON invoices(order_id);
   `);
+  // Nieuwere kolommen bij een bestaande database.
+  const cols = new Set((db.prepare("PRAGMA table_info(payments)").all() as { name: string }[]).map((c) => c.name));
+  const add: [string, string][] = [
+    ["kind", "TEXT"], ["method", "TEXT"], ["description", "TEXT"], ["created_at", "INTEGER"], ["paid_at", "INTEGER"],
+    ["period_start", "TEXT"], ["covers", "TEXT"], ["settled_by", "TEXT"], ["done_at", "INTEGER"],
+  ];
+  const fresh = !cols.has("kind");
+  for (const [name, type] of add) if (!cols.has(name)) db.exec(`ALTER TABLE payments ADD COLUMN ${name} ${type}`);
+  if (fresh) db.exec("UPDATE payments SET kind = CASE WHEN subscription_id IS NOT NULL THEN 'recurring' ELSE 'first' END, created_at = COALESCE(created_at, updated_at) WHERE kind IS NULL");
   return db;
 }
 

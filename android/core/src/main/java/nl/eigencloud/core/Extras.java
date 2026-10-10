@@ -214,6 +214,112 @@ public final class Extras {
         return dienst(base, "GET", "/v1/orders/" + Json.str(d, "orderId"), null, Json.str(d, "token"));
     }
 
+    // ───────── Herstellen op een nieuw apparaat, via de dienst ─────────
+
+    public static String dienstStartLogin(String base, String email) throws IOException {
+        String e = email == null ? "" : email.trim();
+        if (!EMAIL.matcher(e).matches()) throw new IllegalArgumentException("Vul een geldig e-mailadres in");
+        dienst(base, "POST", "/v1/auth/start", Json.obj("email", e), null);
+        return e;
+    }
+
+    public static String dienstFinishLogin(String base, String email, String code) throws IOException {
+        return Json.str(dienst(base, "POST", "/v1/auth/verify", Json.obj("email", email, "code", code == null ? "" : code.replaceAll("\\s", "")), null), "token");
+    }
+
+    /**
+     * Herstellen met alleen je herstelsleutel en je inlog bij de dienst: de opslag en de sleutels komen uit het
+     * pakket. Geeft de beheerconfiguratie terug (al gemarkeerd als klaar, met de dienstgegevens erin).
+     */
+    public static Map<String, Object> recoverViaDienst(String base, String email, String token, String masterKeyInput, Catalog catalog) throws IOException {
+        String key = Console.normalizeMasterKey(masterKeyInput);
+        Object me = dienst(base, "GET", "/v1/me", null, token);
+        Map<String, Object> order = null;
+        long newest = -1;
+        for (Object o : Json.listAt(me, "orders")) {
+            String st = Json.str(o, "status");
+            if (!"ready".equals(st) && !"payment_problem".equals(st) && !"cancelled".equals(st)) continue;
+            Number at = Json.num(o, "createdAt");
+            long t = at == null ? 0 : at.longValue();
+            if (t >= newest) { newest = t; order = Json.asMap(o); }
+        }
+        if (order == null) throw new IOException("Bij dit e-mailadres hoort geen actief abonnement");
+        Map<String, Object> kit = Json.asMap(dienst(base, "GET", "/v1/orders/" + Json.str(order, "id") + "/kit", null, token));
+        List<Object> storage = new ArrayList<>(Json.listAt(kit, "storage"));
+        storage.sort((a, b) -> Boolean.compare(!"replica".equals(Json.str(a, "purpose")), !"replica".equals(Json.str(b, "purpose"))));
+        IOException last = null;
+        for (Object st : storage) {
+            Map<String, Object> offer = catalog.storeOffer(Json.str(st, "offer"));
+            Map<String, Object> region = null;
+            if (offer != null) for (Object r : Json.listAt(offer, "regions")) if (Json.str(st, "region").equals(Json.str(r, "id"))) region = Json.asMap(r);
+            if (region == null) continue;
+            Map<String, Object> store = Json.obj("name", Json.str(st, "offer") + "-" + Json.str(st, "region"), "type", "s3", "purpose", Json.str(st, "purpose"),
+                    "country", region.get("country"), "endpoint", region.get("endpoint"), "region", Json.str(st, "region"),
+                    "accessKey", Json.str(st, "accessKey"), "secretKey", Json.str(st, "secretKey"));
+            try {
+                Map<String, Object> c = Json.map(Admin.findAdminConfig(key, store), "config");
+                Map<String, Object> con = Json.map(c, "console");
+                if (con == null) { con = Json.obj(); c.put("console", con); }
+                con.put("step", "klaar");
+                con.put("done", true);
+                con.put("keyConfirmed", true);
+                con.put("dienst", Json.obj("email", email, "token", token, "orderId", Json.str(order, "id"), "bundle", order.get("bundle"), "applied", true));
+                return c;
+            } catch (IOException e) {
+                last = e;
+            }
+        }
+        throw last != null ? last : new IOException("Geen opslag gevonden in je pakket");
+    }
+
+    // ───────── Abonnement beheren ─────────
+
+    private static String[] order(Map<String, Object> c) {
+        Map<String, Object> d = dienstState(c);
+        if (Json.str(d, "token") == null || Json.str(d, "orderId") == null) throw new IllegalArgumentException("Er is geen abonnement bij de dienst");
+        return new String[]{Json.str(d, "token"), Json.str(d, "orderId")};
+    }
+
+    public static Object dienstBilling(String base, Map<String, Object> c) throws IOException {
+        String[] o = order(c);
+        return dienst(base, "GET", "/v1/orders/" + o[1] + "/billing", null, o[0]);
+    }
+
+    /** Ander pakket; daarna de nieuwe plekken en aantallen overnemen. Geeft ook "policy" terug voor het cluster. */
+    public static Map<String, Object> dienstChangeBundle(String base, Map<String, Object> c, String bundle) throws IOException {
+        String[] o = order(c);
+        Object r = dienst(base, "POST", "/v1/orders/" + o[1] + "/bundle", Json.obj("bundle", bundle), o[0]);
+        Map<String, Object> kit = Json.asMap(dienst(base, "GET", "/v1/orders/" + o[1] + "/kit", null, o[0]));
+        Map<String, Object> pol = Json.map(c, "policy");
+        if (pol == null) { pol = ClusterConfig.defaultPolicy(); c.put("policy", pol); }
+        pol.put("placement", Json.copy(Json.listAt(kit, "placement")));
+        Map<String, Object> counts = Json.obj("minDataNodes", Json.num(kit, "policy", "minDataNodes"), "witnesses", Json.num(kit, "policy", "witnesses"));
+        pol.putAll(counts);
+        dienstState(c).put("bundle", bundle);
+        return Json.obj("ok", true, "bundle", Json.path(r, "bundle"), "effective", Json.path(r, "effective"), "policy", counts);
+    }
+
+    /** payment-method, settle, cancel of resume. */
+    public static Object dienstAction(String base, Map<String, Object> c, String action) throws IOException {
+        if (!action.matches("payment-method|settle|cancel|resume")) throw new IllegalArgumentException("Onbekende actie");
+        String[] o = order(c);
+        return dienst(base, "POST", "/v1/orders/" + o[1] + "/" + action, Json.obj(), o[0]);
+    }
+
+    public static Object dienstAuthcode(String base, Map<String, Object> c) throws IOException {
+        String[] o = order(c);
+        return dienst(base, "GET", "/v1/orders/" + o[1] + "/authcode", null, o[0]);
+    }
+
+    /** Factuur als HTML (de dienst vraagt een sessie; de console toont hem zelf). */
+    public static Map<String, Object> dienstInvoice(String base, Map<String, Object> c, String id) throws IOException {
+        String[] o = order(c);
+        if (id == null || !id.matches("[A-Za-z0-9_-]+")) throw new IllegalArgumentException("Onbekende factuur");
+        Http.Response r = Http.request("GET", base.replaceAll("/+$", "") + "/v1/invoices/" + id, Http.headers("authorization", "Bearer " + o[0]), null, 20_000);
+        if (!r.ok()) throw new IOException(r.status == 404 ? "Factuur niet gevonden" : "De dienst antwoordt " + r.status);
+        return Json.obj("html", r.text());
+    }
+
     /** Het pakket van de dienst overnemen: aanbieder, opslag (buckets klaarzetten), plekken, DNS via de dienst, mail. */
     public static Map<String, Object> dienstApply(String base, Map<String, Object> c, Catalog catalog) throws IOException {
         Map<String, Object> d = dienstState(c);

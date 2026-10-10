@@ -32,6 +32,9 @@ public final class ConsoleApi {
     private final Catalog catalog;
     private final Listener listener;
     private long lastUse;
+    /** Inloggen bij de dienst vóór er een kluis is (herstellen op een nieuw apparaat); alleen in het geheugen. */
+    private volatile String recoverEmail, recoverToken;
+
     /** Base URL of the Eigen Cloud Dienst (central paid service); empty = not offered. */
     public volatile String dienstUrl = "";
     /** The vault locks itself after this much idle time (ms). */
@@ -293,6 +296,24 @@ public final class ConsoleApi {
                 touch();
                 return ok(Json.obj("ok", true));
             }
+            case "POST /api/recover/dienst/login":
+                recoverEmail = Extras.dienstStartLogin(dienstUrl, Json.str(b, "email"));
+                recoverToken = null;
+                return ok(Json.obj("ok", true));
+            case "POST /api/recover/dienst/verify":
+                if (recoverEmail == null) return err(400, "Vul eerst je e-mailadres in");
+                recoverToken = Extras.dienstFinishLogin(dienstUrl, recoverEmail, Json.str(b, "code"));
+                return ok(Json.obj("ok", true));
+            case "POST /api/setup/recover-dienst": {
+                if (vault.exists()) return err(409, "Er is al een kluis op deze telefoon");
+                if (recoverToken == null) return err(400, "Log eerst in bij de dienst");
+                Map<String, Object> c = Extras.recoverViaDienst(dienstUrl, recoverEmail, recoverToken, Json.str(b, "masterKey"), catalog);
+                vault.create(Json.str(b, "passphrase"), c);
+                recoverEmail = null;
+                recoverToken = null;
+                touch();
+                return ok(Json.obj("ok", true));
+            }
             case "POST /api/unlock": {
                 try {
                     vault.unlock(Json.str(b, "passphrase") == null ? "" : Json.str(b, "passphrase"));
@@ -438,6 +459,30 @@ public final class ConsoleApi {
             }
             case "GET /api/dienst/status":
                 return ok(Extras.dienstStatus(dienstUrl, c));
+            case "GET /api/dienst/billing":
+                return ok(Extras.dienstBilling(dienstUrl, c));
+            case "POST /api/dienst/bundle": {
+                Map<String, Object> r = Extras.dienstChangeBundle(dienstUrl, c, Json.str(b, "bundle"));
+                save();
+                if (Json.truthy(Json.path(c, "console", "done"))) {
+                    Admin.Status st = Admin.clusterStatus(c, Console.knownUrls(c));
+                    if (st.leaderUrl != null) {
+                        try { Admin.setPolicy(c, st.leaderUrl, Json.map(r, "policy")); } catch (IOException ignored) { /* volgende keer via de beheerconfiguratie */ }
+                    }
+                }
+                return ok(r);
+            }
+            case "POST /api/dienst/payment-method":
+            case "POST /api/dienst/settle":
+            case "POST /api/dienst/cancel":
+            case "POST /api/dienst/resume":
+                return ok(Extras.dienstAction(dienstUrl, c, p.substring("/api/dienst/".length())));
+            case "GET /api/dienst/authcode":
+                return ok(Extras.dienstAuthcode(dienstUrl, c));
+            case "GET /api/dienst/invoice": {
+                int q = path.indexOf("?id=");
+                return ok(Extras.dienstInvoice(dienstUrl, c, q < 0 ? "" : Bytes.decodeURIComponent(path.substring(q + 4).replaceFirst("&.*$", ""))));
+            }
             case "POST /api/dienst/apply": {
                 try {
                     return ok(Extras.dienstApply(dienstUrl, c, catalog));

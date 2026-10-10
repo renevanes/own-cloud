@@ -104,6 +104,13 @@ public class S3MotoTest {
             T.throwsWith("geen Eigen Cloud-configuratie", () -> Admin.recoverAdminConfig(masterHex, store(moto, "v", "versie-" + suffix, "backup")), "no admin copy");
             Map<String, Object> rc = Console.recoverAdminConfig(" " + masterHex.toUpperCase() + " ", store(moto, "rep", "rep-" + suffix, "replica"));
             T.eq("klaar", Json.str(rc, "console", "step"), "console recovery marks done");
+            // Bucket vergeten: de console zoekt zelf in alle buckets van deze sleutel.
+            Map<String, Object> found = Admin.findAdminConfig(masterHex, store(moto, "zoek", "", "replica"));
+            T.eq(Json.str(cfg, "domain"), Json.str(Json.map(found, "config"), "domain"), "findAdminConfig without bucket");
+            T.check(Json.str(found, "store", "bucket").endsWith(suffix), "findAdminConfig reports the bucket it used");
+            T.throwsWith("past niet", () -> Admin.findAdminConfig(EigenCrypto.randomKeyHex(), store(moto, "zoek", "", "replica")), "wrong key, no bucket");
+            Map<String, Object> rc2 = Console.recoverAdminConfig(masterHex, store(moto, "zoek", "", "replica"));
+            T.eq("klaar", Json.str(rc2, "console", "step"), "console recovery without bucket");
 
             // ── readManifest: newest TS-sealed manifest wins ──
             byte[] tsManifest = Bytes.fromBase64(Json.str(Json.listAt(g, "sealJson").get(0), "sealed"));

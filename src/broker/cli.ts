@@ -7,6 +7,7 @@
  *   npm run dienst:cli -- hervatten <id>
  *   npm run dienst:cli -- opruimen <id> [--zeker]
  *   npm run dienst:cli -- bewaker
+ *   npm run dienst:cli -- facturen [<id>]
  * Gebruikt dezelfde omgevingsvariabelen (en datamap) als de dienst zelf.
  */
 import { loadConfig } from "./config.js";
@@ -15,6 +16,7 @@ import { type OrderRow, type CustomerRow, getOrder, orderState } from "./db.js";
 import { getSteps } from "./context.js";
 import { retryOrder, suspendOrder, resumeOrder, cleanupOrder } from "./ops.js";
 import { runGuard } from "./guard.js";
+import { type InvoiceRow, euro } from "./invoice.js";
 
 const STATUS: Record<string, string> = {
   awaiting_payment: "wacht op betaling", paid: "betaald", provisioning: "wordt klaargezet", ready: "klaar",
@@ -41,7 +43,12 @@ try {
         console.log(`${c.email}  (klant ${c.id}, sinds ${when(c.created_at)})`);
         const orders = ctx.db.prepare("SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at").all(c.id) as OrderRow[];
         if (!orders.length) console.log("    geen bestellingen");
-        for (const o of orders) console.log(`    ${o.id}  ${o.domain.padEnd(28)} ${o.bundle.padEnd(10)} ${STATUS[o.status] ?? o.status}${o.ends_at ? ` (tot ${o.ends_at})` : ""}`);
+        for (const o of orders) {
+          const inv = ctx.db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(CAST(amount AS REAL)), 0) AS total FROM invoices WHERE order_id = ?").get(o.id) as { n: number; total: number };
+          const money = `${euro(o.amount)} p/m`.padEnd(14);
+          const invoices = inv.n ? `  ${inv.n} factu${inv.n === 1 ? "ur" : "ren"}, ${euro(Math.round(inv.total * 100))} betaald` : "";
+          console.log(`    ${o.id}  ${o.domain.padEnd(28)} ${o.bundle.padEnd(10)} ${money} ${STATUS[o.status] ?? o.status}${o.ends_at ? ` (tot ${o.ends_at})` : ""}${invoices}`);
+        }
       }
       break;
     }
@@ -104,6 +111,21 @@ try {
       for (const x of f) console.log(`  ${x.orderId} ${x.domain}: ${x.running} draaiend, ${x.allowed} toegestaan${x.poweredOff.length ? `; uitgezet: ${x.poweredOff.join(", ")}` : ""}`);
       break;
     }
+    case "facturen": {
+      if (!ctx.cfg.company.name) console.warn("Let op: BROKER_COMPANY_NAME is niet ingesteld. Facturen tonen dan \"Bedrijfsgegevens ontbreken\". Zie BROKER.md.\n");
+      if (arg && !getOrder(ctx.db, arg)) { console.error(`Bestelling ${arg} bestaat niet.`); process.exit(1); }
+      const rows = (arg
+        ? ctx.db.prepare("SELECT i.*, o.domain FROM invoices i JOIN orders o ON o.id = i.order_id WHERE i.order_id = ? ORDER BY i.year, i.seq").all(arg)
+        : ctx.db.prepare("SELECT i.*, o.domain FROM invoices i JOIN orders o ON o.id = i.order_id ORDER BY i.year, i.seq").all()) as (InvoiceRow & { domain: string })[];
+      if (!rows.length) console.log("Nog geen facturen.");
+      let total = 0;
+      for (const r of rows) {
+        total += Math.round(Number(r.amount) * 100);
+        console.log(`  ${r.number}  ${r.date}  ${euro(r.amount).padStart(12)}  ${r.order_id}  ${r.domain}`);
+      }
+      if (rows.length) console.log(`  ${rows.length} factu${rows.length === 1 ? "ur" : "ren"}, samen ${euro(total)} (incl. ${ctx.cfg.vatPercent}% btw)`);
+      break;
+    }
     default:
       console.log(`Gebruik: npm run dienst:cli -- <opdracht>
 
@@ -113,7 +135,8 @@ try {
   opschorten <id>       sleutel intrekken en servers uitzetten (bijv. na wanbetaling)
   hervatten <id>        nieuwe sleutel; de klant kan weer starten
   opruimen <id> [--zeker]  na opzegging: IAM en maildomein weghalen
-  bewaker               nu controleren op te veel servers`);
+  bewaker               nu controleren op te veel servers
+  facturen [<id>]       alle facturen (of die van één bestelling)`);
   }
 } catch (e) {
   console.error(`Mislukt: ${(e as Error).message}`);

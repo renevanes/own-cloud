@@ -47,6 +47,12 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|smallestScreenSize"
             android:windowSoftInputMode="adjustResize" />
 
+        <activity
+            android:name=".PayActivity"
+            android:exported="false"
+            android:label="Betalen"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|smallestScreenSize" />
+
         <!-- "Delen met Eigen Cloud" vanuit de galerij of een andere app -->
         <activity
             android:name=".ShareActivity"

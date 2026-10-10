@@ -137,6 +137,24 @@ export async function recoverAdminConfig(masterKeyHex: string, store: StoreConfi
   }
 }
 
+/**
+ * Herstellen als je de bucketnaam niet (meer) weet: alle buckets van de sleutel langslopen en de eerste met een
+ * configuratie die bij deze sleutel past nemen. Geeft de configuratie en de gevonden opslag terug.
+ */
+export async function findAdminConfig(masterKeyHex: string, store: StoreConfig): Promise<{ config: ClusterConfig; store: StoreConfig }> {
+  if (store.type !== "s3" || store.bucket) return { config: await recoverAdminConfig(masterKeyHex, store), store };
+  const buckets = await (makeStore({ ...store, bucket: "x" }) as S3Store).listBuckets();
+  if (!buckets.length) throw new Error("Met deze sleutel zijn geen buckets te zien");
+  let wrongKey = false;
+  for (const bucket of buckets) {
+    try {
+      const st = { ...store, bucket };
+      return { config: await recoverAdminConfig(masterKeyHex, st), store: st };
+    } catch (e) { if (/past niet/.test((e as Error).message)) wrongKey = true; }
+  }
+  throw new Error(wrongKey ? "Deze herstelsleutel past niet bij de opslag" : "In geen van de buckets staat een Eigen Cloud-configuratie");
+}
+
 // ───────── Opslag testen en inrichten ─────────
 
 export interface StepResult { label: string; ok: boolean; detail?: string }

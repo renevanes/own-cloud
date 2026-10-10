@@ -16,6 +16,10 @@ Een app voor je eigen cloud, zonder Google Play-diensten of Firebase. Twee delen
 zelf een cloud opzetten bij Hetzner, Scaleway of UpCloud (opslag, servers met live prijzen, deSEC/Hetzner-DNS, mail-relay),
 starten, laten slapen, wakker maken, back-ups testen, en herstellen met alleen je herstelsleutel.
 De app praat daarvoor rechtstreeks met de aanbieders en met je servers; er zit geen dienst van ons tussen.
+Kies je toch voor de **Eigen Cloud Dienst**, dan regel je ook dat helemaal in de app: bestellen, betalen met iDEAL
+(de betaalpagina opent in de app, je bank-app springt vanzelf open), facturen bekijken en afdrukken/als PDF bewaren,
+bundel wisselen, betaalmethode wijzigen, achterstand betalen, opzeggen of terugdraaien, verhuiscode van je domein,
+en op een nieuwe telefoon herstellen met alleen je e-mailadres, de code uit de mail en je herstelsleutel.
 Je sleutels staan in een kluis op de telefoon (PBKDF2 + AES-256-GCM), te ontgrendelen met je wachtwoordzin of vingerafdruk
 (Android Keystore). Schermafbeeldingen van de beheerconsole zijn geblokkeerd; Google-back-up van de app staat uit.
 
@@ -25,8 +29,9 @@ Elke build op `main` is een nieuwe versie. GitHub Actions zet hem als pakket `ei
 kijkt elke paar uur, downloadt een nieuwe versie via wifi, controleert de SHA-256 en of hij met dezelfde sleutel is
 ondertekend, en installeert hem zelf. Vanaf Android 12 gebeurt dat zonder tik (na de eerste keer en nadat je de app
 eenmalig toestemming geeft om apps te installeren); op oudere Android-versies krijg je een melding om bij te werken.
-Zet het pakket `eigen-cloud-app` op ghcr.io één keer op **Public** (GitHub → je profiel → Packages), anders kan de
-app het niet ophalen. De vaste ondertekensleutel staat in `android/signing/` (lees de README daar).
+Zet het pakket `eigen-cloud-app` op ghcr.io één keer op **Public** (GitHub → je profiel → Packages). Lukt ghcr.io
+niet, dan haalt de app de update van je eigen cloud (`/app/update.json` en `/app/eigen-cloud.apk`, ingelogd; elke
+server-image bevat de app van dezelfde build), met dezelfde SHA-256- en handtekeningcontrole. De vaste ondertekensleutel staat in `android/signing/` (lees de README daar).
 
 ## Installeren
 

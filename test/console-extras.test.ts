@@ -12,7 +12,7 @@ import path from "node:path";
 import { loadConfig } from "../src/broker/config.js";
 import { createBroker } from "../src/broker/app.js";
 import { freePort } from "./helpers/cluster.js";
-import { smtpSink, fakeUpstream } from "./helpers/broker-fakes.js";
+import { smtpSink, fakeUpstream, fakeMandate } from "./helpers/broker-fakes.js";
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), "console-extras-"));
 
@@ -220,5 +220,79 @@ test("console: gratis deSEC-account en naam.dedyn.io, daarna alles via de Eigen 
     assert.deepEqual(zone.rrsets.get("_acme/TXT")?.records, [`"${"b".repeat(43)}"`, `"${"c".repeat(43)}"`], "de laatste twee waarden");
     assert.equal((await upd("d".repeat(43), "0".repeat(64))).status, 401, "verkeerde sleutel");
     assert.equal((await upd("te kort")).status, 400);
+  });
+
+  await t.test("dienst: abonnement regelen in de console (facturen, bundel, betaalmethode, opzeggen)", async () => {
+    const custId = up.st.mollie.customers[0].id;
+    up.st.mollie.mandates.push(fakeMandate("mdt_1", custId, "directdebit"));
+    let b = (await c("GET", "/api/dienst/billing")).json;
+    assert.equal(b.status, "ready");
+    assert.equal(b.domain, "vanes.nl");
+    assert.equal(b.mandate?.method, "directdebit");
+    assert.equal(b.payments.length, 1);
+    const invoiceId = b.payments[0].invoiceId;
+    assert.ok(invoiceId, "de eerste betaling heeft een factuur");
+
+    let r = await c("GET", `/api/dienst/invoice?id=${invoiceId}`);
+    assert.equal(r.status, 200, r.text);
+    assert.match(r.json.html, /EC-\d{4}-\d{4}/);
+    assert.match((await c("GET", "/api/dienst/invoice?id=../../etc")).json.error, /Onbekende factuur/);
+
+    const other = b.bundles.find((x: any) => !x.current);
+    r = await c("POST", "/api/dienst/bundle", { bundle: other.id });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.bundle.id, other.id);
+    const conf = (await c("GET", "/api/config")).json;
+    assert.equal(conf.dienst.bundle, other.id, "nieuwe bundel bewaard in de kluis");
+    assert.match((await c("POST", "/api/dienst/bundle", { bundle: other.id })).json.error, /al/);
+
+    r = await c("POST", "/api/dienst/payment-method");
+    assert.match(r.json.checkoutUrl, /^https:\/\/mollie\.test\/checkout\//);
+    r = await c("POST", "/api/dienst/settle");
+    assert.equal(r.status, 400);
+    assert.match(r.json.error, /niets open/);
+
+    r = await c("GET", "/api/dienst/authcode");
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.domain, "vanes.nl");
+    assert.ok(r.json.authCode);
+
+    r = await c("POST", "/api/dienst/cancel");
+    assert.equal(r.status, 200, r.text);
+    b = (await c("GET", "/api/dienst/billing")).json;
+    assert.equal(b.status, "cancelled");
+    assert.equal(b.canResume, true);
+    r = await c("POST", "/api/dienst/resume");
+    assert.equal(r.status, 200, r.text);
+    assert.equal((await c("GET", "/api/dienst/billing")).json.status, "ready");
+  });
+
+  await t.test("herstellen via de dienst op een nieuw toestel (e-mail, code, sleutel)", async () => {
+    process.env.EIGEN_VAULT = path.join(base, "kluis-nieuw.json");
+    const { buildConsole: build2 } = await import(`../src/console/server.js?nieuw=${Date.now()}`);
+    const app2 = await build2();
+    t.after(() => app2.close());
+    const c2 = client(app2);
+    const key = "a".repeat(64);
+    assert.match((await c2("POST", "/api/setup/recover-dienst", { masterKey: key, passphrase: "vier losse woorden hier" })).json.error, /Log eerst in/);
+    assert.match((await c2("POST", "/api/recover/dienst/verify", { code: "123456" })).json.error, /e-mailadres/);
+    const before = smtp.mails.length;
+    assert.equal((await c2("POST", "/api/recover/dienst/login", { email: "rene@elders.example" })).status, 200);
+    let mail;
+    for (let i = 0; i < 100 && !mail; i++) { mail = smtp.mails.slice(before).find((m) => /inlogcode: \d{6}/.test(m.data)); if (!mail) await new Promise((res) => setTimeout(res, 30)); }
+    assert.equal((await c2("POST", "/api/recover/dienst/verify", { code: "000000" })).status, 400);
+    assert.equal((await c2("POST", "/api/recover/dienst/verify", { code: /inlogcode: (\d{6})/.exec(mail!.data)![1] })).status, 200);
+    assert.match((await c2("POST", "/api/setup/recover-dienst", { masterKey: "kort", passphrase: "vier losse woorden hier" })).json.error, /64 tekens/);
+
+    // De dienst geeft de opslag van het pakket terug; daar zoekt de console de configuratie.
+    const extras = await import("../src/console/extras.js");
+    const vaultMod = await import("../src/console/vault.js");
+    const v = new vaultMod.Vault(path.join(base, "kluis.json"));
+    v.unlock("vier losse woorden hier");
+    const { order, kit } = await extras.dienstOrderKit(v.config!.console.dienst!.token!);
+    assert.equal(order.id, orderId);
+    assert.deepEqual(kit.storage.map((s) => s.purpose).sort(), ["backup", "replica"]);
+    assert.ok(kit.storage.every((s) => s.accessKey && s.secretKey));
+    assert.equal(fs.existsSync(process.env.EIGEN_VAULT!), false, "zonder geslaagd herstel geen kluis");
   });
 });

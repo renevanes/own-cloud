@@ -14,6 +14,8 @@ import { type Registrant, parsePhone, readKit, splitDomain, provisionDue } from 
 import { handleWebhook, ensureSubscription } from "./payments.js";
 import { cancelOrder } from "./ops.js";
 import { runGuard } from "./guard.js";
+import { UserError, billingView, changeBundle, startMandateChange, startSettle, resumeSubscription, domainAuthCode } from "./billing.js";
+import { type InvoiceRow, readInvoice, renderInvoiceHtml } from "./invoice.js";
 
 // ───────── Kleine hulpjes ─────────
 
@@ -94,6 +96,8 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     verifyIp: new RateLimit(30, 15 * 60_000),
     checkIp: new RateLimit(30, 60_000),
     ordersCustomer: new RateLimit(10, 60 * 60_000),
+    checkoutCustomer: new RateLimit(10, 60 * 60_000),
+    authcodeCustomer: new RateLimit(10, 60 * 60_000),
   };
 
   const auth = (req: FastifyRequest): CustomerRow | null => {
@@ -292,6 +296,39 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
       console.error(`[dienst] opzeggen ${o.id}: ${(e as Error).message}`);
       return httpError(reply, 502, "Opzeggen lukt nu even niet. Probeer het zo opnieuw.");
     }
+  });
+
+  // ── Abonnement en betalingen zelf regelen ──
+  /** Voert een klanthandeling uit op een eigen bestelling; UserError → nette melding, de rest → 502. */
+  const selfService = <T>(name: string, fail: string, fn: (o: OrderRow) => Promise<T>, limit?: RateLimit) =>
+    async (req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+      const c = needAuth(req, reply); if (!c) return;
+      const o = ownOrder(c, req.params.id);
+      if (!o) return httpError(reply, 404, "Deze bestelling bestaat niet");
+      if (limit && !limit.ok(c.id)) return httpError(reply, 429, "Je hebt dit net al een paar keer gedaan. Probeer het later opnieuw.");
+      try {
+        return await fn(o);
+      } catch (e) {
+        if (e instanceof UserError) return httpError(reply, e.status, e.message);
+        console.error(`[dienst] ${name} ${o.id}: ${(e as Error).message}`);
+        event(db, o.id, `${name}-error`, (e as Error).message);
+        return httpError(reply, 502, fail);
+      }
+    };
+
+  app.get("/v1/orders/:id/billing", selfService("billing", "Je abonnement kan nu even niet worden opgehaald. Probeer het zo opnieuw.", (o) => billingView(ctx, o)));
+  app.post<{ Params: { id: string }; Body: { bundle?: string } }>("/v1/orders/:id/bundle", (req, reply) =>
+    selfService("bundle", "Je bundel wisselen lukt nu even niet. Probeer het zo opnieuw.", (o) => changeBundle(ctx, o.id, String(req.body?.bundle ?? "")))(req, reply));
+  app.post("/v1/orders/:id/payment-method", selfService("payment-method", "Je betaalmethode wijzigen lukt nu even niet. Probeer het zo opnieuw.", (o) => startMandateChange(ctx, o.id), limits.checkoutCustomer));
+  app.post("/v1/orders/:id/settle", selfService("settle", "Betalen lukt nu even niet. Probeer het zo opnieuw.", (o) => startSettle(ctx, o.id), limits.checkoutCustomer));
+  app.post("/v1/orders/:id/resume", selfService("resume", "Je abonnement voortzetten lukt nu even niet. Probeer het zo opnieuw.", (o) => resumeSubscription(ctx, o.id)));
+  app.get("/v1/orders/:id/authcode", selfService("authcode", "De verhuiscode opvragen lukt nu even niet. Probeer het zo opnieuw.", (o) => domainAuthCode(ctx, o.id), limits.authcodeCustomer));
+
+  app.get<{ Params: { id: string } }>("/v1/invoices/:id", async (req, reply) => {
+    const c = needAuth(req, reply); if (!c) return;
+    const row = /^[0-9a-f]{16}$/.test(req.params.id) ? (db.prepare("SELECT * FROM invoices WHERE id = ?").get(req.params.id) as InvoiceRow | undefined) : undefined;
+    if (!row || row.customer_id !== c.id) return httpError(reply, 404, "Deze factuur bestaat niet");
+    return reply.type("text/html; charset=utf-8").header("cache-control", "private, no-store").send(renderInvoiceHtml(readInvoice(ctx, row)));
   });
 
   // ── Mollie ──

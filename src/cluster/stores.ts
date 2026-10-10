@@ -218,6 +218,15 @@ export class S3Store implements ObjectStore {
 
   // ───────── Bucket-beheer (voor de installatie-assistent) ─────────
 
+  /** Alle buckets van deze sleutel (S3 ListBuckets), om bij herstellen de juiste te vinden. */
+  async listBuckets(): Promise<string[]> {
+    const svc = new S3Store({ ...this.config, bucket: "", pathStyle: true, prefix: undefined });
+    const r = await svc.req("GET", "");
+    const xml = await r.body.text();
+    if (r.statusCode >= 300) throw new Error(r.statusCode === 403 ? "De sleutel geeft geen toegang" : `Buckets opvragen mislukt: ${r.statusCode}`);
+    return [...xml.matchAll(/<Bucket>[\s\S]*?<Name>([^<]+)<\/Name>/g)].map((m) => m[1]);
+  }
+
   async bucketExists(): Promise<boolean> {
     const r = await this.req("HEAD", "");
     await r.body.dump();

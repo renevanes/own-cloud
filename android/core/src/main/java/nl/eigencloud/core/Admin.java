@@ -330,6 +330,31 @@ public final class Admin {
         }
     }
 
+    /**
+     * Herstellen zonder bucketnaam: alle buckets van de sleutel langs; de eerste met een passende configuratie.
+     * Geeft {config, store} terug.
+     */
+    public static Map<String, Object> findAdminConfig(String masterKeyHex, Map<String, Object> store) throws IOException {
+        boolean s3 = !"fs".equals(Json.str(store, "type"));
+        String bucket = Json.str(store, "bucket");
+        if (!s3 || (bucket != null && !bucket.isEmpty())) return Json.obj("config", recoverAdminConfig(masterKeyHex, store), "store", store);
+        Map<String, Object> probe = Json.copy(store);
+        probe.put("bucket", "x");
+        List<String> buckets = new S3Store(probe).listBuckets();
+        if (buckets.isEmpty()) throw new IOException("Met deze sleutel zijn geen buckets te zien");
+        boolean wrongKey = false;
+        for (String b : buckets) {
+            Map<String, Object> st = Json.copy(store);
+            st.put("bucket", b);
+            try {
+                return Json.obj("config", recoverAdminConfig(masterKeyHex, st), "store", st);
+            } catch (IOException e) {
+                if (e.getMessage() != null && e.getMessage().contains("past niet")) wrongKey = true;
+            }
+        }
+        throw new IOException(wrongKey ? "Deze herstelsleutel past niet bij de opslag" : "In geen van de buckets staat een Eigen Cloud-configuratie");
+    }
+
     // ───────── Testing and preparing storage ─────────
 
     private static String host(String endpoint) {

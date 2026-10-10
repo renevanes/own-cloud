@@ -76,6 +76,7 @@ public final class ConsoleActivity extends Activity {
         web.saveState(out);
     }
 
+    private static final int REQ_PAY = 7;
     private volatile boolean wasUnlocked, autoBio = true;
     private WebView printView;
 
@@ -86,8 +87,18 @@ public final class ConsoleActivity extends Activity {
     }
 
     @Override
+    protected void onActivityResult(int req, int result, Intent data) {
+        super.onActivityResult(req, result, data);
+        if (req == REQ_PAY) paid();
+    }
+
+    /** Terug van betalen (in de app of via een bank-app en de browser): de console werkt de status bij. */
+    private void paid() { web.evaluateJavascript("window.__eigenPaid && window.__eigenPaid()", null); }
+
+    @Override
     protected void onResume() {
         super.onResume();
+        paid();
         // Is de kluis intussen op slot gegaan (15 minuten niets gedaan)? Dan meteen het slotscherm.
         if (wasUnlocked && !backend.unlocked()) { autoBio = true; web.reload(); }
     }
@@ -135,6 +146,20 @@ public final class ConsoleActivity extends Activity {
         public void printRecoverySheet() {
             if (!onOurPage()) return;
             main.post(ConsoleActivity.this::print);
+        }
+
+        /** Afrekenen bij Mollie binnen de app. */
+        @JavascriptInterface
+        public void openPay(String url) {
+            if (!onOurPage() || url == null || !url.startsWith("https://")) return;
+            main.post(() -> startActivityForResult(new Intent(ConsoleActivity.this, PayActivity.class).putExtra(PayActivity.EXTRA_URL, url), REQ_PAY));
+        }
+
+        /** Een HTML-document afdrukken of als pdf bewaren (bijv. een factuur). */
+        @JavascriptInterface
+        public void printHtml(String title, String html) {
+            if (!onOurPage() || html == null) return;
+            main.post(() -> printDocument(title == null ? "Eigen Cloud" : title, html));
         }
 
         @JavascriptInterface
@@ -198,6 +223,10 @@ public final class ConsoleActivity extends Activity {
     private void print() {
         final String html;
         try { html = backend.recoverySheet(); } catch (SecurityException e) { return; }
+        printDocument("Herstelblad Eigen Cloud", html);
+    }
+
+    private void printDocument(String title, String html) {
         WebView pv = new WebView(this);
         printView = pv; // vasthouden tot het afdrukken klaar is
         pv.setWebViewClient(new WebViewClient() {
@@ -205,9 +234,11 @@ public final class ConsoleActivity extends Activity {
                 return Assets.ours(r.getUrl()) ? Assets.serve(ConsoleActivity.this, r.getUrl()) : null;
             }
 
+            @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) { return true; }
+
             @Override public void onPageFinished(WebView v, String url) {
                 PrintManager pm = getSystemService(PrintManager.class);
-                pm.print("Herstelblad Eigen Cloud", v.createPrintDocumentAdapter("Herstelblad Eigen Cloud"),
+                pm.print(title, v.createPrintDocumentAdapter(title),
                         new PrintAttributes.Builder().setMediaSize(PrintAttributes.MediaSize.ISO_A4).build());
             }
         });

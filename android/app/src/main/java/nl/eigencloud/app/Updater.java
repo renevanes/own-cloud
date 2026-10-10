@@ -42,12 +42,49 @@ final class Updater {
         final long code;
         final String version, apkDigest;
         final long size;
+        /** Van je eigen cloud in plaats van ghcr.io (als die niet bereikbaar of niet openbaar is). */
+        CloudApi viaCloud;
 
         Release(long code, String version, String apkDigest, long size) {
             this.code = code;
             this.version = version;
             this.apkDigest = apkDigest;
             this.size = size;
+        }
+    }
+
+    /** Tweede bron: de app zit ook in je server-image en is op te halen bij je eigen cloud (ingelogd). */
+    static Release fromCloud(Context c) throws IOException {
+        CloudApi api = CloudApi.fromApp(c);
+        if (api == null) throw new IOException("niet ingelogd bij je cloud");
+        Map<String, Object> j = Json.asMap(api.getJson("/app/update.json"));
+        Number code = Json.num(j, "versionCode"), size = Json.num(j, "size");
+        String sha = Json.str(j, "sha256");
+        if (code == null || sha == null || !sha.matches("[0-9a-f]{64}")) throw new IOException("onvolledige update-informatie van je cloud");
+        Release r = new Release(code.longValue(), Json.str(j, "version"), "sha256:" + sha, size == null ? -1 : size.longValue());
+        r.viaCloud = api;
+        return r;
+    }
+
+    /** Nieuwste versie: eerst ghcr.io, anders je eigen cloud. */
+    static Release newest(Context c) throws IOException {
+        IOException first;
+        try {
+            Release g = latest();
+            try {
+                Release own = fromCloud(c);
+                if (own.code > g.code) return own;
+            } catch (IOException ignored) {
+                // eigen cloud heeft (nog) geen app; ghcr is genoeg
+            }
+            return g;
+        } catch (IOException e) {
+            first = e;
+        }
+        try {
+            return fromCloud(c);
+        } catch (IOException e) {
+            throw new IOException(first.getMessage() + " (ook je eigen cloud: " + e.getMessage() + ")");
         }
     }
 
@@ -132,6 +169,32 @@ final class Updater {
         throw new IOException("Te veel omleidingen");
     }
 
+    private static void downloadFromCloud(Release r, File out) throws IOException {
+        HttpURLConnection c = (HttpURLConnection) new URL(r.viaCloud.base + "/app/eigen-cloud.apk").openConnection();
+        try {
+            c.setConnectTimeout(20_000);
+            c.setReadTimeout(60_000);
+            c.setRequestProperty("authorization", "Bearer " + r.viaCloud.token());
+            if (c.getResponseCode() != 200) throw new IOException("Downloaden van je cloud mislukt (" + c.getResponseCode() + ")");
+            MessageDigest sha;
+            try { sha = MessageDigest.getInstance("SHA-256"); } catch (Exception e) { throw new IOException(e); }
+            try (InputStream in = c.getInputStream(); OutputStream os = new FileOutputStream(out)) {
+                byte[] buf = new byte[256 * 1024];
+                int k;
+                long n = 0;
+                while ((k = in.read(buf)) > 0) {
+                    n += k;
+                    if (n > 200L * 1024 * 1024) throw new IOException("Bestand groter dan verwacht");
+                    sha.update(buf, 0, k);
+                    os.write(buf, 0, k);
+                }
+            }
+            if (!("sha256:" + Bytes.hex(sha.digest())).equals(r.apkDigest)) throw new IOException("Controle van de download mislukt (SHA-256 klopt niet)");
+        } finally {
+            c.disconnect();
+        }
+    }
+
     // ───────── Installeren ─────────
 
     /** Mag de app zelf updates installeren? (Instelling "Onbekende apps installeren" voor Eigen Cloud.) */
@@ -157,7 +220,8 @@ final class Updater {
         //noinspection ResultOfMethodCallIgnored
         dir.mkdirs();
         File apk = new File(dir, "eigen-cloud.apk");
-        download(token(), r.apkDigest, apk, r.size > 0 ? r.size : 200L * 1024 * 1024);
+        if (r.viaCloud != null) downloadFromCloud(r, apk);
+        else download(token(), r.apkDigest, apk, r.size > 0 ? r.size : 200L * 1024 * 1024);
         PackageManager pm = c.getPackageManager();
         PackageInfo mine, theirs;
         try { mine = pm.getPackageInfo(c.getPackageName(), sigFlag()); } catch (PackageManager.NameNotFoundException e) { throw new IOException(e); }
@@ -197,7 +261,7 @@ final class Updater {
 
     /** Kijkt of er een nieuwere versie is; onthoudt het resultaat voor het instellingenscherm. */
     static Release check(Context c) throws IOException {
-        Release r = latest();
+        Release r = newest(c);
         Prefs.setNum(c, "update.checked", System.currentTimeMillis());
         if (r.code <= BuildConfig.VERSION_CODE) { Prefs.setStr(c, "update.version", null); return null; }
         Prefs.setStr(c, "update.version", r.version);

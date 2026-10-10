@@ -61,7 +61,7 @@ public final class Console {
 
     /** POST /api/setup/recover: the admin config from storage, marked as set up. */
     public static Map<String, Object> recoverAdminConfig(String masterKeyInput, Map<String, Object> store) throws IOException {
-        Map<String, Object> c = Admin.recoverAdminConfig(normalizeMasterKey(masterKeyInput), store);
+        Map<String, Object> c = Json.map(Admin.findAdminConfig(normalizeMasterKey(masterKeyInput), store), "config");
         Map<String, Object> con = Json.map(c, "console");
         Map<String, Object> nc = con != null ? con : Json.obj();
         nc.put("step", "klaar");

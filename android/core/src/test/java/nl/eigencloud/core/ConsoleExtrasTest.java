@@ -123,6 +123,52 @@ public class ConsoleExtrasTest {
             for (Object x : Json.asList(call(200, "GET", "/api/checklist", null).get("_"))) {
                 if (Json.truthy(Json.path(x, "required")) && !"sleutel".equals(Json.str(x, "id"))) T.check(Json.truthy(Json.path(x, "ok")), "checklist: " + Json.str(x, "label"));
             }
+
+            // ── C. Abonnement regelen vanuit de app ──
+            Map<String, Object> bill = call(200, "GET", "/api/dienst/billing", null);
+            T.eq("ready", Json.str(bill, "status"), "billing status");
+            List<Object> pays = Json.listAt(bill, "payments");
+            T.eq(1, pays.size(), "one payment");
+            String inv = Json.str(pays.get(0), "invoiceId");
+            T.check(inv != null, "first payment has an invoice");
+            T.check(Json.str(call(200, "GET", "/api/dienst/invoice?id=" + inv, null), "html").matches("(?s).*EC-\\d{4}-\\d{4}.*"), "invoice html");
+            call(400, "GET", "/api/dienst/invoice?id=..%2Fx", null);
+            String other = null;
+            for (Object x : Json.listAt(bill, "bundles")) if (!Json.truthy(Json.path(x, "current"))) other = Json.str(x, "id");
+            T.eq(other, Json.str(call(200, "POST", "/api/dienst/bundle", Json.obj("bundle", other)), "bundle", "id"), "bundle changed");
+            T.eq(other, Json.str(call(200, "GET", "/api/config", null), "dienst", "bundle"), "bundle kept in the vault");
+            T.check(Json.str(call(200, "POST", "/api/dienst/payment-method", null), "checkoutUrl").startsWith("https://mollie.test/checkout/"), "new mandate via checkout");
+            T.check(Json.str(call(400, "POST", "/api/dienst/settle", null), "error").contains("niets open"), "nothing to settle");
+            T.eq("vanes.nl", Json.str(call(200, "GET", "/api/dienst/authcode", null), "domain"), "authcode");
+
+            // ── D. Nieuw toestel: herstellen met alleen e-mail, code en herstelsleutel ──
+            String masterKey = Json.str(api.vault.config(), "masterKey");
+            Map<String, Object> dienstCfg = Json.copy(api.vault.config());
+            Json.asMap(dienstCfg.get("console")).put("done", true);
+            T.check(Admin.saveAdminCopy(dienstCfg) >= 1, "admin copy in the service storage");
+            ConsoleApi first = api;
+            api = new ConsoleApi(new File(dir, "kluis-nieuw.json"), cat, null);
+            api.dienstUrl = Json.str(info, "url");
+            T.check(Json.str(call(400, "POST", "/api/setup/recover-dienst", Json.obj("masterKey", masterKey, "passphrase", "vier losse woorden hier")), "error").contains("Log eerst in"), "recover needs login");
+            int seen = Json.asList(Json.parse(get(Json.str(info, "control") + "/mails"))).size();
+            call(200, "POST", "/api/recover/dienst/login", Json.obj("email", "rene@elders.example"));
+            String code2 = null;
+            for (int i = 0; i < 100 && code2 == null; i++) {
+                List<Object> ms = Json.asList(Json.parse(get(Json.str(info, "control") + "/mails")));
+                for (Object m : ms.subList(Math.min(seen, ms.size()), ms.size())) {
+                    java.util.regex.Matcher mm = java.util.regex.Pattern.compile("inlogcode: (\\d{6})").matcher(Json.str(m, "data"));
+                    if (mm.find()) code2 = mm.group(1);
+                }
+                if (code2 == null) Thread.sleep(50);
+            }
+            T.check(code2 != null, "recovery code mailed");
+            call(200, "POST", "/api/recover/dienst/verify", Json.obj("code", code2));
+            call(400, "POST", "/api/setup/recover-dienst", Json.obj("masterKey", "kort", "passphrase", "vier losse woorden hier"));
+            call(200, "POST", "/api/setup/recover-dienst", Json.obj("masterKey", masterKey, "passphrase", "vier losse woorden hier"));
+            Map<String, Object> rconf = call(200, "GET", "/api/config", null);
+            T.eq("vanes.nl", Json.str(rconf, "domain"), "recovered domain");
+            T.eq(Json.str(first.vault.config(), "console", "dienst", "orderId"), Json.str(rconf, "dienst", "orderId"), "recovered service order");
+            T.eq("ready", Json.str(call(200, "GET", "/api/dienst/billing", null), "status"), "billing works after recovery");
         });
     }
 }

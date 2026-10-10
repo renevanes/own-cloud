@@ -21,14 +21,25 @@ export async function smtpSink() {
 
 // ───────── Nep-aanbieders ─────────
 
+/** Een machtiging zoals Mollie die teruggeeft (GET /customers/{id}/mandates). */
+export function fakeMandate(id: string, customerId: string, kind: "directdebit" | "creditcard", status = "valid") {
+  return {
+    resource: "mandate", id, customerId, mode: "test", status, method: kind, createdAt: new Date().toISOString(),
+    signatureDate: new Date().toISOString().slice(0, 10), mandateReference: null,
+    details: kind === "directdebit"
+      ? { consumerName: "R. van Es", consumerAccount: "NL55INGB0001234567", consumerBic: "INGBNL2A" }
+      : { cardHolder: "R. van Es", cardNumber: "4242", cardLabel: "Visa", cardFingerprint: "fp_abc", cardExpiryDate: "2029-12-31" },
+  };
+}
+
 export type Call = { method: string; path: string; query: URLSearchParams; headers: http.IncomingHttpHeaders; body: any };
 
 export function fakeUpstream() {
   const calls: Call[] = [];
   const st = {
     n: 0,
-    mollie: { customers: [] as any[], payments: new Map<string, any>(), subscriptions: [] as any[] },
-    op: { token: "op-token-1", tokenValid: true, domains: [] as any[], customers: [] as any[], rejectNext: new Set<string>() },
+    mollie: { customers: [] as any[], payments: new Map<string, any>(), subscriptions: [] as any[], mandates: [] as any[], refunds: [] as any[], failRefund: false },
+    op: { token: "op-token-1", tokenValid: true, domains: [] as any[], customers: [] as any[], rejectNext: new Set<string>(), authcodeFailOnce: false },
     desec: { zones: new Map<string, { name: string; keys: any[]; rrsets: Map<string, any> }>() },
     scw: { projects: [] as any[], applications: [] as any[], policies: [] as any[], apiKeys: [] as any[], tem: [] as any[], servers: [] as any[], failNext: new Set<string>() },
   };
@@ -43,16 +54,38 @@ export function fakeUpstream() {
       const q = p.slice(7);
       if (c.method === "POST" && q === "/customers") { const x = { id: id("cst_"), ...c.body }; st.mollie.customers.push(x); return [201, x]; }
       if (c.method === "POST" && q === "/payments") {
-        const x = { id: id("tr_"), status: "open", sequenceType: c.body.sequenceType, customerId: c.body.customerId, amount: c.body.amount, metadata: c.body.metadata, _links: { checkout: { href: `https://mollie.test/checkout/${st.n}` } } };
+        const x = { resource: "payment", id: id("tr_"), mode: "test", status: "open", createdAt: new Date().toISOString(), description: c.body.description, method: c.body.method ?? null, sequenceType: c.body.sequenceType ?? "oneoff", customerId: c.body.customerId, amount: c.body.amount, metadata: c.body.metadata, _links: { checkout: { href: `https://mollie.test/checkout/${st.n}` } } };
         st.mollie.payments.set(x.id, x); return [201, x];
       }
       if (c.method === "GET" && (m = /^\/payments\/([^/]+)$/.exec(q))) { const x = st.mollie.payments.get(m[1]); return x ? [200, x] : [404, { title: "Not Found", detail: "No payment exists with token " + m[1] }]; }
       if ((m = /^\/customers\/([^/]+)\/subscriptions$/.exec(q))) {
         if (c.method === "GET") return [200, { count: 0, _embedded: { subscriptions: st.mollie.subscriptions.filter((s) => s.customerId === m![1]) } }];
-        if (c.method === "POST") { const x = { id: id("sub_"), customerId: m[1], status: "active", ...c.body }; st.mollie.subscriptions.push(x); return [201, x]; }
+        if (c.method === "POST") {
+          const cust = st.mollie.mandates.filter((x) => x.customerId === m![1] && ["valid", "pending"].includes(x.status));
+          const x = { resource: "subscription", id: id("sub_"), customerId: m[1], status: "active", createdAt: new Date().toISOString(), nextPaymentDate: c.body.startDate, mandateId: c.body.mandateId ?? cust[cust.length - 1]?.id ?? null, ...c.body };
+          st.mollie.subscriptions.push(x); return [201, x];
+        }
       }
-      if (c.method === "DELETE" && (m = /^\/customers\/([^/]+)\/subscriptions\/([^/]+)$/.exec(q))) {
-        const x = st.mollie.subscriptions.find((s) => s.id === m![2]); if (!x) return [404, {}]; x.status = "canceled"; return [200, x];
+      if ((m = /^\/customers\/([^/]+)\/subscriptions\/([^/]+)$/.exec(q))) {
+        const x = st.mollie.subscriptions.find((s) => s.id === m![2] && s.customerId === m![1]);
+        if (!x) return [404, { title: "Not Found", detail: "The subscription does not exist" }];
+        if (c.method === "GET") return [200, x];
+        if (c.method === "DELETE") { x.status = "canceled"; delete x.nextPaymentDate; return [200, x]; }
+        if (c.method === "PATCH") {
+          if (x.status !== "active") return [422, { title: "Unprocessable Entity", detail: "The subscription is not active" }];
+          if (c.body.mandateId && !st.mollie.mandates.some((md) => md.id === c.body.mandateId && md.customerId === m![1])) return [422, { title: "Unprocessable Entity", detail: "The mandate does not exist" }];
+          Object.assign(x, c.body); return [200, x];
+        }
+      }
+      if (c.method === "GET" && (m = /^\/customers\/([^/]+)\/mandates$/.exec(q))) {
+        const list = st.mollie.mandates.filter((x) => x.customerId === m![1]);
+        return [200, { count: list.length, _embedded: { mandates: [...list].reverse() } }];
+      }
+      if (c.method === "POST" && (m = /^\/payments\/([^/]+)\/refunds$/.exec(q))) {
+        const pay = st.mollie.payments.get(m[1]); if (!pay) return [404, { title: "Not Found" }];
+        if (st.mollie.failRefund) return [422, { title: "Unprocessable Entity", detail: "Insufficient balance" }];
+        const x = { resource: "refund", id: id("re_"), paymentId: m[1], status: "pending", amount: c.body.amount, description: c.body.description };
+        st.mollie.refunds.push(x); return [201, x];
       }
     }
     // Openprovider
@@ -69,6 +102,14 @@ export function fakeUpstream() {
         return [200, { code: 0, data: { results: [{ domain: `${d.name}.${d.extension}`, status: free ? "free" : "active", ...(free ? { price: { product: { price: 9.95, currency: "EUR" }, reseller: { price: 6.5, currency: "EUR" } } } : {}) }] } }];
       }
       if (q === "/domains" && c.method === "GET") return [200, { code: 0, data: { results: st.op.domains.filter((d) => `${d.domain.name}.${d.domain.extension}` === c.query.get("full_name")), total: 0 } }];
+      if ((m = /^\/domains\/(\d+)\/authcode(\/reset)?$/.exec(q))) {
+        const d = st.op.domains.find((x) => String(x.id) === m![1]);
+        if (!d) return [404, { code: 320, desc: "Domain not found" }];
+        if (!m[2] && st.op.authcodeFailOnce) { st.op.authcodeFailOnce = false; return [200, { code: 399, desc: "Auth code not available" }]; }
+        if (m[2]) d.authCode = `Nieuw-${d.id}-Xy7#`;
+        d.authCode ??= `Ab3-${d.id}-Qz9!`;
+        return [200, { code: 0, data: { auth_code: d.authCode, type: "internal" } }];
+      }
       if (q === "/customers" && c.method === "POST") { const h = `RV${String(++st.n).padStart(6, "0")}-NL`; st.op.customers.push({ handle: h, ...c.body }); return [200, { code: 0, data: { handle: h } }]; }
       if (q === "/domains" && c.method === "POST") {
         if (st.op.rejectNext.delete(c.body.domain.name)) return [400, { code: 346, desc: "Domain name is not valid", data: "" }];

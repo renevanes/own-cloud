@@ -154,7 +154,75 @@ export async function dienstStatus(c: AdminConfig) {
   return dienst(`/v1/orders/${d.orderId}`, { token: d.token });
 }
 
-interface Kit {
+// ───────── Herstellen op een nieuw apparaat, via de dienst ─────────
+
+export async function dienstStartLogin(email: string) {
+  const e = (email ?? "").trim();
+  if (!/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(e)) throw new Error("Vul een geldig e-mailadres in");
+  await dienst("/v1/auth/start", { body: { email: e } });
+  return e;
+}
+
+export async function dienstFinishLogin(email: string, code: string): Promise<string> {
+  const r = await dienst("/v1/auth/verify", { body: { email, code: (code ?? "").replace(/\s/g, "") } });
+  return r.token as string;
+}
+
+/** Het lopende abonnement en zijn pakket (voor herstellen: opslag en sleutels komen uit het pakket). */
+export async function dienstOrderKit(token: string) {
+  const me = await dienst("/v1/me", { token });
+  const orders = ((me.orders ?? []) as { id: string; status: string; bundle: string; createdAt?: number }[])
+    .filter((o) => ["ready", "payment_problem", "cancelled"].includes(o.status))
+    .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+  if (!orders.length) throw new Error("Bij dit e-mailadres hoort geen actief abonnement");
+  const o = orders[0];
+  const kit = (await dienst(`/v1/orders/${o.id}/kit`, { token })) as Kit;
+  return { order: o, kit };
+}
+
+// ───────── Abonnement beheren ─────────
+
+function order(c: AdminConfig) {
+  const d = c.console.dienst;
+  if (!d?.token || !d.orderId) throw new Error("Er is geen abonnement bij de dienst");
+  return { token: d.token, id: d.orderId };
+}
+
+export async function dienstBilling(c: AdminConfig) {
+  const o = order(c);
+  return dienst(`/v1/orders/${o.id}/billing`, { token: o.token });
+}
+
+/** Ander pakket: de dienst past het abonnement aan; daarna nemen we de nieuwe plekken en aantallen over. */
+export async function dienstChangeBundle(c: AdminConfig, bundle: string) {
+  const o = order(c);
+  const r = await dienst(`/v1/orders/${o.id}/bundle`, { token: o.token, body: { bundle } });
+  const kit = (await dienst(`/v1/orders/${o.id}/kit`, { token: o.token })) as Kit;
+  c.policy = { ...c.policy, placement: kit.placement, minDataNodes: kit.policy.minDataNodes, witnesses: kit.policy.witnesses };
+  c.console.dienst = { ...c.console.dienst, bundle };
+  return { ok: true, bundle: r.bundle, effective: r.effective, policy: { minDataNodes: kit.policy.minDataNodes, witnesses: kit.policy.witnesses } };
+}
+
+export async function dienstAction(c: AdminConfig, action: "payment-method" | "settle" | "cancel" | "resume") {
+  const o = order(c);
+  return dienst(`/v1/orders/${o.id}/${action}`, { token: o.token, body: {} });
+}
+
+export async function dienstAuthcode(c: AdminConfig) {
+  const o = order(c);
+  return dienst(`/v1/orders/${o.id}/authcode`, { token: o.token });
+}
+
+/** Factuur als HTML (de dienst vraagt een sessie, dus de console haalt hem op en toont hem zelf). */
+export async function dienstInvoice(c: AdminConfig, id: string) {
+  const o = order(c);
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("Onbekende factuur");
+  const r = await fetch(`${DIENST_URL()}/v1/invoices/${encodeURIComponent(id)}`, { headers: { authorization: `Bearer ${o.token}` }, signal: AbortSignal.timeout(20_000) });
+  if (!r.ok) throw new Error(r.status === 404 ? "Factuur niet gevonden" : `De dienst antwoordt ${r.status}`);
+  return { html: await r.text() };
+}
+
+export interface Kit {
   domain: string;
   nameservers: string[];
   delegated: boolean;
