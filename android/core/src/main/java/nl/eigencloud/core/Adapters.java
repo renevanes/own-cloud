@@ -38,14 +38,25 @@ public final class Adapters {
     /** dns.caddy: the Caddy DNS-01 line (only for adapters whose module is in Dockerfile.caddy). */
     public interface Caddy { String line(Map<String, Object> fields); }
 
+    /** servers.check: "Sleutels controleren", ONLY reading requests; rows {id, label, ok, detail} (see KeyCheck). */
+    public interface Check { List<Object> check(Map<String, Object> fields) throws IOException; }
+
+    /** dns.check: the same for DNS; {@code zone} may be "" (then only logging in and viewing zones). Never creates a zone. */
+    public interface DnsCheck { List<Object> check(Map<String, Object> fields, String zone) throws IOException; }
+
     /** Servers capability. */
     public static final class Servers {
         public final MakeProvider create;
         public final FetchSizes fetchSizes;
+        /** Null: the console uses a general check (list servers, fetch sizes). */
+        public final Check check;
 
-        public Servers(MakeProvider create, FetchSizes fetchSizes) {
+        public Servers(MakeProvider create, FetchSizes fetchSizes) { this(create, fetchSizes, null); }
+
+        public Servers(MakeProvider create, FetchSizes fetchSizes, Check check) {
             this.create = create;
             this.fetchSizes = fetchSizes;
+            this.check = check;
         }
     }
 
@@ -56,10 +67,16 @@ public final class Adapters {
         /** Null when Caddy has no module for this provider (it then uses HTTP-01). */
         public final Caddy caddy;
 
-        public Dns(Connect connect, MakeDns create, Caddy caddy) {
+        /** Null when the provider has no read-only check. */
+        public final DnsCheck check;
+
+        public Dns(Connect connect, MakeDns create, Caddy caddy) { this(connect, create, caddy, null); }
+
+        public Dns(Connect connect, MakeDns create, Caddy caddy, DnsCheck check) {
             this.connect = connect;
             this.create = create;
             this.caddy = caddy;
+            this.check = check;
         }
     }
 

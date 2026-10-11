@@ -348,12 +348,18 @@ test("Scaleway DNS: zone controleren, records zetten (set) en weghalen (delete)"
   const bodies: any[] = [];
   fake((r) => {
     if (r.headers.get("x-auth-token") !== "sk") return { status: 401, json: {} };
-    if (r.method === "GET" && r.url.pathname === "/domain/v2beta1/dns-zones") return { json: { dns_zones: r.url.searchParams.get("dns_zone") === "vanes.nl" ? [{ domain: "vanes.nl", subdomain: "", ns: ["ns0.dom.scw.cloud", "ns1.dom.scw.cloud"] }] : [] } };
+    if (r.method === "GET" && r.url.pathname === "/domain/v2beta1/dns-zones") return { json: { dns_zones: r.url.searchParams.get("dns_zone") === "vanes.nl" ? [{ domain: "vanes.nl", subdomain: "", ns: ["ns0.dom.scw.cloud", "ns1.dom.scw.cloud"], project_id: "proj-1" }] : [] } };
+    if (r.method === "GET" && r.url.pathname === "/account/v3/projects/proj-1") return { json: { id: "proj-1", organization_id: "org-1" } };
     if (r.method === "PATCH" && r.url.pathname === "/domain/v2beta1/dns-zones/vanes.nl/records") { bodies.push(json(r)); return { json: { records: [] } }; }
     return { status: 500 };
   });
   const a = getAdapter("scaleway")!;
-  assert.deepEqual(await a.dns!.connect({ secretKey: "sk" }, "vanes.nl"), { nameservers: ["ns0.dom.scw.cloud", "ns1.dom.scw.cloud"] });
+  const f: Record<string, string> = { secretKey: "sk" };
+  assert.deepEqual(await a.dns!.connect(f, "vanes.nl"), { nameservers: ["ns0.dom.scw.cloud", "ns1.dom.scw.cloud"] });
+  assert.equal(f.organizationId, "org-1", "organisatie-ID opgezocht (voor Caddy DNS-01)");
+  const given: Record<string, string> = { secretKey: "sk", organizationId: "eigen" };
+  await a.dns!.connect(given, "vanes.nl");
+  assert.equal(given.organizationId, "eigen", "ingevuld organisatie-ID blijft");
   await assert.rejects(a.dns!.connect({ secretKey: "sk" }, "elders.nl"), /Domains and DNS/);
   await assert.rejects(a.dns!.connect({ secretKey: "fout" }, "vanes.nl"), /accepteert deze sleutel niet/);
   const dns = makeDns({ type: "scaleway", name: "scw", zone: "vanes.nl", fields: { secretKey: "sk" } });
@@ -422,7 +428,14 @@ test("registry → catalogus, catalog.json en Caddy", () => {
   const cfg = (dns: ClusterConfig["dns"]) => ({ domain: "vanes.nl", dns }) as unknown as ClusterConfig;
   assert.match(caddyfile(cfg([{ type: "hetzner", name: "h", token: "htok" }]))!, /tls \{\n\t\tdns hetzner htok\n\t\}/);
   assert.match(caddyfile(cfg([{ type: "file", name: "f" }, { type: "desec", name: "d", token: "dt" }]))!, /dns desec \{\n\t\t\ttoken dt\n\t\t\}/);
-  assert.doesNotMatch(caddyfile(cfg([{ type: "ovh", name: "o", fields: { appKey: "a" } }]))!, /tls/, "geen Caddy-module: HTTP-01");
+  assert.doesNotMatch(caddyfile(cfg([{ type: "ovh", name: "o", fields: { appKey: "a" } }]))!, /tls/, "OVH zonder alle sleutels: HTTP-01");
+  assert.doesNotMatch(caddyfile(cfg([{ type: "exoscale", name: "e", fields: { apiKey: "EXO1", apiSecret: "x" } }]))!, /tls/, "Exoscale: geen Caddy-module, HTTP-01");
+  assert.match(caddyfile(cfg([{ type: "ovh", name: "o", fields: { appKey: "ak", appSecret: "as", consumerKey: "ck" } }]))!,
+    /tls \{\n\t\tdns ovh \{\n\t\t\tendpoint ovh-eu\n\t\t\tapplication_key ak\n\t\t\tapplication_secret as\n\t\t\tconsumer_key ck\n\t\t\}\n\t\}/);
+  assert.match(caddyfile(cfg([{ type: "scaleway", name: "s", fields: { secretKey: "sk", organizationId: "org-1" } }]))!,
+    /tls \{\n\t\tdns scaleway \{\n\t\t\tsecret_key sk\n\t\t\torganization_id org-1\n\t\t\}\n\t\}/);
+  // Scaleway zonder organisatie-ID telt niet mee: de volgende koppeling met een complete Caddy-regel wint.
+  assert.match(caddyfile(cfg([{ type: "scaleway", name: "s", fields: { secretKey: "sk" } }, { type: "hetzner", name: "h", token: "htok" }]))!, /dns hetzner htok/);
 });
 
 // ───────── Zo voeg je een aanbieder toe ─────────

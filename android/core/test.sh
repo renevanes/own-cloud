@@ -93,6 +93,7 @@ jrun CatalogApiTest
 jrun ProvidersTest
 jrun DnsTest
 jrun AdaptersTest
+jrun KeyCheckTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
 jrun VaultTest
 jrun SmtpTest SMTP_INFO="$BUILD/smtp-info.json"
 jrun S3MotoTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"

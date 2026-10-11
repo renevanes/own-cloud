@@ -8,6 +8,8 @@
  *
  * Zie PROVIDERS.md voor het stappenplan om een aanbieder toe te voegen.
  */
+import type { KeyCheck } from "./check.js";
+export type { KeyCheck } from "./check.js";
 
 // ───────── Servers ─────────
 
@@ -89,6 +91,12 @@ export interface ServersCapability {
   create(fields: Record<string, string>): Provider;
   /** Live formaten en prijzen in een regio (prijs per maand in euro, of null als onbekend). */
   fetchSizes(fields: Record<string, string>, region: string): Promise<SizeOption[]>;
+  /**
+   * "Sleutels controleren": ALLEEN lezende verzoeken (nooit iets maken of wijzigen). Geeft een lijstje controles
+   * (inloggen, servers bekijken, prijzen, rechten …; zie check.ts). Zonder check gebruikt de console een algemene
+   * controle (servers opsommen en formaten ophalen).
+   */
+  check?(fields: Record<string, string>): Promise<KeyCheck[]>;
 }
 
 export interface StorageCapability {
@@ -118,8 +126,14 @@ export interface DnsCapability {
   /** De DnsProvider waarmee het cluster records bijwerkt. */
   create(name: string, fields: Record<string, string>, zone: string): DnsProvider;
   /**
+   * "Sleutels controleren" voor DNS: ALLEEN lezen (anders dan connect maakt dit nooit een zone aan). `zone` kan
+   * leeg zijn; controleer dan alleen het inloggen en het bekijken van zones.
+   */
+  check?(fields: Record<string, string>, zone: string): Promise<KeyCheck[]>;
+  /**
    * Regel voor Caddy (DNS-01-certificaten), bijv. `dns hetzner <token>`. Alleen als de module in
    * Dockerfile.caddy zit; anders weglaten (Caddy gebruikt dan HTTP-01, zie PROVIDERS.md).
+   * Geeft "" als er een veld ontbreekt; dan probeert caddyfile() de volgende DNS-koppeling.
    */
   caddy?(fields: Record<string, string>): string;
 }

@@ -1,5 +1,15 @@
 [
   {
+    "version": "1.11",
+    "date": "2026-10-11",
+    "changes": [
+      "Nieuw: Sleutels controleren. Per aanbieder zie je of je sleutels werken en welke rechten nog ontbreken",
+      "Lukt koppelen niet, dan zie je meteen wat er mis is met je sleutel",
+      "HTTPS-certificaten via DNS nu ook bij Scaleway DNS en OVHcloud DNS; een open poort 80 is daar niet meer nodig",
+      "Onderhoud aan het bouwen van de app en de servers"
+    ]
+  },
+  {
     "version": "1.10",
     "date": "2026-10-11",
     "changes": [

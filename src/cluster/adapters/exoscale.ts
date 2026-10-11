@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { CreateSpec, DnsProvider, Provider, ProviderAdapter, ServerInfo, SizeOption } from "./types.js";
 import { api, parseMx, sleep, unquoteTxt } from "./http.js";
+import { L, NOT_CHECKED, RIGHTS_HIDDEN, failText, good, look, row, type KeyCheck } from "./check.js";
 
 /**
  * Exoscale (Zwitserland; zones in CH, DE, AT en BG). Compute API v2 op https://api-<zone>.exoscale.com/v2.
@@ -195,6 +196,66 @@ async function exoSizes(cfg: ExoCfg, zone: string): Promise<SizeOption[]> {
     .sort((a, b) => a.ramGb - b.ramGb || a.cpus - b.cpus);
 }
 
+// ───────── Sleutels controleren (alleen lezen) ─────────
+
+/** Ondertekende GET (geeft status en antwoord; gooit niet). */
+function exoLook(cfg: ExoCfg, zone: string, pathq: string) {
+  const url = `${exoBase(zone)}${pathq}`;
+  return look(url, { authorization: exoSign("GET", url, "", cfg.apiKey, cfg.apiSecret, Math.floor(Date.now() / 1000) + 600) });
+}
+
+/**
+ * Wat de rol van de sleutel mag met een dienst (compute of dns): GET /api-key/{sleutel} → role-id, GET /iam-role/{id}
+ * → policy (default-service-strategy, services.<dienst>.type = allow | deny | rules); zie
+ * https://openapi-v2.exoscale.com/operation/operation-get-iam-role. Regels (CEL) rekent de console niet na.
+ */
+async function exoRights(cfg: ExoCfg, service: string, name: string, label: string): Promise<KeyCheck> {
+  const k = await exoLook(cfg, "ch-gva-2", `/api-key/${encodeURIComponent(cfg.apiKey)}`);
+  const roleId = k.json?.["role-id"];
+  if (!good(k.status) || !roleId) return row("rights", label, null, RIGHTS_HIDDEN);
+  const r = await exoLook(cfg, "ch-gva-2", `/iam-role/${encodeURIComponent(roleId)}`);
+  if (!good(r.status)) return row("rights", label, null, RIGHTS_HIDDEN);
+  const role = r.json?.name ?? "";
+  const type = r.json?.policy?.services?.[service]?.type ?? r.json?.policy?.["default-service-strategy"];
+  if (type === "allow") return row("rights", label, true, `De rol '${role}' mag alles met ${name}`);
+  if (type === "deny") return row("rights", label, false, `De rol '${role}' mag niets met ${name}. Pas de rol aan: Portal → IAM → Rollen → ${name} toestaan.`);
+  if (type === "rules") return row("rights", label, null, `De rol '${role}' heeft eigen regels voor ${name}; of dat genoeg is, blijkt bij het starten.`);
+  return row("rights", label, null, RIGHTS_HIDDEN);
+}
+
+/** GET /instance (inloggen en servers bekijken), /instance-type (formaten; Exoscale heeft geen prijs-API), rol. */
+async function exoscaleCheck(f: Record<string, string>): Promise<KeyCheck[]> {
+  const cfg = f as unknown as ExoCfg;
+  const s = await exoLook(cfg, "ch-gva-2", "/instance");
+  if (!good(s.status)) {
+    const detail = s.status === 401 || s.status === 403 ? "Exoscale weigert deze sleutel. Controleer sleutel en geheim (Portal → IAM → API-sleutels), en of de rol van de sleutel Compute mag gebruiken." : failText(s);
+    return [row("login", L.login, false, detail), row("servers", L.servers, null, NOT_CHECKED), row("sizes", L.sizes, null, NOT_CHECKED), await exoRights(cfg, "compute", "Compute", L.rights)];
+  }
+  const t = await exoLook(cfg, "ch-gva-2", "/instance-type");
+  return [
+    row("login", L.login, true), row("servers", L.servers, true),
+    good(t.status) ? row("sizes", L.sizes, true, `${(t.json?.["instance-types"] ?? []).length} formaten; prijzen geeft Exoscale niet door`) : row("sizes", L.sizes, false, failText(t)),
+    await exoRights(cfg, "compute", "Compute", L.rights),
+  ];
+}
+
+/** GET /dns-domain (inloggen en zone bekijken) en de rol voor DNS. Maakt de zone NIET aan (dat doet connect). */
+async function exoscaleDnsCheck(f: Record<string, string>, zone: string): Promise<KeyCheck[]> {
+  const cfg = f as unknown as ExoCfg;
+  const label = zone ? L.zone : L.zones;
+  const l = await exoLook(cfg, "ch-gva-2", "/dns-domain");
+  if (!good(l.status)) {
+    const detail = l.status === 401 || l.status === 403 ? "Exoscale weigert deze sleutel voor DNS. Controleer sleutel en geheim, en of de rol van de sleutel DNS mag gebruiken." : failText(l);
+    return [row("login", L.login, false, detail), row("zone", label, null, NOT_CHECKED), await exoRights(cfg, "dns", "DNS", L.dnsRights)];
+  }
+  const found = ((l.json?.["dns-domains"] ?? []) as { "unicode-name": string }[]).some((d) => d["unicode-name"] === zone);
+  return [
+    row("login", L.login, true),
+    !zone ? row("zone", label, true) : found ? row("zone", label, true, `${zone} gevonden`) : row("zone", label, null, `${zone} staat er nog niet; de console maakt hem aan bij het koppelen (daarvoor heb je een DNS-abonnement bij Exoscale nodig).`),
+    await exoRights(cfg, "dns", "DNS", L.dnsRights),
+  ];
+}
+
 const city: Record<string, [string, string]> = {
   "ch-gva-2": ["Genève", "CH"], "ch-dk-2": ["Zürich", "CH"], "de-fra-1": ["Frankfurt", "DE"], "de-muc-1": ["München", "DE"],
   "at-vie-1": ["Wenen 1", "AT"], "at-vie-2": ["Wenen 2", "AT"], "bg-sof-1": ["Sofia", "BG"],
@@ -215,6 +276,7 @@ export const exoscale: ProviderAdapter = {
     regions: EXO_ZONES.map((z) => ({ id: z, label: city[z][0], country: city[z][1], city: city[z][0].replace(/ \d$/, "") })),
     create: (f) => new ExoscaleProvider(f as never),
     fetchSizes: (f, zone) => exoSizes(f as never, zone),
+    check: exoscaleCheck,
   },
   storage: {
     name: "Exoscale SOS",
@@ -239,5 +301,6 @@ export const exoscale: ProviderAdapter = {
       return { nameservers: ["ns1.exoscale.ch", "ns1.exoscale.com", "ns1.exoscale.io", "ns1.exoscale.net"] };
     },
     create: (name, f, zone) => new ExoscaleDns(name, { ...(f as unknown as ExoCfg), zone }),
+    check: exoscaleDnsCheck,
   },
 };

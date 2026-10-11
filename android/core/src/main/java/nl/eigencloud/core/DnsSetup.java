@@ -54,25 +54,12 @@ public final class DnsSetup {
             console.put("dnsMode", "manual");
             return new Result(null, null);
         }
-        Adapters.Adapter a = mode == null ? null : Adapters.get(mode);
-        Map<String, Object> offer = mode == null ? null : catalog.dnsOffer(mode);
-        if (a == null || a.dns == null || offer == null) throw new IllegalArgumentException("Kies een DNS-aanbieder");
-        List<Catalog.Field> want = Catalog.fields(offer);
-        Map<String, Object> prev = null;
-        for (Object x : Json.listAt(c, "dns")) if (mode.equals(Json.str(x, "type"))) { prev = Json.asMap(x); break; }
-        Map<String, Object> fields = Json.obj();
-        Map<String, Object> linked = Json.map(c, "providers", mode);
-        if (linked != null) for (Catalog.Field f : want) if (Json.truthy(linked.get(f.key))) fields.put(f.key, linked.get(f.key));
-        if (prev != null) for (Map.Entry<String, Object> e : Adapters.dnsFields(prev).entrySet()) if (!"api".equals(e.getKey())) fields.put(e.getKey(), e.getValue());
         Map<String, Object> given = Json.obj();
         if (fieldsIn != null) given.putAll(fieldsIn);
         if (token != null && !token.isEmpty()) given.put("token", token);
-        for (Map.Entry<String, Object> e : given.entrySet()) {
-            if (!(e.getValue() instanceof String)) continue;
-            String v = (String) e.getValue();
-            if (v.trim().isEmpty() || v.startsWith("••")) continue;
-            for (Catalog.Field f : want) if (f.key.equals(e.getKey())) { fields.put(e.getKey(), v.trim()); break; }
-        }
+        Map<String, Object> fields = fieldsFor(c, catalog, mode, given);
+        Adapters.Adapter a = Adapters.get(mode);
+        List<Catalog.Field> want = Catalog.fields(catalog.dnsOffer(mode));
         List<Catalog.Field> missing = new ArrayList<>();
         for (Catalog.Field f : want) if (!f.optional && !Json.truthy(fields.get(f.key))) missing.add(f);
         if (!missing.isEmpty()) {
@@ -92,6 +79,31 @@ public final class DnsSetup {
         console.put("nameservers", new ArrayList<Object>(ns));
         // dedyn.io-namen staan meteen goed: deSEC beheert dedyn.io zelf.
         return new Result(ns, d.endsWith(".dedyn.io") || delegated(d, ns));
+    }
+
+    /**
+     * Credentials for DNS (dnsFieldsFor in server.ts): the key of the same provider under Servers, over that what was
+     * linked for DNS before, over that {@code given} (masked "••…" and empty values do not count). Throws
+     * IllegalArgumentException "Kies een DNS-aanbieder" for an unknown provider.
+     */
+    public static Map<String, Object> fieldsFor(Map<String, Object> c, Catalog catalog, String mode, Map<String, Object> given) {
+        Adapters.Adapter a = mode == null ? null : Adapters.get(mode);
+        Map<String, Object> offer = mode == null ? null : catalog.dnsOffer(mode);
+        if (a == null || a.dns == null || offer == null) throw new IllegalArgumentException("Kies een DNS-aanbieder");
+        List<Catalog.Field> want = Catalog.fields(offer);
+        Map<String, Object> prev = null;
+        for (Object x : Json.listAt(c, "dns")) if (mode.equals(Json.str(x, "type"))) { prev = Json.asMap(x); break; }
+        Map<String, Object> fields = Json.obj();
+        Map<String, Object> linked = Json.map(c, "providers", mode);
+        if (linked != null) for (Catalog.Field f : want) if (Json.truthy(linked.get(f.key))) fields.put(f.key, linked.get(f.key));
+        if (prev != null) for (Map.Entry<String, Object> e : Adapters.dnsFields(prev).entrySet()) if (!"api".equals(e.getKey())) fields.put(e.getKey(), e.getValue());
+        if (given != null) for (Map.Entry<String, Object> e : given.entrySet()) {
+            if (!(e.getValue() instanceof String)) continue;
+            String v = (String) e.getValue();
+            if (v.trim().isEmpty() || v.startsWith("••")) continue;
+            for (Catalog.Field f : want) if (f.key.equals(e.getKey())) { fields.put(e.getKey(), v.trim()); break; }
+        }
+        return fields;
     }
 
     /** True when every expected nameserver is among the domain's current NS records (case-insensitive). */

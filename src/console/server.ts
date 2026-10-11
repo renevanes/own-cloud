@@ -21,6 +21,7 @@ import { randomKeyHex } from "../cluster/crypto.js";
 import { hashPassword } from "../auth.js";
 import { makeProvider } from "../cluster/providers.js";
 import { getAdapter, isSecretField } from "../cluster/adapters.js";
+import { checkStorage, genericServersCheck, row, type KeyCheck } from "../cluster/adapters/check.js";
 import { dnsFields } from "../cluster/dns.js";
 import { makeStore, S3Store, type StoreConfig } from "../cluster/stores.js";
 import { restoreFromAny, restoreFromStore } from "../cluster/backup.js";
@@ -213,13 +214,19 @@ async function addStore(b: StoreInput, t: AdminConfig = cfg()) {
   return { ok, steps, name };
 }
 
+/** Inloggegevens voor servers: wat bewaard is, met wat nu is ingevuld eroverheen (gemaskeerde "••…" tellen niet). */
+function providerFields(id: string, fieldsIn: Record<string, string>, t: AdminConfig = cfg()) {
+  const fields = { ...(t.providers[id] ?? {}) };
+  for (const [k, v] of Object.entries(fieldsIn ?? {})) if (typeof v === "string" && v && !v.startsWith("••")) fields[k] = v.trim();
+  if (id === "local" && !fields.baseDir) fields.baseDir = path.join(path.dirname(vault.file), "servers");
+  return fields;
+}
+
 /** Aanbieder van servers koppelen: inloggen controleren en de live formaten en prijzen per regio ophalen. */
 async function linkProvider(id: string, fieldsIn: Record<string, string>, t: AdminConfig = cfg()) {
   const offer = serverOffers().find((o) => o.id === id);
   if (!offer) throw new Error("Onbekende aanbieder");
-  const fields = { ...(t.providers[offer.id] ?? {}) };
-  for (const [k, v] of Object.entries(fieldsIn)) if (v && !v.startsWith("••")) fields[k] = v.trim();
-  if (offer.id === "local" && !fields.baseDir) fields.baseDir = path.join(path.dirname(vault.file), "servers");
+  const fields = providerFields(offer.id, fieldsIn, t);
   try {
     await makeProvider(offer.id, fields).list(t.cluster);
   } catch (e) {
@@ -292,19 +299,12 @@ async function configureDns(c: AdminConfig, mode: string, tokenIn?: string, fiel
     save();
     return { ok: true, ns: null, delegated: null };
   }
-  const a = getAdapter(mode);
-  if (!a?.dns || (a.testOnly && !LOCAL)) throw new Error("Kies een DNS-aanbieder");
-  const want = a.dns.fields ?? a.fields;
-  const prev = c.dns.find((x) => x.type === mode);
-  const fields: Record<string, string> = {};
-  const linked = c.providers[mode] ?? {};
-  for (const f of want) if (linked[f.key]) fields[f.key] = linked[f.key];
-  if (prev) Object.assign(fields, Object.fromEntries(Object.entries(dnsFields(prev)).filter(([k]) => k !== "api")));
-  const given = { ...(fieldsIn ?? {}), ...(tokenIn ? { token: tokenIn } : {}) };
-  for (const [k, v] of Object.entries(given)) if (typeof v === "string" && v.trim() && !v.startsWith("••") && want.some((f) => f.key === k)) fields[k] = v.trim();
+  const a = dnsAdapter(mode);
+  const want = a.dns!.fields ?? a.fields;
+  const fields = dnsFieldsFor(c, mode, { ...(fieldsIn ?? {}), ...(tokenIn ? { token: tokenIn } : {}) });
   const missing = want.filter((f) => !f.optional && !fields[f.key]);
   if (missing.length) throw new Error(missing.length === 1 && missing[0].key === "token" ? "Vul je API-token in" : `Vul in: ${missing.map((f) => f.label).join(", ")}`);
-  const { nameservers: ns } = await a.dns.connect(fields, d);
+  const { nameservers: ns } = await a.dns!.connect(fields, d);
   const { token, ...rest } = fields;
   c.dns = [{ type: mode, name: mode, ...(token ? { token } : {}), zone: d, ...(Object.keys(rest).length ? { fields: rest } : {}) }];
   c.console.dnsMode = mode;
@@ -313,6 +313,61 @@ async function configureDns(c: AdminConfig, mode: string, tokenIn?: string, fiel
   // dedyn.io-namen staan meteen goed: deSEC beheert dedyn.io zelf.
   return { ok: true, ns, delegated: d.endsWith(".dedyn.io") ? true : await delegated(d, ns) };
 }
+
+function dnsAdapter(mode: string) {
+  const a = getAdapter(mode);
+  if (!a?.dns || (a.testOnly && !LOCAL)) throw new Error("Kies een DNS-aanbieder");
+  return a;
+}
+
+/** Inloggegevens voor DNS: sleutel van Servers, daarover de eerdere DNS-koppeling, daarover wat nu is ingevuld. */
+function dnsFieldsFor(c: AdminConfig, mode: string, given: Record<string, string>) {
+  const a = dnsAdapter(mode);
+  const want = a.dns!.fields ?? a.fields;
+  const prev = c.dns.find((x) => x.type === mode);
+  const fields: Record<string, string> = {};
+  const linked = c.providers[mode] ?? {};
+  for (const f of want) if (linked[f.key]) fields[f.key] = linked[f.key];
+  if (prev) Object.assign(fields, Object.fromEntries(Object.entries(dnsFields(prev)).filter(([k]) => k !== "api")));
+  for (const [k, v] of Object.entries(given)) if (typeof v === "string" && v.trim() && !v.startsWith("••") && want.some((f) => f.key === k)) fields[k] = v.trim();
+  return fields;
+}
+
+/**
+ * "Sleutels controleren" (POST /api/check): alleen lezende verzoeken bij de aanbieder, nooit iets maken of wijzigen.
+ * kind "servers" of "dns": id = aanbieder; "storage": id = naam van een gekoppelde opslag. Velden die niet worden
+ * meegegeven komen uit de kluis. Bij Scaleway zoekt de console de toegangssleutel (SCW…) bij de opslag met dezelfde
+ * geheime sleutel; daarmee zijn de rechten na te gaan.
+ */
+async function keyChecks(c: AdminConfig, b: { kind?: string; id?: string; fields?: Record<string, string> }): Promise<KeyCheck[]> {
+  const given = b.fields ?? {};
+  const withAccessKey = (f: Record<string, string>) => {
+    const st = f.secretKey && !f.accessKey ? c.stores.find((x) => x.secretKey === f.secretKey && x.accessKey) : undefined;
+    return st ? { ...f, accessKey: st.accessKey! } : f;
+  };
+  if (b.kind === "servers") {
+    const a = getAdapter(b.id ?? "");
+    if (!a?.servers || !serverOffers().some((o) => o.id === a.id)) throw new Error("Onbekende aanbieder");
+    const f = withAccessKey(providerFields(a.id, given, c));
+    return a.servers.check ? a.servers.check(f) : genericServersCheck(a, f, c.cluster);
+  }
+  if (b.kind === "dns") {
+    const a = dnsAdapter(b.id ?? "");
+    const f = withAccessKey(dnsFieldsFor(c, a.id, given));
+    return a.dns!.check ? a.dns!.check(f, c.domain ?? "") : [row("login", "Inloggen lukt", null, "Deze aanbieder kan de console nog niet controleren")];
+  }
+  if (b.kind === "storage") {
+    const st = c.stores.find((x) => x.name === b.id);
+    if (!st) throw new Error("Onbekende opslag");
+    if (st.type !== "s3") throw new Error("Deze opslag is een map op deze computer; daar horen geen sleutels bij");
+    const keys = Object.fromEntries(["accessKey", "secretKey"].filter((k) => typeof given[k] === "string" && given[k].trim() && !given[k].startsWith("••")).map((k) => [k, given[k].trim()]));
+    return checkStorage({ ...st, ...keys });
+  }
+  throw new Error("Kies servers, dns of storage");
+}
+
+/** Na een mislukte koppeling: het lijstje erbij (als het controleren zelf lukt). */
+const checksAfter = (b: Parameters<typeof keyChecks>[1]) => keyChecks(cfg(), b).then((checks) => ({ checks }), () => ({}));
 
 /** "vanes.nl" (eigen of te kopen domein) of "rene" → "rene.dedyn.io" (gratis). */
 function normalizeDomain(input: string | undefined, mode: string) {
@@ -504,7 +559,10 @@ export async function buildConsole() {
 
     // ── Servers ──
     s.post<{ Body: { id: string; fields: Record<string, string> } }>("/api/providers", async (req, reply) => {
-      try { return await linkProvider(req.body.id, req.body.fields ?? {}); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+      try { return await linkProvider(req.body.id, req.body.fields ?? {}); } catch (e) {
+        const extra = /^Inloggen bij /.test((e as Error).message) ? await checksAfter({ kind: "servers", id: req.body.id, fields: req.body.fields }) : {};
+        return reply.code(400).send({ error: (e as Error).message, ...extra });
+      }
     });
     s.delete<{ Params: { id: string } }>("/api/providers/:id", async (req) => {
       delete cfg().providers[req.params.id];
@@ -579,7 +637,16 @@ export async function buildConsole() {
 
     // ── DNS ──
     s.post<{ Body: { mode: string; token?: string; fields?: Record<string, string> } }>("/api/dns", async (req, reply) => {
-      try { return await configureDns(cfg(), req.body.mode, req.body.token, req.body.fields); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+      try { return await configureDns(cfg(), req.body.mode, req.body.token, req.body.fields); } catch (e) {
+        const a = getAdapter(req.body.mode);
+        const extra = a?.dns && !/^Vul /.test((e as Error).message) ? await checksAfter({ kind: "dns", id: req.body.mode, fields: { ...(req.body.fields ?? {}), ...(req.body.token ? { token: req.body.token } : {}) } }) : {};
+        return reply.code(400).send({ error: (e as Error).message, ...extra });
+      }
+    });
+
+    // ── Sleutels controleren (alleen lezen) ──
+    s.post<{ Body: { kind?: string; id?: string; fields?: Record<string, string> } }>("/api/check", async (req, reply) => {
+      try { return { checks: await keyChecks(cfg(), req.body ?? {}) }; } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     });
     s.get("/api/dns/check", async () => {
       const c = cfg();

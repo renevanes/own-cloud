@@ -1,0 +1,1277 @@
+{
+ "_uitleg": "Sleutels controleren: nagebootste antwoorden van de aanbieders en het verwachte lijstje. Gebruikt door test/key-check.test.ts EN android/core KeyCheckTest.java, zodat de console en de app precies hetzelfde laten zien. Sleutel van een route: 'METHODE pad' of 'METHODE pad?query' (exact). Alleen GET/HEAD mag.",
+ "scenarios": [
+  {
+   "name": "Hetzner servers: alles in orde",
+   "adapter": "hetzner",
+   "kind": "servers",
+   "fields": {
+    "token": "hz"
+   },
+   "routes": {
+    "GET /v1/servers": {
+     "status": 200,
+     "json": {
+      "servers": [],
+      "meta": {
+       "pagination": {
+        "total_entries": 0
+       }
+      }
+     }
+    },
+    "GET /v1/server_types": {
+     "status": 200,
+     "json": {
+      "server_types": [
+       {},
+       {},
+       {}
+      ]
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "servers",
+     "label": "Servers bekijken",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "sizes",
+     "label": "Formaten en prijzen ophalen",
+     "ok": true,
+     "detail": "3 formaten"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten voor servers maken",
+     "ok": null,
+     "detail": "Kan de aanbieder niet laten zien; blijkt bij het starten. Kies bij het maken van het token 'Lezen en schrijven'."
+    }
+   ]
+  },
+  {
+   "name": "Hetzner servers: token onbekend",
+   "adapter": "hetzner",
+   "kind": "servers",
+   "fields": {
+    "token": "fout"
+   },
+   "routes": {
+    "GET /v1/servers": {
+     "status": 401,
+     "json": {
+      "error": {
+       "code": "unauthorized"
+      }
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": false,
+     "detail": "Hetzner herkent dit token niet. Maak een nieuw token: Hetzner Console → je project → Beveiliging → API-tokens."
+    },
+    {
+     "id": "servers",
+     "label": "Servers bekijken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "sizes",
+     "label": "Formaten en prijzen ophalen",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten voor servers maken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    }
+   ]
+  },
+  {
+   "name": "Hetzner servers: storing",
+   "adapter": "hetzner",
+   "kind": "servers",
+   "fields": {
+    "token": "hz"
+   },
+   "routes": {
+    "GET /v1/servers": {
+     "status": 503,
+     "text": "even niet"
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": false,
+     "detail": "De aanbieder antwoordde met fout 503: even niet"
+    },
+    {
+     "id": "servers",
+     "label": "Servers bekijken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "sizes",
+     "label": "Formaten en prijzen ophalen",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten voor servers maken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    }
+   ]
+  },
+  {
+   "name": "Hetzner DNS: zone ontbreekt",
+   "adapter": "hetzner",
+   "kind": "dns",
+   "zone": "vanes.nl",
+   "fields": {
+    "token": "hz"
+   },
+   "routes": {
+    "GET /v1/zones?name=vanes.nl": {
+     "status": 200,
+     "json": {
+      "zones": []
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "zone",
+     "label": "DNS-zone bekijken",
+     "ok": false,
+     "detail": "Maak eerst de zone vanes.nl aan in de Hetzner Console → DNS"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten om DNS te wijzigen",
+     "ok": null,
+     "detail": "Kan de aanbieder niet laten zien; blijkt bij het starten. Kies bij het maken van het token 'Lezen en schrijven'."
+    }
+   ]
+  },
+  {
+   "name": "Scaleway servers: geen recht om servers te bekijken, wel InstancesFullAccess via een groep",
+   "adapter": "scaleway",
+   "kind": "servers",
+   "fields": {
+    "secretKey": "11111111-2222-3333-4444-555555555555",
+    "projectId": "proj-1",
+    "accessKey": "SCWAAAAAAAAAAAAAAAAA"
+   },
+   "routes": {
+    "GET /instance/v1/zones/nl-ams-1/servers?per_page=1&project=proj-1": {
+     "status": 403,
+     "json": {
+      "message": "permission denied"
+     }
+    },
+    "GET /instance/v1/zones/nl-ams-1/products/servers": {
+     "status": 200,
+     "json": {
+      "servers": {
+       "DEV1-S": {},
+       "PRO2-XS": {}
+      }
+     }
+    },
+    "GET /iam/v1alpha1/api-keys/SCWAAAAAAAAAAAAAAAAA": {
+     "status": 200,
+     "json": {
+      "access_key": "SCWAAAAAAAAAAAAAAAAA",
+      "user_id": "u-1",
+      "default_project_id": "proj-1"
+     }
+    },
+    "GET /iam/v1alpha1/users/u-1": {
+     "status": 200,
+     "json": {
+      "id": "u-1",
+      "type": "member",
+      "organization_id": "org-1"
+     }
+    },
+    "GET /iam/v1alpha1/groups?organization_id=org-1&user_ids=u-1&page_size=100": {
+     "status": 200,
+     "json": {
+      "groups": [
+       {
+        "id": "g-1"
+       }
+      ]
+     }
+    },
+    "GET /iam/v1alpha1/policies?organization_id=org-1&user_ids=u-1&page_size=100": {
+     "status": 200,
+     "json": {
+      "policies": [
+       {
+        "id": "p-1"
+       }
+      ]
+     }
+    },
+    "GET /iam/v1alpha1/policies?organization_id=org-1&group_ids=g-1&page_size=100": {
+     "status": 200,
+     "json": {
+      "policies": [
+       {
+        "id": "p-2"
+       },
+       {
+        "id": "p-1"
+       }
+      ]
+     }
+    },
+    "GET /iam/v1alpha1/rules?policy_id=p-1&page_size=100": {
+     "status": 200,
+     "json": {
+      "rules": [
+       {
+        "permission_set_names": [
+         "InstancesReadOnly"
+        ],
+        "project_ids": [
+         "proj-1"
+        ]
+       }
+      ]
+     }
+    },
+    "GET /iam/v1alpha1/rules?policy_id=p-2&page_size=100": {
+     "status": 200,
+     "json": {
+      "rules": [
+       {
+        "permission_set_names": [
+         "InstancesFullAccess"
+        ],
+        "project_ids": [
+         "proj-1"
+        ]
+       }
+      ]
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "servers",
+     "label": "Servers bekijken",
+     "ok": false,
+     "detail": "De sleutel mag geen servers bekijken. Geef hem het recht InstancesFullAccess: Console → IAM → Beleid."
+    },
+    {
+     "id": "sizes",
+     "label": "Formaten en prijzen ophalen",
+     "ok": true,
+     "detail": "2 formaten"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten voor servers maken",
+     "ok": true,
+     "detail": "Recht InstancesFullAccess gevonden"
+    }
+   ]
+  },
+  {
+   "name": "Scaleway servers: zonder toegangssleutel zijn de rechten onbekend",
+   "adapter": "scaleway",
+   "kind": "servers",
+   "fields": {
+    "secretKey": "11111111-2222-3333-4444-555555555555",
+    "projectId": "proj-1"
+   },
+   "routes": {
+    "GET /instance/v1/zones/nl-ams-1/servers": {
+     "status": 200,
+     "json": {
+      "servers": []
+     }
+    },
+    "GET /instance/v1/zones/nl-ams-1/products/servers": {
+     "status": 200,
+     "json": {
+      "servers": {
+       "DEV1-S": {}
+      }
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "servers",
+     "label": "Servers bekijken",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "sizes",
+     "label": "Formaten en prijzen ophalen",
+     "ok": true,
+     "detail": "1 formaten"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten voor servers maken",
+     "ok": null,
+     "detail": "Kan de aanbieder niet laten zien; blijkt bij het starten"
+    }
+   ]
+  },
+  {
+   "name": "Scaleway servers: eigenaar mag alles",
+   "adapter": "scaleway",
+   "kind": "servers",
+   "fields": {
+    "secretKey": "11111111-2222-3333-4444-555555555555",
+    "projectId": "proj-1",
+    "accessKey": "SCWAAAAAAAAAAAAAAAAA"
+   },
+   "routes": {
+    "GET /instance/v1/zones/nl-ams-1/servers": {
+     "status": 200,
+     "json": {
+      "servers": []
+     }
+    },
+    "GET /instance/v1/zones/nl-ams-1/products/servers": {
+     "status": 200,
+     "json": {
+      "servers": {}
+     }
+    },
+    "GET /iam/v1alpha1/api-keys/SCWAAAAAAAAAAAAAAAAA": {
+     "status": 200,
+     "json": {
+      "user_id": "u-9",
+      "secret_key": "11111111-2222-3333-4444-555555555555"
+     }
+    },
+    "GET /iam/v1alpha1/users/u-9": {
+     "status": 200,
+     "json": {
+      "type": "owner",
+      "organization_id": "org-1"
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "servers",
+     "label": "Servers bekijken",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "sizes",
+     "label": "Formaten en prijzen ophalen",
+     "ok": true,
+     "detail": "0 formaten"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten voor servers maken",
+     "ok": true,
+     "detail": "De sleutel hoort bij de eigenaar van het account en mag alles"
+    }
+   ]
+  },
+  {
+   "name": "Scaleway servers: sleutel onbekend",
+   "adapter": "scaleway",
+   "kind": "servers",
+   "fields": {
+    "secretKey": "fout",
+    "projectId": ""
+   },
+   "routes": {
+    "GET /instance/v1/zones/nl-ams-1/servers": {
+     "status": 401,
+     "json": {
+      "message": "authentication is denied"
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": false,
+     "detail": "Scaleway herkent deze geheime sleutel niet. Maak een nieuwe: Console → IAM → API-sleutels."
+    },
+    {
+     "id": "servers",
+     "label": "Servers bekijken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "sizes",
+     "label": "Formaten en prijzen ophalen",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten voor servers maken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    }
+   ]
+  },
+  {
+   "name": "Scaleway DNS: zone staat er, applicatie mist DomainsDNSFullAccess",
+   "adapter": "scaleway",
+   "kind": "dns",
+   "zone": "vanes.nl",
+   "fields": {
+    "secretKey": "11111111-2222-3333-4444-555555555555",
+    "accessKey": "SCWBBBBBBBBBBBBBBBBB"
+   },
+   "routes": {
+    "GET /domain/v2beta1/dns-zones?dns_zone=vanes.nl": {
+     "status": 200,
+     "json": {
+      "dns_zones": [
+       {
+        "domain": "vanes.nl",
+        "subdomain": ""
+       }
+      ]
+     }
+    },
+    "GET /iam/v1alpha1/api-keys/SCWBBBBBBBBBBBBBBBBB": {
+     "status": 200,
+     "json": {
+      "application_id": "app-1"
+     }
+    },
+    "GET /iam/v1alpha1/applications/app-1": {
+     "status": 200,
+     "json": {
+      "organization_id": "org-1"
+     }
+    },
+    "GET /iam/v1alpha1/groups?organization_id=org-1&application_ids=app-1&page_size=100": {
+     "status": 200,
+     "json": {
+      "groups": []
+     }
+    },
+    "GET /iam/v1alpha1/policies?organization_id=org-1&application_ids=app-1&page_size=100": {
+     "status": 200,
+     "json": {
+      "policies": [
+       {
+        "id": "p-3"
+       }
+      ]
+     }
+    },
+    "GET /iam/v1alpha1/rules?policy_id=p-3&page_size=100": {
+     "status": 200,
+     "json": {
+      "rules": [
+       {
+        "permission_set_names": [
+         "InstancesFullAccess"
+        ],
+        "organization_id": "org-1"
+       }
+      ]
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "zone",
+     "label": "DNS-zone bekijken",
+     "ok": true,
+     "detail": "vanes.nl gevonden"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten om DNS te wijzigen",
+     "ok": false,
+     "detail": "De sleutel mist het recht DomainsDNSFullAccess. Voeg het toe: Console → IAM → Beleid → je beleid → regel met DomainsDNSFullAccess."
+    }
+   ]
+  },
+  {
+   "name": "Scaleway DNS: mag IAM niet lezen",
+   "adapter": "scaleway",
+   "kind": "dns",
+   "zone": "vanes.nl",
+   "fields": {
+    "secretKey": "11111111-2222-3333-4444-555555555555",
+    "accessKey": "SCWBBBBBBBBBBBBBBBBB"
+   },
+   "routes": {
+    "GET /domain/v2beta1/dns-zones": {
+     "status": 403,
+     "json": {
+      "message": "permission denied"
+     }
+    },
+    "GET /iam/v1alpha1/api-keys/SCWBBBBBBBBBBBBBBBBB": {
+     "status": 403,
+     "json": {}
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "zone",
+     "label": "DNS-zone bekijken",
+     "ok": false,
+     "detail": "De sleutel mag DNS niet bekijken. Geef hem het recht DomainsDNSFullAccess: Console → IAM → Beleid."
+    },
+    {
+     "id": "rights",
+     "label": "Rechten om DNS te wijzigen",
+     "ok": null,
+     "detail": "Kan de aanbieder niet laten zien; blijkt bij het starten"
+    }
+   ]
+  },
+  {
+   "name": "UpCloud: token werkt",
+   "adapter": "upcloud",
+   "kind": "servers",
+   "fields": {
+    "token": "ucat_x"
+   },
+   "routes": {
+    "GET /1.3/account": {
+     "status": 200,
+     "json": {
+      "account": {
+       "username": "rene",
+       "credits": 1000
+      }
+     }
+    },
+    "GET /1.3/server": {
+     "status": 200,
+     "json": {
+      "servers": {
+       "server": []
+      }
+     }
+    },
+    "GET /1.3/plan": {
+     "status": 200,
+     "json": {
+      "plans": {
+       "plan": [
+        {},
+        {}
+       ]
+      }
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "servers",
+     "label": "Servers bekijken",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "sizes",
+     "label": "Formaten en prijzen ophalen",
+     "ok": true,
+     "detail": "2 formaten; prijzen geeft UpCloud niet door"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten voor servers maken",
+     "ok": null,
+     "detail": "Kan de aanbieder niet laten zien; blijkt bij het starten"
+    }
+   ]
+  },
+  {
+   "name": "UpCloud: gebruiker zonder API-toegang",
+   "adapter": "upcloud",
+   "kind": "servers",
+   "fields": {
+    "username": "rene",
+    "password": "geheim"
+   },
+   "routes": {
+    "GET /1.3/account": {
+     "status": 403,
+     "json": {
+      "error": {
+       "error_code": "API_ACCESS_DENIED"
+      }
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": false,
+     "detail": "UpCloud staat API-toegang voor dit account niet toe. Zet bij Account → Permissions 'API-toegang' aan."
+    },
+    {
+     "id": "servers",
+     "label": "Servers bekijken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "sizes",
+     "label": "Formaten en prijzen ophalen",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten voor servers maken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    }
+   ]
+  },
+  {
+   "name": "Exoscale servers: rol mag niets met Compute",
+   "adapter": "exoscale",
+   "kind": "servers",
+   "fields": {
+    "apiKey": "EXOkey",
+    "apiSecret": "geheim"
+   },
+   "routes": {
+    "GET /v2/instance": {
+     "status": 200,
+     "json": {
+      "instances": []
+     }
+    },
+    "GET /v2/instance-type": {
+     "status": 200,
+     "json": {
+      "instance-types": [
+       {},
+       {},
+       {}
+      ]
+     }
+    },
+    "GET /v2/api-key/EXOkey": {
+     "status": 200,
+     "json": {
+      "key": "EXOkey",
+      "name": "eigen",
+      "role-id": "r-1"
+     }
+    },
+    "GET /v2/iam-role/r-1": {
+     "status": 200,
+     "json": {
+      "id": "r-1",
+      "name": "alleen-dns",
+      "policy": {
+       "default-service-strategy": "deny",
+       "services": {
+        "dns": {
+         "type": "allow"
+        }
+       }
+      }
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "servers",
+     "label": "Servers bekijken",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "sizes",
+     "label": "Formaten en prijzen ophalen",
+     "ok": true,
+     "detail": "3 formaten; prijzen geeft Exoscale niet door"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten voor servers maken",
+     "ok": false,
+     "detail": "De rol 'alleen-dns' mag niets met Compute. Pas de rol aan: Portal → IAM → Rollen → Compute toestaan."
+    }
+   ]
+  },
+  {
+   "name": "Exoscale servers: sleutel geweigerd",
+   "adapter": "exoscale",
+   "kind": "servers",
+   "fields": {
+    "apiKey": "EXOkey",
+    "apiSecret": "geheim"
+   },
+   "routes": {
+    "GET /v2/instance": {
+     "status": 403,
+     "json": {
+      "message": "Invalid request signature"
+     }
+    },
+    "GET /v2/api-key/EXOkey": {
+     "status": 403,
+     "json": {}
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": false,
+     "detail": "Exoscale weigert deze sleutel. Controleer sleutel en geheim (Portal → IAM → API-sleutels), en of de rol van de sleutel Compute mag gebruiken."
+    },
+    {
+     "id": "servers",
+     "label": "Servers bekijken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "sizes",
+     "label": "Formaten en prijzen ophalen",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten voor servers maken",
+     "ok": null,
+     "detail": "Kan de aanbieder niet laten zien; blijkt bij het starten"
+    }
+   ]
+  },
+  {
+   "name": "Exoscale DNS: zone nog niet aangemaakt, rol met eigen regels",
+   "adapter": "exoscale",
+   "kind": "dns",
+   "zone": "vanes.nl",
+   "fields": {
+    "apiKey": "EXOkey",
+    "apiSecret": "geheim"
+   },
+   "routes": {
+    "GET /v2/dns-domain": {
+     "status": 200,
+     "json": {
+      "dns-domains": [
+       {
+        "id": "d-1",
+        "unicode-name": "elders.nl"
+       }
+      ]
+     }
+    },
+    "GET /v2/api-key/EXOkey": {
+     "status": 200,
+     "json": {
+      "role-id": "r-2"
+     }
+    },
+    "GET /v2/iam-role/r-2": {
+     "status": 200,
+     "json": {
+      "name": "netwerk",
+      "policy": {
+       "default-service-strategy": "deny",
+       "services": {
+        "dns": {
+         "type": "rules",
+         "rules": [
+          {
+           "action": "allow",
+           "expression": "operation.startsWith('get-')"
+          }
+         ]
+        }
+       }
+      }
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "zone",
+     "label": "DNS-zone bekijken",
+     "ok": null,
+     "detail": "vanes.nl staat er nog niet; de console maakt hem aan bij het koppelen (daarvoor heb je een DNS-abonnement bij Exoscale nodig)."
+    },
+    {
+     "id": "rights",
+     "label": "Rechten om DNS te wijzigen",
+     "ok": null,
+     "detail": "De rol 'netwerk' heeft eigen regels voor DNS; of dat genoeg is, blijkt bij het starten."
+    }
+   ]
+  },
+  {
+   "name": "OVHcloud servers: recht om servers te verwijderen ontbreekt",
+   "adapter": "ovh",
+   "kind": "servers",
+   "fields": {
+    "appKey": "ak-123",
+    "appSecret": "as-geheim",
+    "consumerKey": "ck-456",
+    "projectId": "proj-789"
+   },
+   "routes": {
+    "GET /1.0/auth/time": {
+     "status": 200,
+     "json": 1700000000
+    },
+    "GET /1.0/auth/currentCredential": {
+     "status": 200,
+     "json": {
+      "credentialId": 1,
+      "status": "validated",
+      "rules": [
+       {
+        "method": "GET",
+        "path": "/cloud/project/*"
+       },
+       {
+        "method": "POST",
+        "path": "/cloud/project/*/instance"
+       }
+      ]
+     }
+    },
+    "GET /1.0/cloud/project/proj-789": {
+     "status": 200,
+     "json": {
+      "project_id": "proj-789",
+      "description": "Mijn project"
+     }
+    },
+    "GET /1.0/cloud/project/proj-789/instance": {
+     "status": 200,
+     "json": []
+    },
+    "GET /1.0/cloud/project/proj-789/flavor?region=GRA11": {
+     "status": 200,
+     "json": [
+      {},
+      {}
+     ]
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "project",
+     "label": "Project bekijken",
+     "ok": true,
+     "detail": "Mijn project"
+    },
+    {
+     "id": "servers",
+     "label": "Servers bekijken",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "sizes",
+     "label": "Formaten en prijzen ophalen",
+     "ok": true,
+     "detail": "2 formaten"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten voor servers maken",
+     "ok": false,
+     "detail": "Deze rechten ontbreken: DELETE /cloud/project/proj-789/instance/*. Maak nieuwe sleutels via eu.api.ovh.com/createToken met GET/POST/DELETE op /cloud/project/*."
+    }
+   ]
+  },
+  {
+   "name": "OVHcloud servers: consumer key nog niet bevestigd",
+   "adapter": "ovh",
+   "kind": "servers",
+   "fields": {
+    "appKey": "ak-123",
+    "appSecret": "as-geheim",
+    "consumerKey": "ck-456",
+    "projectId": "proj-789"
+   },
+   "routes": {
+    "GET /1.0/auth/time": {
+     "status": 200,
+     "json": 1700000000
+    },
+    "GET /1.0/auth/currentCredential": {
+     "status": 200,
+     "json": {
+      "status": "pendingValidation",
+      "rules": []
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": false,
+     "detail": "De consumer key is nog niet bevestigd (status: pendingValidation). Open de bevestigingslink die je kreeg, of maak nieuwe sleutels via eu.api.ovh.com/createToken."
+    },
+    {
+     "id": "project",
+     "label": "Project bekijken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "servers",
+     "label": "Servers bekijken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "sizes",
+     "label": "Formaten en prijzen ophalen",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten voor servers maken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    }
+   ]
+  },
+  {
+   "name": "OVHcloud DNS: zone niet bij OVHcloud, rechten wel goed",
+   "adapter": "ovh",
+   "kind": "dns",
+   "zone": "vanes.nl",
+   "fields": {
+    "appKey": "ak-123",
+    "appSecret": "as-geheim",
+    "consumerKey": "ck-456"
+   },
+   "routes": {
+    "GET /1.0/auth/time": {
+     "status": 200,
+     "json": 1700000000
+    },
+    "GET /1.0/auth/currentCredential": {
+     "status": 200,
+     "json": {
+      "status": "validated",
+      "rules": [
+       {
+        "method": "GET",
+        "path": "/domain/zone/*"
+       },
+       {
+        "method": "POST",
+        "path": "/domain/zone/*"
+       },
+       {
+        "method": "DELETE",
+        "path": "/domain/zone/*"
+       }
+      ]
+     }
+    },
+    "GET /1.0/domain/zone/vanes.nl": {
+     "status": 404,
+     "json": {
+      "message": "This service does not exist"
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "zone",
+     "label": "DNS-zone bekijken",
+     "ok": false,
+     "detail": "Zone vanes.nl staat niet bij OVHcloud DNS. Zet hem eerst in het OVHcloud-beheer (Web Cloud → Domeinen)."
+    },
+    {
+     "id": "rights",
+     "label": "Rechten om DNS te wijzigen",
+     "ok": true,
+     "detail": "Alle benodigde rechten staan op de sleutel"
+    }
+   ]
+  },
+  {
+   "name": "OVHcloud servers: sleutels onbekend",
+   "adapter": "ovh",
+   "kind": "servers",
+   "fields": {
+    "appKey": "ak-123",
+    "appSecret": "as-geheim",
+    "consumerKey": "ck-456",
+    "projectId": "proj-789"
+   },
+   "routes": {
+    "GET /1.0/auth/time": {
+     "status": 200,
+     "json": 1700000000
+    },
+    "GET /1.0/auth/currentCredential": {
+     "status": 403,
+     "json": {
+      "errorCode": "INVALID_CREDENTIAL"
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": false,
+     "detail": "OVHcloud herkent deze sleutels niet. Maak nieuwe sleutels via eu.api.ovh.com/createToken."
+    },
+    {
+     "id": "project",
+     "label": "Project bekijken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "servers",
+     "label": "Servers bekijken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "sizes",
+     "label": "Formaten en prijzen ophalen",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten voor servers maken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    }
+   ]
+  },
+  {
+   "name": "deSEC: domein nog niet toegevoegd",
+   "adapter": "desec",
+   "kind": "dns",
+   "zone": "vanes.nl",
+   "fields": {
+    "token": "dt"
+   },
+   "routes": {
+    "GET /api/v1/domains/": {
+     "status": 200,
+     "json": []
+    },
+    "GET /api/v1/domains/vanes.nl/": {
+     "status": 404,
+     "json": {
+      "detail": "Not found."
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "zone",
+     "label": "DNS-zone bekijken",
+     "ok": null,
+     "detail": "vanes.nl staat er nog niet; de console voegt het toe bij het koppelen."
+    },
+    {
+     "id": "rights",
+     "label": "Rechten om DNS te wijzigen",
+     "ok": null,
+     "detail": "Kan de aanbieder niet laten zien; blijkt bij het starten"
+    }
+   ]
+  },
+  {
+   "name": "deSEC: gratis naam bestaat niet",
+   "adapter": "desec",
+   "kind": "dns",
+   "zone": "rene.dedyn.io",
+   "fields": {
+    "token": "dt"
+   },
+   "routes": {
+    "GET /api/v1/domains/": {
+     "status": 200,
+     "json": []
+    },
+    "GET /api/v1/domains/rene.dedyn.io/": {
+     "status": 404,
+     "json": {
+      "detail": "Not found."
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "zone",
+     "label": "DNS-zone bekijken",
+     "ok": false,
+     "detail": "rene.dedyn.io bestaat (nog) niet bij deSEC. Maak het account opnieuw aan met een andere naam."
+    },
+    {
+     "id": "rights",
+     "label": "Rechten om DNS te wijzigen",
+     "ok": null,
+     "detail": "Kan de aanbieder niet laten zien; blijkt bij het starten"
+    }
+   ]
+  },
+  {
+   "name": "deSEC: token onbekend",
+   "adapter": "desec",
+   "kind": "dns",
+   "zone": "",
+   "fields": {
+    "token": "fout"
+   },
+   "routes": {
+    "GET /api/v1/domains/": {
+     "status": 401,
+     "json": {
+      "detail": "Invalid token."
+     }
+    }
+   },
+   "expect": [
+    {
+     "id": "login",
+     "label": "Inloggen lukt",
+     "ok": false,
+     "detail": "deSEC herkent dit token niet. Maak een nieuw token op desec.io onder Token Management."
+    },
+    {
+     "id": "zone",
+     "label": "DNS-zones bekijken",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    },
+    {
+     "id": "rights",
+     "label": "Rechten om DNS te wijzigen",
+     "ok": null,
+     "detail": "Niet gecontroleerd, want inloggen lukt niet"
+    }
+   ]
+  }
+ ]
+}

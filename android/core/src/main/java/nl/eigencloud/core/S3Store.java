@@ -273,6 +273,48 @@ public final class S3Store implements ObjectStore {
         return out;
     }
 
+    /** Result of {@link #probe}: HTTP status, S3 error code ("" when none) and the number of buckets or objects. */
+    public static final class Probe {
+        public final int status;
+        public final String code;
+        public final int count;
+
+        Probe(int status, String code, int count) {
+            this.status = status;
+            this.code = code;
+            this.count = count;
+        }
+    }
+
+    private static final Pattern PROBE_CODE = Pattern.compile("<Code>([^<]+)</Code>");
+
+    /**
+     * Read-only, for "Sleutels controleren" (probe in stores.ts): ListBuckets ("buckets"), HeadBucket ("bucket") or
+     * ListObjectsV2 with one key ("objects").
+     */
+    public Probe probe(String kind) throws IOException {
+        S3Store s = this;
+        if ("buckets".equals(kind)) {
+            Map<String, Object> c = Json.copy(config);
+            c.put("bucket", "");
+            c.put("pathStyle", true);
+            c.remove("prefix");
+            s = new S3Store(c);
+        }
+        Map<String, String> q = new LinkedHashMap<>();
+        if ("objects".equals(kind)) {
+            q.put("list-type", "2");
+            q.put("max-keys", "1");
+        }
+        Http.Response r = s.req("bucket".equals(kind) ? "HEAD" : "GET", "", q, null, none());
+        String text = r.text();
+        Matcher m = PROBE_CODE.matcher(text);
+        Matcher n = Pattern.compile("buckets".equals(kind) ? "<Bucket>" : "<Contents>").matcher(text);
+        int count = 0;
+        while (n.find()) count++;
+        return new Probe(r.status, m.find() ? m.group(1) : "", count);
+    }
+
     public boolean bucketExists() throws IOException {
         Http.Response r = req("HEAD", "", none(), null, none());
         if (r.status == 404) return false;

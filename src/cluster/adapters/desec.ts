@@ -1,4 +1,5 @@
 import type { DnsProvider, ProviderAdapter } from "./types.js";
+import { L, RIGHTS_HIDDEN, failText, good, look, loginFailed, row, type KeyCheck } from "./check.js";
 
 /** Basisadres van deSEC (in tests een nepserver via EIGEN_DESEC_URL). */
 export const desecApi = () => (process.env.EIGEN_DESEC_URL ?? "https://desec.io/api/v1").replace(/\/$/, "");
@@ -16,6 +17,32 @@ export class DesecDns implements DnsProvider {
     });
     if (!r.ok) throw new Error(`deSEC ${sub}/${type}: ${r.status} ${(await r.text()).slice(0, 200)}`);
   }
+}
+
+/**
+ * GET /domains/ (inloggen; elk token mag alles lezen) en GET /domains/<zone>/. Wat een token mag schrijven (policies)
+ * kan alleen een token met beheerrechten zien (desec.readthedocs.io/en/latest/auth/tokens.html); dat blijkt dus pas
+ * bij het eerste DNS-record.
+ */
+async function desecCheck(f: Record<string, string>, zone: string): Promise<KeyCheck[]> {
+  const base = (f.api || desecApi()).replace(/\/+$/, "");
+  const h = { authorization: `Token ${f.token}` };
+  const label = zone ? L.zone : L.zones;
+  const l = await look(`${base}/domains/`, h);
+  const rest: [string, string][] = [["zone", label], ["rights", L.dnsRights]];
+  if (l.status === 401 || l.status === 403) return loginFailed("deSEC herkent dit token niet. Maak een nieuw token op desec.io onder Token Management.", rest);
+  if (!good(l.status)) return loginFailed(failText(l), rest);
+  const out = [row("login", L.login, true)];
+  if (!zone) out.push(row("zone", label, true));
+  else {
+    const d = await look(`${base}/domains/${zone}/`, h);
+    out.push(good(d.status) ? row("zone", label, true, `${zone} gevonden`)
+      : d.status !== 404 ? row("zone", label, false, failText(d))
+      : zone.endsWith(".dedyn.io") ? row("zone", label, false, `${zone} bestaat (nog) niet bij deSEC. Maak het account opnieuw aan met een andere naam.`)
+      : row("zone", label, null, `${zone} staat er nog niet; de console voegt het toe bij het koppelen.`));
+  }
+  out.push(row("rights", L.dnsRights, null, RIGHTS_HIDDEN));
+  return out;
 }
 
 /** Alleen DNS: gratis, open source, non-profit (Berlijn). De console kan ook zelf een account aanmaken. */
@@ -42,6 +69,7 @@ export const desec: ProviderAdapter = {
       return { nameservers: ["ns1.desec.io", "ns2.desec.org"] };
     },
     create: (name, f, zone) => new DesecDns(name, { token: f.token, zone, api: f.api }),
+    check: desecCheck,
     caddy: (f) => `dns desec {\n\t\t\ttoken ${f.token}\n\t\t}`,
   },
 };

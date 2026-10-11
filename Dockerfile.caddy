@@ -1,10 +1,16 @@
 # Caddy met DNS-01-modules, zodat elke node een eigen certificaat voor cloud.<domein> kan halen,
-# ook als dat domein naar meerdere servers wijst.
+# ook als dat domein naar meerdere servers wijst. Eén module per DNS-aanbieder (zie PROVIDERS.md);
+# versies vast, zodat een nieuwe build niet ongemerkt een andere module-versie meeneemt.
+#   hetzner/v2: de Cloud DNS API (api.hetzner.cloud, Hetzner Console), dezelfde als src/cluster/adapters/hetzner.ts.
+#   Exoscale ontbreekt bewust: caddy-dns/exoscale is sinds 2024 niet bijgewerkt (libdns 0.2, past niet bij Caddy 2.10+);
+#   Exoscale-domeinen krijgen hun certificaat via HTTP-01.
 FROM caddy:2-builder AS builder
 RUN xcaddy build \
-    --with github.com/caddy-dns/desec \
-    --with github.com/caddy-dns/hetzner \
-    --with github.com/caddy-dns/acmedns
+    --with github.com/caddy-dns/desec@v1.1.0 \
+    --with github.com/caddy-dns/hetzner/v2@v2.0.1 \
+    --with github.com/caddy-dns/scaleway@v0.2.2 \
+    --with github.com/caddy-dns/ovh@v1.1.0 \
+    --with github.com/caddy-dns/acmedns@v0.7.0
 
 FROM caddy:2
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy

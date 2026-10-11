@@ -8,10 +8,13 @@ import java.util.regex.Pattern;
 
 /** Scaleway (France, Netherlands, Poland): servers and DNS (adapters/scaleway.ts). Config: secretKey, projectId, imageLabel?. */
 public final class ScalewayProvider implements Provider {
-    /** The registry entry (servers, storage, DNS; no Caddy module). */
+    /** The registry entry (servers, storage, DNS with a Caddy module: needs secretKey and organizationId). */
     static final Adapters.Adapter ADAPTER = new Adapters.Adapter("scaleway",
-            new Adapters.Servers(ScalewayProvider::new, ScalewayProvider::fetchSizes), true,
-            new Adapters.Dns(ScalewayProvider::connect, (name, f, zone) -> new Dns(name, Adapters.field(f, "secretKey"), zone), null));
+            new Adapters.Servers(ScalewayProvider::new, ScalewayProvider::fetchSizes, ScalewayProvider::check), true,
+            new Adapters.Dns(ScalewayProvider::connect, (name, f, zone) -> new Dns(name, Adapters.field(f, "secretKey"), zone),
+                    f -> Json.truthy(f.get("secretKey")) && Json.truthy(f.get("organizationId"))
+                            ? "dns scaleway {\n\t\t\tsecret_key " + Adapters.fieldJs(f, "secretKey") + "\n\t\t\torganization_id " + Adapters.fieldJs(f, "organizationId") + "\n\t\t}"
+                            : "", ScalewayProvider::dnsCheck));
 
     static final String[] ZONES = {"nl-ams-1", "nl-ams-2", "nl-ams-3", "fr-par-1", "fr-par-2", "fr-par-3", "pl-waw-1", "pl-waw-2", "pl-waw-3"};
 
@@ -155,6 +158,102 @@ public final class ScalewayProvider implements Provider {
         return out;
     }
 
+    // ───────── Sleutels controleren (read-only; scalewayCheck in adapters/scaleway.ts) ─────────
+
+    static final String KEY = "Scaleway herkent deze geheime sleutel niet. Maak een nieuwe: Console → IAM → API-sleutels.";
+
+    /**
+     * The key's rights via IAM (only with the access key, SCW…, which is not among the server fields but is with
+     * Scaleway storage): API key → user (owner = everything) or application → groups → policies → rules with their
+     * permission sets. When the key may not read IAM, it is unknown.
+     */
+    static Map<String, Object> rights(Map<String, Object> f, List<String> sets, String need, String label, String project) {
+        String ak = Adapters.field(f, "accessKey");
+        if (ak.isEmpty()) return KeyCheck.row("rights", label, null, KeyCheck.RIGHTS_HIDDEN);
+        String sk = Adapters.fieldJs(f, "secretKey");
+        Map<String, String> h = Http.headers("x-auth-token", sk);
+        String iam = Endpoints.SCALEWAY + "/iam/v1alpha1";
+        KeyCheck.Look k = KeyCheck.look(iam + "/api-keys/" + Bytes.encodeURIComponent(ak), h);
+        String ks = Json.str(k.json, "secret_key");
+        if (!k.good() || (ks != null && !ks.isEmpty() && !ks.equals(sk))) return KeyCheck.row("rights", label, null, KeyCheck.RIGHTS_HIDDEN);
+        boolean user = Json.truthy(Json.path(k.json, "user_id"));
+        String param = user ? "user_ids" : "application_ids";
+        Object idv = user ? Json.path(k.json, "user_id") : Json.path(k.json, "application_id");
+        String id = idv == null ? "" : Json.jsString(idv);
+        KeyCheck.Look who = KeyCheck.look(iam + "/" + (user ? "users" : "applications") + "/" + Bytes.encodeURIComponent(id), h);
+        if (!who.good()) return KeyCheck.row("rights", label, null, KeyCheck.RIGHTS_HIDDEN);
+        if ("owner".equals(Json.str(who.json, "type"))) return KeyCheck.row("rights", label, true, "De sleutel hoort bij de eigenaar van het account en mag alles");
+        Object orgv = Json.path(who.json, "organization_id");
+        String org = Bytes.encodeURIComponent(orgv == null ? "" : Json.jsString(orgv));
+        KeyCheck.Look g = KeyCheck.look(iam + "/groups?organization_id=" + org + "&" + param + "=" + Bytes.encodeURIComponent(id) + "&page_size=100", h);
+        if (!g.good()) return KeyCheck.row("rights", label, null, KeyCheck.RIGHTS_HIDDEN);
+        List<String> owners = new ArrayList<>();
+        owners.add(param + "=" + Bytes.encodeURIComponent(id));
+        for (Object x : Json.listAt(g.json, "groups")) owners.add("group_ids=" + Bytes.encodeURIComponent(Json.jsString(Json.path(x, "id"))));
+        List<String> policies = new ArrayList<>();
+        for (String o : owners) {
+            KeyCheck.Look p = KeyCheck.look(iam + "/policies?organization_id=" + org + "&" + o + "&page_size=100", h);
+            if (!p.good()) return KeyCheck.row("rights", label, null, KeyCheck.RIGHTS_HIDDEN);
+            for (Object x : Json.listAt(p.json, "policies")) {
+                String pid = Json.jsString(Json.path(x, "id"));
+                if (!policies.contains(pid)) policies.add(pid);
+            }
+        }
+        for (String pid : policies) {
+            KeyCheck.Look r = KeyCheck.look(iam + "/rules?policy_id=" + Bytes.encodeURIComponent(pid) + "&page_size=100", h);
+            if (!r.good()) return KeyCheck.row("rights", label, null, KeyCheck.RIGHTS_HIDDEN);
+            for (Object rule : Json.listAt(r.json, "rules")) {
+                String hit = null;
+                for (Object n : Json.listAt(rule, "permission_set_names")) if (sets.contains(Json.jsString(n))) { hit = Json.jsString(n); break; }
+                boolean scope = Json.truthy(Json.path(rule, "organization_id")) || Json.truthy(Json.path(rule, "account_root_user_id")) || project.isEmpty()
+                        || Json.listAt(rule, "project_ids").contains(project);
+                if (hit != null && scope) return KeyCheck.row("rights", label, true, "Recht " + hit + " gevonden");
+            }
+        }
+        return KeyCheck.row("rights", label, false, "De sleutel mist het recht " + need + ". Voeg het toe: Console → IAM → Beleid → je beleid → regel met " + need
+                + (project.isEmpty() ? "" : " voor dit project") + ".");
+    }
+
+    /** View servers (instance API, Amsterdam 1), sizes and prices, and the rights via IAM. */
+    public static List<Object> check(Map<String, Object> f) {
+        Map<String, String> h = Http.headers("x-auth-token", Adapters.fieldJs(f, "secretKey"));
+        String base = Endpoints.SCALEWAY + "/instance/v1/zones/nl-ams-1";
+        String project = Adapters.field(f, "projectId");
+        KeyCheck.Look s = KeyCheck.look(base + "/servers?per_page=1" + (project.isEmpty() ? "" : "&project=" + Bytes.encodeURIComponent(project)), h);
+        String[] rest = {"servers", KeyCheck.SERVERS, "sizes", KeyCheck.SIZES, "rights", KeyCheck.RIGHTS};
+        if (s.status == 401) return KeyCheck.loginFailed(KEY, rest);
+        if (!s.good() && s.status != 403) return KeyCheck.loginFailed(KeyCheck.failText(s), rest);
+        List<Object> out = Json.list(KeyCheck.row("login", KeyCheck.LOGIN, true));
+        out.add(s.good() ? KeyCheck.row("servers", KeyCheck.SERVERS, true)
+                : KeyCheck.row("servers", KeyCheck.SERVERS, false, "De sleutel mag geen servers bekijken. Geef hem het recht InstancesFullAccess: Console → IAM → Beleid."));
+        KeyCheck.Look t = KeyCheck.look(base + "/products/servers?per_page=100", h);
+        out.add(t.good() ? KeyCheck.row("sizes", KeyCheck.SIZES, true, KeyCheck.count(t.json, "servers") + " formaten") : KeyCheck.row("sizes", KeyCheck.SIZES, false, KeyCheck.failText(t)));
+        out.add(rights(f, java.util.Arrays.asList("AllProductsFullAccess", "InstancesFullAccess"), "InstancesFullAccess", KeyCheck.RIGHTS, project));
+        return out;
+    }
+
+    /** View the DNS zone (Domains and DNS) and the rights via IAM. */
+    public static List<Object> dnsCheck(Map<String, Object> f, String zone) {
+        KeyCheck.Look r = KeyCheck.look(Endpoints.SCALEWAY + "/domain/v2beta1/dns-zones?" + (zone.isEmpty() ? "page_size=1" : "dns_zone=" + Bytes.encodeURIComponent(zone)),
+                Http.headers("x-auth-token", Adapters.fieldJs(f, "secretKey")));
+        String label = zone.isEmpty() ? KeyCheck.ZONES : KeyCheck.ZONE;
+        String[] rest = {"zone", label, "rights", KeyCheck.DNS_RIGHTS};
+        if (r.status == 401) return KeyCheck.loginFailed(KEY, rest);
+        if (!r.good() && r.status != 403) return KeyCheck.loginFailed(KeyCheck.failText(r), rest);
+        List<Object> out = Json.list(KeyCheck.row("login", KeyCheck.LOGIN, true));
+        boolean found = false;
+        for (Object x : Json.listAt(r.json, "dns_zones")) {
+            String sub = Json.str(x, "subdomain"), dom = Json.str(x, "domain");
+            if (zone.equals(sub != null && !sub.isEmpty() ? sub + "." + dom : dom)) found = true;
+        }
+        if (r.status == 403) out.add(KeyCheck.row("zone", label, false, "De sleutel mag DNS niet bekijken. Geef hem het recht DomainsDNSFullAccess: Console → IAM → Beleid."));
+        else if (zone.isEmpty()) out.add(KeyCheck.row("zone", label, true));
+        else if (found) out.add(KeyCheck.row("zone", label, true, zone + " gevonden"));
+        else out.add(KeyCheck.row("zone", label, false, "Zet " + zone + " eerst bij Scaleway: Console → Domains and DNS → domein toevoegen"));
+        out.add(rights(f, java.util.Arrays.asList("AllProductsFullAccess", "DomainsDNSFullAccess"), "DomainsDNSFullAccess", KeyCheck.DNS_RIGHTS, ""));
+        return out;
+    }
+
     // ───────── DNS (Domains and DNS, domain/v2beta1) ─────────
 
     /** Checks the key and that the zone is in Domains and DNS; returns its nameservers. */
@@ -168,6 +267,17 @@ public final class ScalewayProvider implements Provider {
             String sub = Json.str(z, "subdomain"), dom = Json.str(z, "domain");
             String full = sub != null && !sub.isEmpty() ? sub + "." + dom : dom;
             if (!zone.equals(full)) continue;
+            // Caddy (DNS-01) also needs the organization ID: look it up via the zone's project. The caller stores the
+            // fields after connect, so it ends up in the DNS link. On failure (e.g. no read right): HTTP-01.
+            String project = Json.str(z, "project_id");
+            if (!Json.truthy(fields.get("organizationId")) && project != null && !project.isEmpty()) {
+                try {
+                    Http.Response p = Http.request("GET", Endpoints.SCALEWAY + "/account/v3/projects/" + Bytes.encodeURIComponent(project),
+                            Http.headers("x-auth-token", Adapters.fieldJs(fields, "secretKey")), null, ProviderApi.TIMEOUT_MS);
+                    String org = p.ok() ? Json.str(Json.parse(p.text()), "organization_id") : null;
+                    if (org != null && !org.isEmpty()) fields.put("organizationId", org);
+                } catch (Exception ignored) { /* HTTP-01 */ }
+            }
             List<Object> ns = Json.listAt(z, "ns");
             if (ns.isEmpty()) ns = Json.listAt(z, "ns_default");
             List<String> out = new ArrayList<>();

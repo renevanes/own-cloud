@@ -16,7 +16,8 @@
     "dienst": "tsx src/broker/main.ts",
     "dienst:cli": "tsx src/broker/cli.ts",
     "adressen": "tsx src/adressen/main.ts",
-    "adressen:cli": "tsx src/adressen/cli.ts"
+    "adressen:cli": "tsx src/adressen/cli.ts",
+    "live-check": "tsx scripts/live-check.ts"
   },
   "keywords": [],
   "author": "",

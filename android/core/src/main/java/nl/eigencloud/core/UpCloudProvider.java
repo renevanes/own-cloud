@@ -10,7 +10,7 @@ import java.util.regex.Pattern;
 /** UpCloud (Finland; zones in Amsterdam, Frankfurt …). Config: token, or username + password; template?, sshKey?. */
 public final class UpCloudProvider implements Provider {
     /** The registry entry (servers and storage; UpCloud has no DNS service). */
-    static final Adapters.Adapter ADAPTER = new Adapters.Adapter("upcloud", new Adapters.Servers(UpCloudProvider::new, UpCloudProvider::fetchSizes), true, null);
+    static final Adapters.Adapter ADAPTER = new Adapters.Adapter("upcloud", new Adapters.Servers(UpCloudProvider::new, UpCloudProvider::fetchSizes, UpCloudProvider::check), true, null);
 
     private final Map<String, Object> cfg;
     private String base = Endpoints.UPCLOUD;
@@ -33,9 +33,13 @@ public final class UpCloudProvider implements Provider {
     @Override public String name() { return "upcloud"; }
 
     private Map<String, String> h() {
-        String auth = Json.truthy(cfg.get("token")) ? "Bearer " + Json.jsString(cfg.get("token"))
+        return Http.headers("authorization", auth(cfg), "content-type", "application/json");
+    }
+
+    /** Token (Bearer) or username and password (Basic). */
+    static String auth(Map<String, Object> cfg) {
+        return Json.truthy(cfg.get("token")) ? "Bearer " + Json.jsString(cfg.get("token"))
                 : "Basic " + Bytes.base64(Bytes.utf8(jsOrUndefined(cfg.get("username")) + ":" + jsOrUndefined(cfg.get("password"))));
-        return Http.headers("authorization", auth, "content-type", "application/json");
     }
 
     private static String jsOrUndefined(Object v) { return v == null ? "undefined" : Json.jsString(v); }
@@ -114,7 +118,7 @@ public final class UpCloudProvider implements Provider {
     /** Plans (no prices in the API: "prijs onbekend"), smallest first. */
     public static List<Catalog.SizeOption> fetchSizes(Map<String, Object> cfg, String region) throws IOException {
         List<Catalog.SizeOption> out = new ArrayList<>();
-        Object j = Catalog.getJson(Endpoints.UPCLOUD + "/plan", Http.headers("authorization", "Bearer " + Json.jsString(cfg.get("token"))));
+        Object j = Catalog.getJson(Endpoints.UPCLOUD + "/plan", Http.headers("authorization", auth(cfg)));
         for (Object p : Json.listAt(j, "plans", "plan")) {
             String name = Json.str(p, "name");
             if (name == null || !PLAN.matcher(name).find()) continue;
@@ -124,5 +128,28 @@ public final class UpCloudProvider implements Provider {
         }
         Catalog.sortByRamCpus(out);
         return out;
+    }
+
+    // ───────── Sleutels controleren (read-only; upcloudCheck in adapters/upcloud.ts) ─────────
+
+    /**
+     * GET /account (log in), /server (view servers) and /plan (sizes; this link gives no prices). UpCloud does not show
+     * what a token may do (API tokens always have API access); that shows when starting.
+     */
+    public static List<Object> check(Map<String, Object> f) {
+        Map<String, String> h = Http.headers("authorization", auth(f));
+        KeyCheck.Look a = KeyCheck.look(Endpoints.UPCLOUD + "/account", h);
+        String[] rest = {"servers", KeyCheck.SERVERS, "sizes", KeyCheck.SIZES, "rights", KeyCheck.RIGHTS};
+        if (a.status == 401) return KeyCheck.loginFailed("UpCloud herkent deze sleutel niet. Maak een nieuw token: UpCloud Hub → Account → API-tokens.", rest);
+        if (a.status == 403) return KeyCheck.loginFailed("UpCloud staat API-toegang voor dit account niet toe. Zet bij Account → Permissions 'API-toegang' aan.", rest);
+        if (!a.good()) return KeyCheck.loginFailed(KeyCheck.failText(a), rest);
+        KeyCheck.Look s = KeyCheck.look(Endpoints.UPCLOUD + "/server", h);
+        KeyCheck.Look p = KeyCheck.look(Endpoints.UPCLOUD + "/plan", h);
+        return Json.list(KeyCheck.row("login", KeyCheck.LOGIN, true),
+                s.good() ? KeyCheck.row("servers", KeyCheck.SERVERS, true)
+                        : s.status == 403 ? KeyCheck.row("servers", KeyCheck.SERVERS, false, "Dit account mag geen servers bekijken. Geef het toegang: UpCloud Hub → People → Permissions.")
+                        : KeyCheck.row("servers", KeyCheck.SERVERS, false, KeyCheck.failText(s)),
+                p.good() ? KeyCheck.row("sizes", KeyCheck.SIZES, true, KeyCheck.count(p.json, "plans", "plan") + " formaten; prijzen geeft UpCloud niet door") : KeyCheck.row("sizes", KeyCheck.SIZES, false, KeyCheck.failText(p)),
+                KeyCheck.row("rights", KeyCheck.RIGHTS, null, KeyCheck.RIGHTS_HIDDEN));
     }
 }

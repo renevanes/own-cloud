@@ -129,12 +129,16 @@ const caddyCases = [
   { ...ccBase, dns: [] },
   { ...ccBase, domain: undefined },
   { ...ccBase, dns: [{ type: "desec", name: "d" }] },
-  // Adapter-raamwerk: alleen adapters met een Caddy-module (deSEC, Hetzner) geven DNS-01; de eerste telt.
+  // Adapter-raamwerk: alleen adapters met een Caddy-module (deSEC, Hetzner, Scaleway, OVHcloud) én complete velden
+  // geven DNS-01; de eerste telt. Exoscale: HTTP-01.
   { ...ccBase, dns: [{ type: "ovh", name: "o", zone: "vanes.nl", fields: { appKey: "a", appSecret: "s", consumerKey: "c" } }] },
   { ...ccBase, dns: [{ type: "scaleway", name: "s", fields: { secretKey: "k" } }, { type: "exoscale", name: "e", fields: { apiKey: "EXO1", apiSecret: "x" } }] },
   { ...ccBase, dns: [{ type: "exoscale", name: "e", fields: { apiKey: "EXO1" } }, { type: "hetzner", name: "h", token: "ht", fields: { extra: "1" } }, { type: "desec", name: "d", token: "dt" }] },
   { ...ccBase, dns: [{ type: "onbekend", name: "x", token: "t" }, { type: "desec", name: "dienst", token: "dt", api: "https://dienst/dns" }] },
   { ...ccBase, dns: [{ type: "hetzner", name: "h" }] },
+  { ...ccBase, dns: [{ type: "scaleway", name: "s", fields: { secretKey: "k", organizationId: "org-1" } }, { type: "hetzner", name: "h", token: "ht" }] },
+  { ...ccBase, dns: [{ type: "scaleway", name: "s", fields: { secretKey: "k" } }, { type: "ovh", name: "o", fields: { appKey: "a", appSecret: "s" } }, { type: "desec", name: "d", token: "dt" }] },
+  { ...ccBase, dns: [{ type: "exoscale", name: "e", fields: { apiKey: "EXO1", apiSecret: "x" } }] },
 ] as unknown as ClusterConfig[];
 const caddyOut = caddyCases.map((cfg) => ({ cfg, out: caddyfile(cfg) }));
 

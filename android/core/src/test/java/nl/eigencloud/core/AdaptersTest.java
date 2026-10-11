@@ -538,8 +538,9 @@ public class AdaptersTest {
             if (!"sk".equals(c.headers.get("x-auth-token"))) return json(401, Json.obj());
             if (c.method.equals("GET") && c.path.equals("/scw/domain/v2beta1/dns-zones")) {
                 boolean hit = "dns_zone=vanes.nl".equals(c.query);
-                return json(Json.obj("dns_zones", hit ? Json.list(Json.obj("domain", "vanes.nl", "subdomain", "", "ns", Json.list("ns0.dom.scw.cloud", "ns1.dom.scw.cloud"))) : Json.list()));
+                return json(Json.obj("dns_zones", hit ? Json.list(Json.obj("domain", "vanes.nl", "subdomain", "", "ns", Json.list("ns0.dom.scw.cloud", "ns1.dom.scw.cloud"), "project_id", "proj-1")) : Json.list()));
             }
+            if (c.method.equals("GET") && c.path.equals("/scw/account/v3/projects/proj-1")) return json(Json.obj("id", "proj-1", "organization_id", "org-1"));
             if (c.method.equals("PATCH") && c.path.equals("/scw/domain/v2beta1/dns-zones/vanes.nl/records")) {
                 bodies.add(c.json);
                 return json(Json.obj("records", Json.list()));
@@ -547,7 +548,12 @@ public class AdaptersTest {
             return json(500, Json.obj());
         });
         Adapters.Adapter a = Adapters.get("scaleway");
-        T.eq("[ns0.dom.scw.cloud, ns1.dom.scw.cloud]", a.dns.connect.connect(Json.obj("secretKey", "sk"), "vanes.nl").toString(), "Scaleway nameservers");
+        Map<String, Object> f = Json.obj("secretKey", "sk");
+        T.eq("[ns0.dom.scw.cloud, ns1.dom.scw.cloud]", a.dns.connect.connect(f, "vanes.nl").toString(), "Scaleway nameservers");
+        T.eq("org-1", f.get("organizationId"), "organization ID looked up (Caddy DNS-01)");
+        Map<String, Object> given = Json.obj("secretKey", "sk", "organizationId", "eigen");
+        a.dns.connect.connect(given, "vanes.nl");
+        T.eq("eigen", given.get("organizationId"), "given organization ID kept");
         T.throwsWith("Domains and DNS", () -> a.dns.connect.connect(Json.obj("secretKey", "sk"), "elders.nl"), "zone missing");
         T.throwsWith("accepteert deze sleutel niet", () -> a.dns.connect.connect(Json.obj("secretKey", "fout"), "vanes.nl"), "bad key");
         DnsProvider dns = Adapters.makeDns(Json.obj("type", "scaleway", "name", "scw", "zone", "vanes.nl", "fields", Json.obj("secretKey", "sk")));
@@ -569,9 +575,15 @@ public class AdaptersTest {
         T.eq(10L, DnsProvider.parseMx("mail.x.nl.").priority, "parseMx default priority");
         T.throwsWith("Onbekende DNS-aanbieder bestaatniet", () -> Adapters.makeDns(Json.obj("type", "bestaatniet", "name", "x")).setRecords("", "A", Arrays.asList("1.1.1.1"), 300), "unknown DNS type fails on use");
         String c = CloudInit.caddyfile(Json.obj("domain", "vanes.nl", "dns", Json.list(Json.obj("type", "ovh", "name", "o", "fields", Json.obj("appKey", "a")))));
-        T.check(!c.contains("tls"), "no Caddy module for OVH: HTTP-01");
+        T.check(!c.contains("tls"), "OVH without all keys: HTTP-01");
+        c = CloudInit.caddyfile(Json.obj("domain", "vanes.nl", "dns", Json.list(Json.obj("type", "exoscale", "name", "e", "fields", Json.obj("apiKey", "EXO1", "apiSecret", "x")))));
+        T.check(!c.contains("tls"), "no Caddy module for Exoscale: HTTP-01");
         c = CloudInit.caddyfile(Json.obj("domain", "vanes.nl", "dns", Json.list(Json.obj("type", "scaleway", "name", "s"), Json.obj("type", "hetzner", "name", "h", "token", "htok"))));
-        T.check(c.contains("tls {\n\t\tdns hetzner htok\n\t}"), "first DNS link with a Caddy module");
+        T.check(c.contains("tls {\n\t\tdns hetzner htok\n\t}"), "first DNS link with a complete Caddy line");
+        c = CloudInit.caddyfile(Json.obj("domain", "vanes.nl", "dns", Json.list(Json.obj("type", "ovh", "name", "o", "fields", Json.obj("appKey", "ak", "appSecret", "as", "consumerKey", "ck")))));
+        T.check(c.contains("tls {\n\t\tdns ovh {\n\t\t\tendpoint ovh-eu\n\t\t\tapplication_key ak\n\t\t\tapplication_secret as\n\t\t\tconsumer_key ck\n\t\t}\n\t}"), "OVH DNS-01");
+        c = CloudInit.caddyfile(Json.obj("domain", "vanes.nl", "dns", Json.list(Json.obj("type", "scaleway", "name", "s", "fields", Json.obj("secretKey", "sk", "organizationId", "org-1")))));
+        T.check(c.contains("tls {\n\t\tdns scaleway {\n\t\t\tsecret_key sk\n\t\t\torganization_id org-1\n\t\t}\n\t}"), "Scaleway DNS-01");
     }
 
     // ───────── Registry ─────────

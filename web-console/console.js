@@ -129,6 +129,29 @@ async function busy(btn, fn) {
   try { return await fn(); } finally { btn.disabled = false; btn.textContent = label; }
 }
 
+// ═════════ Sleutels controleren ═════════
+
+/** Het lijstje van "Sleutels controleren": ✓ in orde, ✕ niet in orde (met wat je moet doen), ? onbekend. */
+const checkItems = (checks) => checks.map((x) => `<li class="${x.ok === true ? "" : x.ok === false ? "bad" : "unknown"}">${esc(x.label)}${x.detail ? `<small>${esc(x.detail)}</small>` : ""}</li>`).join("");
+
+/**
+ * Knop "Sleutels controleren": <button data-check-kind="servers|dns|storage" data-check-id="…" data-check-title="…"
+ * data-check-box="#id">. Alleen lezen bij de aanbieder; het resultaat komt in het vak `data-check-box`.
+ */
+const checkButton = (kind, id, title, box = "#checkBox") => `<button type="button" class="link" data-check-kind="${esc(kind)}" data-check-id="${esc(id)}" data-check-title="${esc(title)}" data-check-box="${esc(box)}">Sleutels controleren</button>`;
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest?.("[data-check-kind]");
+  if (!btn) return;
+  const box = $(btn.dataset.checkBox);
+  if (!box) return;
+  try {
+    const r = await busy(btn, () => api("/api/check", { method: "POST", body: { kind: btn.dataset.checkKind, id: btn.dataset.checkId } }));
+    const bad = r.checks.some((x) => x.ok === false);
+    box.innerHTML = `<div class="panel"><b>Sleutels van ${esc(btn.dataset.checkTitle)}</b><ul class="results">${checkItems(r.checks)}</ul>
+      <p class="muted" style="margin:0"><small>${bad ? "Pas aan wat met ✕ is gemarkeerd en koppel daarna opnieuw." : "Alleen gekeken, niets veranderd. Met ? kan de aanbieder het niet laten zien; dat blijkt bij het starten."}</small></p></div>`;
+  } catch (err) { box.innerHTML = `<p class="msg err">${esc(err.message)}</p>`; }
+});
+
 // ═════════ Start, slot, herstel ═════════
 
 function renderStart() {
@@ -802,7 +825,8 @@ function stepStores() {
     <p class="lead">Je cloud schrijft elke wijziging versleuteld weg naar opslag buiten je servers. Daaruit kan hij zich altijd herstellen, ook als alle servers weg zijn.</p>
     ${config.stores.length ? `<ul class="items">${config.stores.map((s) => `<li><span class="flag">${FLAGS[s.country] ?? "🗄️"}</span><b>${esc(s.name)}</b>
       <span class="sub">${s.purpose === "backup" ? "Back-up, onveranderbaar" : "Werkkopie"} · ${esc(s.bucket ?? s.dir ?? "")}</span>
-      <span class="end"><button class="link" data-del="${esc(s.name)}">Verwijderen</button></span></li>`).join("")}</ul>` : ""}
+      <span class="end">${s.type === "s3" ? `${checkButton("storage", s.name, s.name)} ` : ""}<button class="link" data-del="${esc(s.name)}">Verwijderen</button></span></li>`).join("")}</ul>` : ""}
+    <div id="checkBox"></div>
     <p class="verdict ${v.good ? "good" : ""}">${esc(v.text)}</p>
     <form class="panel" id="f">
       <b>Opslag toevoegen</b>
@@ -847,7 +871,7 @@ async function stepServers() {
     <p class="lead">Koppel één of meer Europese aanbieders. Daarna kies je hoe je cloud verspreid wordt; de prijzen komen rechtstreeks van de aanbieder.</p>
     <ul class="items">${offers.map((o) => `<li><span class="flag" title="Rechtsgebied">${FLAGS[o.home] ?? ""}</span>
       <b>${esc(o.name)}</b><span class="sub">${esc(o.owner)} · servers in ${[...new Set(o.regions.map((r) => `${FLAGS[r.country] ?? ""} ${r.city}`))].map(esc).join(", ")}</span>
-      <span class="end">${config.providers[o.id] ? `<span class="muted">✓ gekoppeld</span> <button class="link" data-unlink="${o.id}">Loskoppelen</button>` : `<button class="btn" data-link="${o.id}">Koppelen</button>`}</span></li>`).join("")}</ul>
+      <span class="end">${config.providers[o.id] ? `<span class="muted">✓ gekoppeld</span> ${checkButton("servers", o.id, o.name, "#linkForm")} <button class="link" data-unlink="${o.id}">Loskoppelen</button>` : `<button class="btn" data-link="${o.id}">Koppelen</button>`}</span></li>`).join("")}</ul>
     <div id="linkForm"></div>
     <h2>Hoe wil je je cloud verspreiden?</h2>
     <div class="presets">${presets.map((p) => `<button class="preset" data-preset="${p.id}" aria-pressed="${chosen === p.id}" ${p.placement.length ? "" : "disabled"}>
@@ -876,7 +900,11 @@ async function stepServers() {
           $("#lres").innerHTML = r.regions.map((x) => { const reg = o.regions.find((y) => y.id === x.region); return `<li class="${x.error ? "bad" : ""}">${esc(reg.label)}: ${x.error ? esc(x.error) : `${esc(x.data.size)} ${eur(x.data.monthly)}`}</li>`; }).join("");
           config = await api("/api/config");
           setTimeout(stepServers, 1200);
-        } catch (err) { formMsg(lf, err.message); }
+        } catch (err) {
+          formMsg(lf, err.message);
+          // Wat er precies niet klopt (alleen gelezen bij de aanbieder).
+          if (err.data?.checks) $("#lres").innerHTML = checkItems(err.data.checks);
+        }
       };
       lf.querySelector("input")?.focus();
     }
@@ -906,6 +934,7 @@ async function stepDns() {
   const offers = state.offers.dns ?? [];
   const cur = config.dnsMode && config.dnsMode !== "dienst" ? config.dnsMode : offers[0]?.id ?? "manual";
   const whoOf = (id) => offers.find((o) => o.id === id)?.name.replace(/ \(.*\)$/, "") ?? id;
+  const dnsLinked = offers.some((o) => o.id === config.dnsMode);
   root.innerHTML = wizardShell("domein", `
     <h1>Domein koppelen</h1>
     <p class="lead">${free ? `${esc(d)} komt van deSEC: gratis, open source en zonder reclame. De console maakt het account voor je aan; jij hoeft alleen een plaatje over te typen en een link in je mail aan te klikken.`
@@ -918,9 +947,11 @@ async function stepDns() {
       <p class="desecNew" style="margin:0"><button type="button" class="btn" id="newDesec">Nog geen deSEC-account? Laat de console er een maken</button></p>
       <div class="dnsFields"></div>
       <p class="muted hint" style="margin:0"></p>
+      <ul class="results" id="dres"></ul>
       <p class="msg"></p>
-      <div><button class="btn">Koppelen</button></div>
-    </form>`}
+      <div><button class="btn">Koppelen</button>${dnsLinked ? ` ${checkButton("dns", config.dnsMode, whoOf(config.dnsMode), "#dnsCheck")}` : ""}</div>
+    </form>
+    <div id="dnsCheck"></div>`}
     <div id="signup"></div>
     <div id="nsBox"></div>
     <div class="next"><button class="btn primary" id="nx" ${config.dnsMode ? "" : "disabled"}>Verder</button></div>`);
@@ -950,6 +981,7 @@ async function stepDns() {
       const m = f.mode.value;
       const o = offers.find((x) => x.id === m);
       const fields = Object.fromEntries((o?.fields ?? []).map((fl) => [fl.key, f[fl.key]?.value ?? ""]));
+      $("#dres").innerHTML = "";
       try {
         const r = await busy($("form#f > div > button", f), () => api("/api/dns", { method: "POST", body: { mode: m, token: fields.token, fields } }));
         config = await api("/api/config");
@@ -957,7 +989,10 @@ async function stepDns() {
         $("#nx").disabled = false;
         if (m === "manual") $("#nsBox").innerHTML = `<div class="note">Na het starten laat je cloud onder <b>Instellingen → Gezondheid</b> precies zien welke records je moet zetten.</div>`;
         else nsPanel(r, d, whoOf(m));
-      } catch (err) { formMsg(f, err.message); }
+      } catch (err) {
+        formMsg(f, err.message);
+        if (err.data?.checks) $("#dres").innerHTML = checkItems(err.data.checks);
+      }
     };
   }
   $("#nx").onclick = () => go(nextOf("domein"));
@@ -1600,8 +1635,23 @@ function aanbiederKlaar(box, a, msg) {
   };
 }
 
+/** Op het overzicht: alle gekoppelde sleutels (servers, DNS, opslag), elk met "Sleutels controleren". */
+function keysSection() {
+  if (!config) return "";
+  const servers = (state.offers.servers ?? []).filter((o) => config.providers[o.id]);
+  const dns = (state.offers.dns ?? []).find((o) => o.id === config.dnsMode);
+  const stores = config.stores.filter((s) => s.type === "s3");
+  if (!servers.length && !dns && !stores.length) return "";
+  const li = (flag, name, sub, btn) => `<li><span class="flag">${flag}</span><b>${esc(name)}</b><span class="sub">${esc(sub)}</span><span class="end">${btn}</span></li>`;
+  return `<div id="keys"><h2>Sleutels</h2><ul class="items">
+    ${servers.map((o) => li(FLAGS[o.home] ?? "🖥️", o.name, "Servers", checkButton("servers", o.id, o.name))).join("")}
+    ${dns ? li(FLAGS[dns.home] ?? "🌐", dns.name.replace(/ \(.*\)$/, ""), "DNS", checkButton("dns", dns.id, dns.name.replace(/ \(.*\)$/, ""))) : ""}
+    ${stores.map((s) => li(FLAGS[s.country] ?? "🗄️", s.name, s.purpose === "backup" ? "Opslag, back-up" : "Opslag, werkkopie", checkButton("storage", s.name, s.name))).join("")}
+  </ul><div id="checkBox"></div></div>`;
+}
+
 async function renderDash() {
-  root.innerHTML = `<div class="dash"><div class="mapwrap" id="map"></div><section><div id="side"><p class="muted">Status ophalen…</p></div>${config?.dienst?.orderId ? `<div id="abo"></div>` : ""}<div id="aanbieder"></div></section></div>`;
+  root.innerHTML = `<div class="dash"><div class="mapwrap" id="map"></div><section><div id="side"><p class="muted">Status ophalen…</p></div>${keysSection()}${config?.dienst?.orderId ? `<div id="abo"></div>` : ""}<div id="aanbieder"></div></section></div>`;
   if (config?.dienst?.orderId) renderAbo();
   renderAanbieder();
   const draw = async () => {

@@ -36,6 +36,12 @@ Aanbieders (servers, opslag, DNS) zijn adapters in `src/cluster/adapters/`, met 
 `src/cluster/adapters.ts`. Een nieuwe aanbieder is één bestand plus tests tegen een nagebootste API; de console en
 `catalog.json` volgen vanzelf. Het stappenplan staat in [PROVIDERS.md](PROVIDERS.md#een-aanbieder-toevoegen).
 
+Werkt een adapter ook bij de echte aanbieder? Met een eigen account controleer je dat met `npm run live-check`
+(alleen lezen: inloggen, servers en zones bekijken, rechten waar de API ze laat zien, en de formaten en prijzen per
+regio). Zet daarvoor de sleutels in omgevingsvariabelen, bijvoorbeeld `HCLOUD_TOKEN=… DOMAIN=jouwdomein.nl npm run
+live-check -- hetzner`; de lijst staat in [PROVIDERS.md](PROVIDERS.md#testen-met-een-echt-account). Vermeld de
+uitkomst (zonder sleutels) in je pull request.
+
 ## Fouten melden
 
 Open een issue op GitHub met wat je deed, wat je verwachtte en wat er gebeurde. Zet nooit sleutels, wachtwoorden of

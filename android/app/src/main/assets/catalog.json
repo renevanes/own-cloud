@@ -525,7 +525,7 @@
           "secret": true
         }
       ],
-      "keyHelp": "Je domein moet bij OVHcloud DNS staan (Web Cloud → Domeinen → DNS-zone). De sleutel heeft GET/POST/DELETE-rechten op /domain/zone/* nodig.",
+      "keyHelp": "Je domein moet bij OVHcloud DNS staan (Web Cloud → Domeinen → DNS-zone). De sleutel heeft GET/POST/DELETE-rechten op /domain/zone/* nodig; daarmee haalt je server ook zelf zijn HTTPS-certificaten.",
       "signupUrl": "https://www.ovhcloud.com/nl/public-cloud/",
       "sharesKeyWith": "ovh"
     }

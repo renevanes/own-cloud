@@ -1,5 +1,6 @@
 import type { CreateSpec, DnsProvider, Provider, ProviderAdapter, ServerInfo } from "./types.js";
 import { api, getJson } from "./http.js";
+import { L, failText, good, look, loginFailed, row, type KeyCheck } from "./check.js";
 
 // ───────── Hetzner Cloud (Duitsland, Finland) ─────────
 
@@ -74,6 +75,43 @@ export class HetznerDns implements DnsProvider {
   }
 }
 
+// ───────── Sleutels controleren (alleen lezen) ─────────
+
+const HZ = "https://api.hetzner.cloud/v1";
+const HZ_KEY = "Hetzner herkent dit token niet. Maak een nieuw token: Hetzner Console → je project → Beveiliging → API-tokens.";
+/** Hetzner heeft geen API die laat zien of een token alleen mag lezen (docs.hetzner.com: Read = alleen GET). */
+const HZ_RIGHTS = "Kan de aanbieder niet laten zien; blijkt bij het starten. Kies bij het maken van het token 'Lezen en schrijven'.";
+
+/** GET /servers (inloggen en servers bekijken), GET /server_types (formaten en prijzen). */
+async function hetznerCheck(f: Record<string, string>): Promise<KeyCheck[]> {
+  const h = { authorization: `Bearer ${f.token}` };
+  const s = await look(`${HZ}/servers?per_page=1`, h);
+  const rest: [string, string][] = [["servers", L.servers], ["sizes", L.sizes], ["rights", L.rights]];
+  if (s.status === 401) return loginFailed(HZ_KEY, rest);
+  if (!good(s.status)) return loginFailed(failText(s), rest);
+  const t = await look(`${HZ}/server_types?per_page=50`, h);
+  return [
+    row("login", L.login, true), row("servers", L.servers, true),
+    good(t.status) ? row("sizes", L.sizes, true, `${(t.json?.server_types ?? []).length} formaten`) : row("sizes", L.sizes, false, failText(t)),
+    row("rights", L.rights, null, HZ_RIGHTS),
+  ];
+}
+
+/** GET /zones?name=<zone> (Cloud API). */
+async function hetznerDnsCheck(f: Record<string, string>, zone: string): Promise<KeyCheck[]> {
+  const z = await look(`${HZ}/zones?${zone ? `name=${encodeURIComponent(zone)}` : "per_page=1"}`, { authorization: `Bearer ${f.token}` });
+  const label = zone ? L.zone : L.zones;
+  const rest: [string, string][] = [["zone", label], ["rights", L.dnsRights]];
+  if (z.status === 401) return loginFailed(HZ_KEY, rest);
+  if (!good(z.status)) return loginFailed(`${failText(z)}. Staat je DNS nog in de oude DNS-console? Verhuis de zone naar de Hetzner Console.`, rest);
+  const found = (z.json?.zones ?? []).length > 0;
+  return [
+    row("login", L.login, true),
+    !zone ? row("zone", label, true) : found ? row("zone", label, true, `${zone} gevonden`) : row("zone", label, false, `Maak eerst de zone ${zone} aan in de Hetzner Console → DNS`),
+    row("rights", L.dnsRights, null, HZ_RIGHTS),
+  ];
+}
+
 export const hetzner: ProviderAdapter = {
   id: "hetzner",
   name: "Hetzner Cloud",
@@ -96,6 +134,7 @@ export const hetzner: ProviderAdapter = {
         .map((t) => ({ size: t.name, label: `${t.cores} vCPU, ${t.memory} GB`, ramGb: t.memory, cpus: t.cores, monthly: Number(t.prices.find((p: any) => p.location === region).price_monthly.gross) }))
         .sort((a, b) => (a.monthly ?? 0) - (b.monthly ?? 0));
     },
+    check: hetznerCheck,
   },
   storage: {
     name: "Hetzner Object Storage",
@@ -117,6 +156,7 @@ export const hetzner: ProviderAdapter = {
       return { nameservers: j.zones[0].authoritative_nameservers?.assigned ?? ["hydrogen.ns.hetzner.com", "oxygen.ns.hetzner.com", "helium.ns.hetzner.de"] };
     },
     create: (name, f, zone) => new HetznerDns(name, { token: f.token, zone }),
+    check: hetznerDnsCheck,
     caddy: (f) => `dns hetzner ${f.token}`,
   },
 };

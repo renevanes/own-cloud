@@ -1,5 +1,6 @@
 import type { CreateSpec, Provider, ProviderAdapter, ServerInfo } from "./types.js";
 import { api, getJson } from "./http.js";
+import { L, RIGHTS_HIDDEN, failText, good, look, loginFailed, row, type KeyCheck } from "./check.js";
 
 // ───────── UpCloud (Finland, met zones in o.a. Amsterdam en Frankfurt) ─────────
 
@@ -62,6 +63,33 @@ export class UpCloudProvider implements Provider {
   }
 }
 
+/** Token (Bearer) of gebruikersnaam en wachtwoord (Basic), zoals UpCloudProvider. */
+const upcAuth = (f: Record<string, string>) => f.token ? `Bearer ${f.token}` : "Basic " + Buffer.from(`${f.username}:${f.password}`).toString("base64");
+
+const UPC = "https://api.upcloud.com/1.3";
+
+/**
+ * GET /account (inloggen), /server (servers bekijken) en /plan (formaten; prijzen geeft deze koppeling niet).
+ * UpCloud laat niet zien wat een token mag (developers.upcloud.com/1.3/3-accounts: API-tokens hebben altijd
+ * API-toegang); dat blijkt bij het starten.
+ */
+async function upcloudCheck(f: Record<string, string>): Promise<KeyCheck[]> {
+  const h = { authorization: upcAuth(f) };
+  const a = await look(`${UPC}/account`, h);
+  const rest: [string, string][] = [["servers", L.servers], ["sizes", L.sizes], ["rights", L.rights]];
+  if (a.status === 401) return loginFailed("UpCloud herkent deze sleutel niet. Maak een nieuw token: UpCloud Hub → Account → API-tokens.", rest);
+  if (a.status === 403) return loginFailed("UpCloud staat API-toegang voor dit account niet toe. Zet bij Account → Permissions 'API-toegang' aan.", rest);
+  if (!good(a.status)) return loginFailed(failText(a), rest);
+  const s = await look(`${UPC}/server`, h);
+  const p = await look(`${UPC}/plan`, h);
+  return [
+    row("login", L.login, true),
+    good(s.status) ? row("servers", L.servers, true) : s.status === 403 ? row("servers", L.servers, false, "Dit account mag geen servers bekijken. Geef het toegang: UpCloud Hub → People → Permissions.") : row("servers", L.servers, false, failText(s)),
+    good(p.status) ? row("sizes", L.sizes, true, `${(p.json?.plans?.plan ?? []).length} formaten; prijzen geeft UpCloud niet door`) : row("sizes", L.sizes, false, failText(p)),
+    row("rights", L.rights, null, RIGHTS_HIDDEN),
+  ];
+}
+
 export const upcloud: ProviderAdapter = {
   id: "upcloud",
   name: "UpCloud",
@@ -79,12 +107,13 @@ export const upcloud: ProviderAdapter = {
     ],
     create: (f) => new UpCloudProvider(f as never),
     async fetchSizes(cfg) {
-      const j = await getJson("https://api.upcloud.com/1.3/plan", { authorization: `Bearer ${cfg.token}` });
+      const j = await getJson(`${UPC}/plan`, { authorization: upcAuth(cfg) });
       return (j.plans.plan as any[])
         .filter((p) => /^\d+xCPU-\d+GB$/.test(p.name))
         .map((p) => ({ size: p.name, label: `${p.core_number} vCPU, ${p.memory_amount / 1024} GB`, ramGb: p.memory_amount / 1024, cpus: p.core_number, monthly: null }))
         .sort((a, b) => a.ramGb - b.ramGb || a.cpus - b.cpus);
     },
+    check: upcloudCheck,
   },
   storage: {
     name: "UpCloud Object Storage",

@@ -36,10 +36,14 @@ public final class OvhProvider implements Provider {
         return l;
     }
 
-    /** The registry entry (servers, storage, DNS; no Caddy module, no reverse DNS via the API). */
+    /** The registry entry (servers, storage, DNS with a Caddy module; no reverse DNS via the API). */
     static final Adapters.Adapter ADAPTER = new Adapters.Adapter("ovh",
-            new Adapters.Servers(OvhProvider::new, OvhProvider::fetchSizes), true,
-            new Adapters.Dns(OvhProvider::connect, Dns::new, null));
+            new Adapters.Servers(OvhProvider::new, OvhProvider::fetchSizes, OvhProvider::check), true,
+            new Adapters.Dns(OvhProvider::connect, Dns::new,
+                    f -> Json.truthy(f.get("appKey")) && Json.truthy(f.get("appSecret")) && Json.truthy(f.get("consumerKey"))
+                            ? "dns ovh {\n\t\t\tendpoint ovh-eu\n\t\t\tapplication_key " + Adapters.fieldJs(f, "appKey") + "\n\t\t\tapplication_secret " + Adapters.fieldJs(f, "appSecret")
+                                    + "\n\t\t\tconsumer_key " + Adapters.fieldJs(f, "consumerKey") + "\n\t\t}"
+                            : "", OvhProvider::dnsCheck));
 
     /** "$1$" + sha1_hex(AS+CK+METHOD+URL+BODY+TS joined with "+") (ovhSign). */
     public static String sign(String appSecret, String consumerKey, String method, String url, String body, long timestamp) {
@@ -206,6 +210,111 @@ public final class OvhProvider implements Provider {
             out.add(new Catalog.SizeOption(Json.str(f, "name"), Json.jsString(vcpus) + " vCPU, " + Json.jsString(ram) + " GB", Catalog.d(ram), Catalog.d(vcpus), monthly));
         }
         Catalog.sortBy(out, s -> s.monthly != null ? s.monthly : s.ramGb * 3);
+        return out;
+    }
+
+    // ───────── Sleutels controleren (read-only; ovhCheck in adapters/ovh.ts) ─────────
+
+    static final String KEY = "OVHcloud herkent deze sleutels niet. Maak nieuwe sleutels via eu.api.ovh.com/createToken.";
+    static final String NO_PROJECT = "Niet gecontroleerd zonder project-ID";
+
+    /** Signed GETs with the server's clock (GET /auth/time); return status and answer, never throw. */
+    static final class Looker {
+        private final Map<String, Object> cfg;
+        private final String base = Endpoints.OVH.replaceAll("/$", "");
+        private final long delta;
+
+        Looker(Map<String, Object> cfg) {
+            this.cfg = cfg;
+            KeyCheck.Look t = KeyCheck.look(base + "/auth/time", null);
+            delta = t.good() && t.json instanceof Number ? ((Number) t.json).longValue() - System.currentTimeMillis() / 1000 : 0;
+        }
+
+        KeyCheck.Look get(String pathq) {
+            String url = base + pathq;
+            long ts = System.currentTimeMillis() / 1000 + delta;
+            return KeyCheck.look(url, Http.headers("X-Ovh-Application", Adapters.fieldJs(cfg, "appKey"), "X-Ovh-Consumer", Adapters.fieldJs(cfg, "consumerKey"),
+                    "X-Ovh-Timestamp", Long.toString(ts), "X-Ovh-Signature", sign(Adapters.fieldJs(cfg, "appSecret"), Adapters.fieldJs(cfg, "consumerKey"), "GET", url, "", ts)));
+        }
+    }
+
+    /** GET /auth/currentCredential: does the key work, is it validated, and which rights (rules) does it have. */
+    private static Object[] login(Looker get) {
+        KeyCheck.Look c = get.get("/auth/currentCredential");
+        if (c.status == 400 || c.status == 401 || c.status == 403) return new Object[] {KEY, null};
+        if (!c.good()) return new Object[] {KeyCheck.failText(c), null};
+        if (!"validated".equals(Json.path(c.json, "status"))) {
+            Object st = Json.path(c.json, "status");
+            return new Object[] {"De consumer key is nog niet bevestigd (status: " + (st == null ? "onbekend" : Json.jsString(st))
+                    + "). Open de bevestigingslink die je kreeg, of maak nieuwe sleutels via eu.api.ovh.com/createToken.", null};
+        }
+        return new Object[] {null, Json.listAt(c.json, "rules")};
+    }
+
+    /** Which of the needed rights {method, example path, as shown} the key lacks. */
+    private static Map<String, Object> missing(List<Object> rules, String[][] need, String label, String how) {
+        List<String> miss = new ArrayList<>();
+        for (String[] n : need) if (!KeyCheck.ruleCovers(rules, n[0], n[1])) miss.add(n[0] + " " + n[2]);
+        return miss.isEmpty() ? KeyCheck.row("rights", label, true, "Alle benodigde rechten staan op de sleutel")
+                : KeyCheck.row("rights", label, false, "Deze rechten ontbreken: " + String.join(", ", miss) + ". Maak nieuwe sleutels via eu.api.ovh.com/createToken met " + how + ".");
+    }
+
+    /** Key, project, view servers, sizes (GRA11) and the rights from the key itself (rules). */
+    @SuppressWarnings("unchecked")
+    public static List<Object> check(Map<String, Object> f) {
+        Looker get = new Looker(f);
+        Object[] login = login(get);
+        if (login[0] != null) return KeyCheck.loginFailed((String) login[0], "project", KeyCheck.PROJECT, "servers", KeyCheck.SERVERS, "sizes", KeyCheck.SIZES, "rights", KeyCheck.RIGHTS);
+        List<Object> out = Json.list(KeyCheck.row("login", KeyCheck.LOGIN, true));
+        String pid = Adapters.field(f, "projectId");
+        if (pid.isEmpty()) {
+            out.add(KeyCheck.row("project", KeyCheck.PROJECT, false, "Vul het project-ID van je Public Cloud-project in"));
+            out.add(KeyCheck.row("servers", KeyCheck.SERVERS, null, NO_PROJECT));
+            out.add(KeyCheck.row("sizes", KeyCheck.SIZES, null, NO_PROJECT));
+            out.add(KeyCheck.row("rights", KeyCheck.RIGHTS, null, NO_PROJECT));
+            return out;
+        }
+        String p = "/cloud/project/" + Bytes.encodeURIComponent(pid);
+        KeyCheck.Look pr = get.get(p);
+        Object desc = Json.path(pr.json, "description");
+        out.add(pr.good() ? KeyCheck.row("project", KeyCheck.PROJECT, true, desc == null ? "" : Json.jsString(desc))
+                : pr.status == 404 ? KeyCheck.row("project", KeyCheck.PROJECT, false, "Dit project bestaat niet (of hoort bij een ander account). Het project-ID staat bovenaan in je Public Cloud-project.")
+                : pr.status == 403 ? KeyCheck.row("project", KeyCheck.PROJECT, false, "De sleutels mogen dit project niet bekijken (recht GET /cloud/project/* ontbreekt).")
+                : KeyCheck.row("project", KeyCheck.PROJECT, false, KeyCheck.failText(pr)));
+        KeyCheck.Look s = get.get(p + "/instance");
+        out.add(s.good() ? KeyCheck.row("servers", KeyCheck.SERVERS, true)
+                : s.status == 403 ? KeyCheck.row("servers", KeyCheck.SERVERS, false, "De sleutels mogen de servers van dit project niet bekijken (recht GET /cloud/project/* ontbreekt).")
+                : KeyCheck.row("servers", KeyCheck.SERVERS, false, KeyCheck.failText(s)));
+        KeyCheck.Look fl = get.get(p + "/flavor?region=GRA11");
+        out.add(fl.good() ? KeyCheck.row("sizes", KeyCheck.SIZES, true, (fl.json instanceof List ? ((List<Object>) fl.json).size() : 0) + " formaten") : KeyCheck.row("sizes", KeyCheck.SIZES, false, KeyCheck.failText(fl)));
+        out.add(missing((List<Object>) login[1], new String[][] {
+                {"GET", "/cloud/project/" + pid + "/instance", "/cloud/project/" + pid + "/*"},
+                {"POST", "/cloud/project/" + pid + "/instance", "/cloud/project/" + pid + "/instance"},
+                {"DELETE", "/cloud/project/" + pid + "/instance/x", "/cloud/project/" + pid + "/instance/*"}}, KeyCheck.RIGHTS, "GET/POST/DELETE op /cloud/project/*"));
+        return out;
+    }
+
+    /** Key, view the zone and the rights on /domain/zone from the key itself. */
+    @SuppressWarnings("unchecked")
+    public static List<Object> dnsCheck(Map<String, Object> f, String zone) {
+        Looker get = new Looker(f);
+        String label = zone.isEmpty() ? KeyCheck.ZONES : KeyCheck.ZONE;
+        Object[] login = login(get);
+        if (login[0] != null) return KeyCheck.loginFailed((String) login[0], "zone", label, "rights", KeyCheck.DNS_RIGHTS);
+        List<Object> out = Json.list(KeyCheck.row("login", KeyCheck.LOGIN, true));
+        KeyCheck.Look z = get.get(zone.isEmpty() ? "/domain/zone" : "/domain/zone/" + Bytes.encodeURIComponent(zone));
+        out.add(z.good() ? KeyCheck.row("zone", label, true, zone.isEmpty() ? "" : zone + " gevonden")
+                : z.status == 404 ? KeyCheck.row("zone", label, false, "Zone " + zone + " staat niet bij OVHcloud DNS. Zet hem eerst in het OVHcloud-beheer (Web Cloud → Domeinen).")
+                : z.status == 403 ? KeyCheck.row("zone", label, false, "De sleutels mogen deze zone niet bekijken (recht GET /domain/zone/* ontbreekt).")
+                : KeyCheck.row("zone", label, false, KeyCheck.failText(z)));
+        if (zone.isEmpty()) {
+            out.add(KeyCheck.row("rights", KeyCheck.DNS_RIGHTS, null, "Niet gecontroleerd zonder domein"));
+            return out;
+        }
+        out.add(missing((List<Object>) login[1], new String[][] {
+                {"GET", "/domain/zone/" + zone + "/record", "/domain/zone/" + zone + "/*"},
+                {"POST", "/domain/zone/" + zone + "/record", "/domain/zone/" + zone + "/*"},
+                {"DELETE", "/domain/zone/" + zone + "/record/1", "/domain/zone/" + zone + "/record/*"}}, KeyCheck.DNS_RIGHTS, "GET/POST/DELETE op /domain/zone/*"));
         return out;
     }
 

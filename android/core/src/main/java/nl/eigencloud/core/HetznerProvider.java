@@ -10,9 +10,9 @@ import java.util.Map;
 public final class HetznerProvider implements Provider {
     /** The registry entry (servers, storage, DNS with a Caddy module). */
     static final Adapters.Adapter ADAPTER = new Adapters.Adapter("hetzner",
-            new Adapters.Servers(HetznerProvider::new, HetznerProvider::fetchSizes), true,
+            new Adapters.Servers(HetznerProvider::new, HetznerProvider::fetchSizes, HetznerProvider::check), true,
             new Adapters.Dns(HetznerProvider::connect, (name, f, zone) -> new Dns(name, Adapters.field(f, "token"), zone),
-                    f -> "dns hetzner " + Adapters.fieldJs(f, "token")));
+                    f -> "dns hetzner " + Adapters.fieldJs(f, "token"), HetznerProvider::dnsCheck));
 
     private final Map<String, Object> cfg;
     private String base = Endpoints.HETZNER;
@@ -108,6 +108,40 @@ public final class HetznerProvider implements Provider {
         }
         Catalog.sortBy(out, s -> s.monthly != null ? s.monthly : 0);
         return out;
+    }
+
+    // ───────── Sleutels controleren (read-only; hetznerCheck in adapters/hetzner.ts) ─────────
+
+    static final String KEY = "Hetzner herkent dit token niet. Maak een nieuw token: Hetzner Console → je project → Beveiliging → API-tokens.";
+    /** Hetzner has no API showing whether a token may only read (docs.hetzner.com: Read = only GET). */
+    static final String RIGHTS = "Kan de aanbieder niet laten zien; blijkt bij het starten. Kies bij het maken van het token 'Lezen en schrijven'.";
+
+    /** GET /servers (log in, view servers), GET /server_types (sizes and prices). */
+    public static List<Object> check(Map<String, Object> f) {
+        Map<String, String> h = Http.headers("authorization", "Bearer " + Adapters.fieldJs(f, "token"));
+        KeyCheck.Look s = KeyCheck.look(Endpoints.HETZNER + "/servers?per_page=1", h);
+        String[] rest = {"servers", KeyCheck.SERVERS, "sizes", KeyCheck.SIZES, "rights", KeyCheck.RIGHTS};
+        if (s.status == 401) return KeyCheck.loginFailed(KEY, rest);
+        if (!s.good()) return KeyCheck.loginFailed(KeyCheck.failText(s), rest);
+        KeyCheck.Look t = KeyCheck.look(Endpoints.HETZNER + "/server_types?per_page=50", h);
+        return Json.list(KeyCheck.row("login", KeyCheck.LOGIN, true), KeyCheck.row("servers", KeyCheck.SERVERS, true),
+                t.good() ? KeyCheck.row("sizes", KeyCheck.SIZES, true, KeyCheck.count(t.json, "server_types") + " formaten") : KeyCheck.row("sizes", KeyCheck.SIZES, false, KeyCheck.failText(t)),
+                KeyCheck.row("rights", KeyCheck.RIGHTS, null, RIGHTS));
+    }
+
+    /** GET /zones?name=<zone> (Cloud API). */
+    public static List<Object> dnsCheck(Map<String, Object> f, String zone) {
+        KeyCheck.Look z = KeyCheck.look(Endpoints.HETZNER + "/zones?" + (zone.isEmpty() ? "per_page=1" : "name=" + Bytes.encodeURIComponent(zone)),
+                Http.headers("authorization", "Bearer " + Adapters.fieldJs(f, "token")));
+        String label = zone.isEmpty() ? KeyCheck.ZONES : KeyCheck.ZONE;
+        String[] rest = {"zone", label, "rights", KeyCheck.DNS_RIGHTS};
+        if (z.status == 401) return KeyCheck.loginFailed(KEY, rest);
+        if (!z.good()) return KeyCheck.loginFailed(KeyCheck.failText(z) + ". Staat je DNS nog in de oude DNS-console? Verhuis de zone naar de Hetzner Console.", rest);
+        boolean found = KeyCheck.count(z.json, "zones") > 0;
+        return Json.list(KeyCheck.row("login", KeyCheck.LOGIN, true),
+                zone.isEmpty() ? KeyCheck.row("zone", label, true) : found ? KeyCheck.row("zone", label, true, zone + " gevonden")
+                        : KeyCheck.row("zone", label, false, "Maak eerst de zone " + zone + " aan in de Hetzner Console → DNS"),
+                KeyCheck.row("rights", KeyCheck.DNS_RIGHTS, null, RIGHTS));
     }
 
     // ───────── DNS (Cloud API zones/rrsets) ─────────

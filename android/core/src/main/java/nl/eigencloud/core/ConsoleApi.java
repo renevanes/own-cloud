@@ -262,6 +262,15 @@ public final class ConsoleApi {
 
     private static Reply err(int status, String msg) { return new Reply(status, Json.obj("error", msg)); }
 
+    /** 400 with the error and, when checking itself works, the list of "Sleutels controleren" (checksAfter in server.ts). */
+    private Reply checksAfter(Map<String, Object> c, String error, String kind, String id, Map<String, Object> fields) {
+        try {
+            return err(400, error, "checks", KeyCheck.forConsole(c, catalog, kind, id, fields));
+        } catch (IOException | RuntimeException e) {
+            return err(400, error);
+        }
+    }
+
     /** Error reply with extra fields (e.g. the steps done so far), like {@code reply.code(400).send({error, steps})}. */
     private static Reply err(int status, String msg, Object... extra) {
         Map<String, Object> j = Json.obj("error", msg);
@@ -454,7 +463,14 @@ public final class ConsoleApi {
                 Map<String, String> fields = new HashMap<>();
                 Map<String, Object> f = Json.map(b, "fields");
                 if (f != null) for (Map.Entry<String, Object> e : f.entrySet()) fields.put(e.getKey(), Json.jsString(e.getValue()));
-                List<Console.RegionSizes> regions = Console.connectProvider(c, catalog, Json.str(b, "id"), fields);
+                List<Console.RegionSizes> regions;
+                try {
+                    regions = Console.connectProvider(c, catalog, Json.str(b, "id"), fields);
+                } catch (IOException e) {
+                    // Inloggen mislukt: de fout plus het lijstje van "Sleutels controleren" (alleen lezen).
+                    if (!String.valueOf(e.getMessage()).startsWith("Inloggen bij ")) throw e;
+                    return checksAfter(c, e.getMessage(), "servers", Json.str(b, "id"), f);
+                }
                 save();
                 List<Object> out = new ArrayList<>();
                 for (Console.RegionSizes r : regions) {
@@ -515,10 +531,24 @@ public final class ConsoleApi {
 
             case "POST /api/dns": {
                 Object tok = b.get("token");
-                DnsSetup.Result r = DnsSetup.configure(c, catalog, Json.str(b, "mode"), tok instanceof String ? (String) tok : null, Json.map(b, "fields"));
+                DnsSetup.Result r;
+                try {
+                    r = DnsSetup.configure(c, catalog, Json.str(b, "mode"), tok instanceof String ? (String) tok : null, Json.map(b, "fields"));
+                } catch (IOException | IllegalArgumentException e) {
+                    Adapters.Adapter a = Json.str(b, "mode") == null ? null : Adapters.get(Json.str(b, "mode"));
+                    if (a == null || a.dns == null || String.valueOf(e.getMessage()).startsWith("Vul ")) throw e;
+                    Map<String, Object> given = Json.obj();
+                    if (Json.map(b, "fields") != null) given.putAll(Json.map(b, "fields"));
+                    if (tok instanceof String && !((String) tok).isEmpty()) given.put("token", tok);
+                    return checksAfter(c, e.getMessage(), "dns", Json.str(b, "mode"), given);
+                }
                 save();
                 return ok(r.toJson());
             }
+            // ── Sleutels controleren (alleen lezen) ──
+            case "POST /api/check":
+                return ok(Json.obj("checks", KeyCheck.forConsole(c, catalog, Json.str(b, "kind"), Json.str(b, "id"), Json.map(b, "fields"))));
+
             case "GET /api/dns/check": {
                 List<Object> ns = Json.listAt(c, "console", "nameservers");
                 List<String> nsl = new ArrayList<>();

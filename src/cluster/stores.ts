@@ -227,6 +227,17 @@ export class S3Store implements ObjectStore {
     return [...xml.matchAll(/<Bucket>[\s\S]*?<Name>([^<]+)<\/Name>/g)].map((m) => m[1]);
   }
 
+  /**
+   * Alleen lezen, voor "Sleutels controleren": status, S3-foutcode en aantal van ListBuckets ("buckets"),
+   * HeadBucket ("bucket") of ListObjectsV2 met één sleutel ("objects").
+   */
+  async probe(kind: "buckets" | "bucket" | "objects"): Promise<{ status: number; code: string; count: number }> {
+    const s = kind === "buckets" ? new S3Store({ ...this.config, bucket: "", pathStyle: true, prefix: undefined }) : this;
+    const r = await s.req(kind === "bucket" ? "HEAD" : "GET", "", kind === "objects" ? { "list-type": "2", "max-keys": "1" } : {});
+    const text = await r.body.text();
+    return { status: r.statusCode, code: /<Code>([^<]+)<\/Code>/.exec(text)?.[1] ?? "", count: (text.match(kind === "buckets" ? /<Bucket>/g : /<Contents>/g) ?? []).length };
+  }
+
   async bucketExists(): Promise<boolean> {
     const r = await this.req("HEAD", "");
     await r.body.dump();

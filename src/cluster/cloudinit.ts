@@ -362,13 +362,19 @@ PY`;
 /** Caddyfile met DNS-01 (werkt ook als cloud.<domein> naar meerdere servers wijst). */
 export function caddyfile(c: ClusterConfig): string | null {
   if (!c.domain) return null;
-  // De eerste DNS-koppeling waarvan de adapter een Caddy-module heeft (deSEC, Hetzner). Andere aanbieders:
-  // geen DNS-01, Caddy valt terug op HTTP-01 (zie PROVIDERS.md).
-  const d = c.dns.find((x) => !!getAdapter(x.type)?.dns?.caddy);
-  // Via de Eigen Cloud Dienst: het token werkt alleen bij de dienst, dus certificaten via diens acme-dns-adres.
-  const dnsLine = d?.api && d.acme ? `dns acmedns {\n\t\t\tusername ${d.acme.username}\n\t\t\tpassword ${d.acme.password}\n\t\t\tsubdomain ${d.acme.subdomain}\n\t\t\tserver_url ${d.acme.server_url}\n\t\t}`
-    : d?.api ? ""
-    : d ? getAdapter(d.type)!.dns!.caddy!({ token: String(d.token), ...dnsFields(d) }) : "";
+  // De eerste DNS-koppeling waarvan de adapter een Caddy-module heeft (deSEC, Hetzner, Scaleway, OVHcloud) én waarvoor
+  // de velden compleet zijn. Anders (bijv. Exoscale): geen DNS-01, Caddy valt terug op HTTP-01 (zie PROVIDERS.md).
+  let d: ClusterConfig["dns"][number] | undefined;
+  let dnsLine = "";
+  for (const x of c.dns) {
+    const mod = getAdapter(x.type)?.dns?.caddy;
+    if (!mod) continue;
+    // Via de Eigen Cloud Dienst: het token werkt alleen bij de dienst, dus certificaten via diens acme-dns-adres.
+    const line = x.api && x.acme ? `dns acmedns {\n\t\t\tusername ${x.acme.username}\n\t\t\tpassword ${x.acme.password}\n\t\t\tsubdomain ${x.acme.subdomain}\n\t\t\tserver_url ${x.acme.server_url}\n\t\t}`
+      : x.api ? ""
+      : mod({ token: String(x.token), ...dnsFields(x) });
+    if (x.api || line) { d = x; dnsLine = line; break; }
+  }
   const tls = d && dnsLine ? `\ttls {\n\t\t${dnsLine}\n\t}\n` : "";
   return `{\n\temail postmaster@${c.domain}\n}\ncloud.${c.domain}, mail.${c.domain} {\n${tls}\tencode zstd gzip\n\trequest_body {\n\t\tmax_size 8GB\n\t}\n\treverse_proxy 127.0.0.1:3000\n}\n`;
 }

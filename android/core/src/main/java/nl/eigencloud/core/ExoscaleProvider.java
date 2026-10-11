@@ -34,8 +34,8 @@ public final class ExoscaleProvider implements Provider {
 
     /** The registry entry (servers, storage, DNS; no Caddy module). */
     static final Adapters.Adapter ADAPTER = new Adapters.Adapter("exoscale",
-            new Adapters.Servers(ExoscaleProvider::new, ExoscaleProvider::fetchSizes), true,
-            new Adapters.Dns(ExoscaleProvider::connect, Dns::new, null));
+            new Adapters.Servers(ExoscaleProvider::new, ExoscaleProvider::fetchSizes, ExoscaleProvider::check), true,
+            new Adapters.Dns(ExoscaleProvider::connect, Dns::new, null, ExoscaleProvider::dnsCheck));
 
     private static final String SG_NAME = "eigen-cloud";
     /** The DNS API is global; we talk to zone ch-gva-2. */
@@ -262,6 +262,65 @@ public final class ExoscaleProvider implements Provider {
         }
         Catalog.sortByRamCpus(out);
         return out;
+    }
+
+    // ───────── Sleutels controleren (read-only; exoscaleCheck in adapters/exoscale.ts) ─────────
+
+    /** Signed GET (status and answer; never throws). */
+    static KeyCheck.Look look(Map<String, Object> cfg, String zone, String pathq) {
+        String url = base(Endpoints.EXOSCALE, zone) + pathq;
+        return KeyCheck.look(url, Http.headers("authorization", sign("GET", url, "", Adapters.fieldJs(cfg, "apiKey"), Adapters.fieldJs(cfg, "apiSecret"), System.currentTimeMillis() / 1000 + 600)));
+    }
+
+    /**
+     * What the key's role may do with a service (compute or dns): GET /api-key/{key} → role-id, GET /iam-role/{id} →
+     * policy (default-service-strategy, services.<service>.type = allow | deny | rules). Rules (CEL) are not evaluated.
+     */
+    static Map<String, Object> rights(Map<String, Object> cfg, String service, String name, String label) {
+        KeyCheck.Look k = look(cfg, DNS_ZONE, "/api-key/" + Bytes.encodeURIComponent(Adapters.fieldJs(cfg, "apiKey")));
+        Object roleId = Json.path(k.json, "role-id");
+        if (!k.good() || !Json.truthy(roleId)) return KeyCheck.row("rights", label, null, KeyCheck.RIGHTS_HIDDEN);
+        KeyCheck.Look r = look(cfg, DNS_ZONE, "/iam-role/" + Bytes.encodeURIComponent(Json.jsString(roleId)));
+        if (!r.good()) return KeyCheck.row("rights", label, null, KeyCheck.RIGHTS_HIDDEN);
+        String role = Json.path(r.json, "name") == null ? "" : Json.jsString(Json.path(r.json, "name"));
+        Object type = Json.path(r.json, "policy", "services", service, "type");
+        if (type == null) type = Json.path(r.json, "policy", "default-service-strategy");
+        if ("allow".equals(type)) return KeyCheck.row("rights", label, true, "De rol '" + role + "' mag alles met " + name);
+        if ("deny".equals(type)) return KeyCheck.row("rights", label, false, "De rol '" + role + "' mag niets met " + name + ". Pas de rol aan: Portal → IAM → Rollen → " + name + " toestaan.");
+        if ("rules".equals(type)) return KeyCheck.row("rights", label, null, "De rol '" + role + "' heeft eigen regels voor " + name + "; of dat genoeg is, blijkt bij het starten.");
+        return KeyCheck.row("rights", label, null, KeyCheck.RIGHTS_HIDDEN);
+    }
+
+    /** GET /instance (log in, view servers), /instance-type (sizes; Exoscale has no price API), the role. */
+    public static List<Object> check(Map<String, Object> f) {
+        KeyCheck.Look s = look(f, DNS_ZONE, "/instance");
+        if (!s.good()) {
+            String detail = s.status == 401 || s.status == 403
+                    ? "Exoscale weigert deze sleutel. Controleer sleutel en geheim (Portal → IAM → API-sleutels), en of de rol van de sleutel Compute mag gebruiken." : KeyCheck.failText(s);
+            return Json.list(KeyCheck.row("login", KeyCheck.LOGIN, false, detail), KeyCheck.row("servers", KeyCheck.SERVERS, null, KeyCheck.NOT_CHECKED),
+                    KeyCheck.row("sizes", KeyCheck.SIZES, null, KeyCheck.NOT_CHECKED), rights(f, "compute", "Compute", KeyCheck.RIGHTS));
+        }
+        KeyCheck.Look t = look(f, DNS_ZONE, "/instance-type");
+        return Json.list(KeyCheck.row("login", KeyCheck.LOGIN, true), KeyCheck.row("servers", KeyCheck.SERVERS, true),
+                t.good() ? KeyCheck.row("sizes", KeyCheck.SIZES, true, KeyCheck.count(t.json, "instance-types") + " formaten; prijzen geeft Exoscale niet door") : KeyCheck.row("sizes", KeyCheck.SIZES, false, KeyCheck.failText(t)),
+                rights(f, "compute", "Compute", KeyCheck.RIGHTS));
+    }
+
+    /** GET /dns-domain (log in, view the zone) and the role for DNS. Does NOT create the zone (connect does). */
+    public static List<Object> dnsCheck(Map<String, Object> f, String zone) {
+        String label = zone.isEmpty() ? KeyCheck.ZONES : KeyCheck.ZONE;
+        KeyCheck.Look l = look(f, DNS_ZONE, "/dns-domain");
+        if (!l.good()) {
+            String detail = l.status == 401 || l.status == 403
+                    ? "Exoscale weigert deze sleutel voor DNS. Controleer sleutel en geheim, en of de rol van de sleutel DNS mag gebruiken." : KeyCheck.failText(l);
+            return Json.list(KeyCheck.row("login", KeyCheck.LOGIN, false, detail), KeyCheck.row("zone", label, null, KeyCheck.NOT_CHECKED), rights(f, "dns", "DNS", KeyCheck.DNS_RIGHTS));
+        }
+        boolean found = false;
+        for (Object d : Json.listAt(l.json, "dns-domains")) if (zone.equals(Json.str(d, "unicode-name"))) found = true;
+        return Json.list(KeyCheck.row("login", KeyCheck.LOGIN, true),
+                zone.isEmpty() ? KeyCheck.row("zone", label, true) : found ? KeyCheck.row("zone", label, true, zone + " gevonden")
+                        : KeyCheck.row("zone", label, null, zone + " staat er nog niet; de console maakt hem aan bij het koppelen (daarvoor heb je een DNS-abonnement bij Exoscale nodig)."),
+                rights(f, "dns", "DNS", KeyCheck.DNS_RIGHTS));
     }
 
     // ───────── DNS ─────────
