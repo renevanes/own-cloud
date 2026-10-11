@@ -21,7 +21,7 @@
         <div><button class="btn primary big">Verbinden</button></div>
       </form>
       <div class="or"><span>of</span></div>
-      <button class="choice" id="setup"><b>Nieuwe Eigen Cloud opzetten</b><span class="muted">Kies zelf waar hij draait: Hetzner, Scaleway of UpCloud. Alles vanaf deze telefoon, in ongeveer een kwartier.</span></button>
+      <button class="choice" id="setup"><b>Nieuwe Eigen Cloud opzetten</b><span class="muted">Alles vanaf deze telefoon, in ongeveer een kwartier. De app zet servers, opslag en mail voor je klaar.</span></button>
     </section>
 
     <section id="offline" hidden>
@@ -33,6 +33,50 @@
       </div>
       <p><button class="link" id="other">Ander adres gebruiken</button></p>
     </section>
+
+    <section id="about" hidden>
+      <p><button class="link" id="back">Terug</button></p>
+      <h1>Over Eigen Cloud</h1>
+      <p class="lead">Mail, agenda en foto's op servers die jij kiest, in Europa. Versleuteld met jouw sleutel, zonder reclame en zonder Google.</p>
+
+      <div class="block">
+        <h2>Versie <span id="ver"></span></h2>
+        <p id="upd" class="muted"></p>
+        <ul id="notes" class="notes" hidden></ul>
+        <label class="check"><input type="checkbox" id="autoUpd"> <span>Automatisch bijwerken</span></label>
+        <div class="actions">
+          <button class="btn primary" id="install" hidden>Nu bijwerken</button>
+          <button class="btn" id="check">Zoeken naar nieuwe versie</button>
+          <button class="btn" id="news">Wat is er nieuw</button>
+        </div>
+      </div>
+
+      <div class="block">
+        <h2>Deze telefoon</h2>
+        <dl class="facts">
+          <dt>Cloud</dt><dd id="cloud"></dd>
+          <dt>Beheer</dt><dd id="beheer"></dd>
+          <dt>Toestel</dt><dd id="device"></dd>
+        </dl>
+      </div>
+
+      <div class="block">
+        <h2>Privacy</h2>
+        <p>De app praat alleen met je eigen cloud, met de aanbieders die je zelf kiest, en met GitHub om nieuwe versies op te halen. Geen Google-diensten, geen advertenties, geen statistieken. De sleutels voor het beheer staan versleuteld op deze telefoon; schermafbeeldingen van het beheer zijn geblokkeerd.</p>
+        <p><a href="#" id="source">Broncode en alle versies</a> · <a href="#" id="manual">Handleiding</a></p>
+      </div>
+
+      <div class="block danger-zone">
+        <h2>Opnieuw instellen</h2>
+        <p class="muted">Je cloud zelf blijft altijd bestaan; dit gaat alleen over deze telefoon.</p>
+        <div class="actions">
+          <button class="btn" id="resetConsole" hidden>Beheerkluis wissen</button>
+          <button class="btn danger" id="resetAll">App helemaal opnieuw instellen</button>
+        </div>
+      </div>
+    </section>
+
+    <p class="foot"><button class="link quiet" id="aboutLink">Over Eigen Cloud · versie <span id="footVer"></span></button></p>
   </main>
   <script src="/start.js"></script>
 </body>

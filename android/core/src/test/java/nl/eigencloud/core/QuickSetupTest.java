@@ -223,6 +223,14 @@ public class QuickSetupTest {
                 e = call(409, "POST", "/api/setup/reset", Json.obj("cleanup", false));
                 T.check(Json.str(e, "error").contains("al gestart"), "409 text");
                 T.check(vaultFile.exists(), "vault kept after a launch");
+
+                // ── Wachtwoordzin vergeten: kluis wissen zonder te ontgrendelen ──
+                call(200, "POST", "/api/lock", null);
+                call(400, "POST", "/api/vault/forget", Json.obj());
+                T.check(vaultFile.exists(), "no wipe without confirm");
+                call(200, "POST", "/api/vault/forget", Json.obj("confirm", true));
+                T.check(!vaultFile.exists(), "vault wiped");
+                T.eq(false, call(200, "GET", "/api/state", null).get("vault"), "start screen again");
             } finally {
                 Endpoints.reset();
             }

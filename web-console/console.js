@@ -151,7 +151,27 @@ function renderLock() {
       ${bio.available && !bio.enrolled ? `<label class="check"><input type="checkbox" name="enroll" checked> Voortaan ontgrendelen met vingerafdruk of gezicht</label>` : ""}
       <p class="msg"></p>
       <div><button class="btn ${bio.enrolled ? "" : "primary"}">Ontgrendelen</button></div>
-    </form></section>`;
+    </form>
+    <p style="margin-top:28px"><button class="link quiet" id="forgot">Wachtwoordzin vergeten?</button></p></section>`;
+  $("#forgot").onclick = () => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "confirm";
+    dlg.innerHTML = `<h2>Wachtwoordzin vergeten</h2>
+      <p>De wachtwoordzin is nergens anders bewaard; ook wij kunnen hem niet terughalen. Je kunt de kluis op ${DEVICE} wissen en daarna opnieuw beginnen of herstellen.</p>
+      <p>Draait je cloud al? Dan blijft hij gewoon draaien. Met je <b>herstelsleutel</b> (op je herstelblad) zet je het beheer daarna terug via <i>Ik heb al een Eigen Cloud</i>.</p>
+      <p class="msg"></p>
+      <div class="row"><button class="btn danger" data-r="wipe">Kluis wissen</button><button class="btn quiet" data-r="cancel">Annuleren</button></div>`;
+    document.body.append(dlg);
+    dlg.showModal();
+    dlg.onclick = async (e) => {
+      const r = e.target.dataset?.r;
+      if (r === "cancel") { dlg.close(); dlg.remove(); }
+      if (r === "wipe") {
+        try { await busy(e.target, () => api("/api/vault/forget", { method: "POST", body: { confirm: true } })); dlg.close(); dlg.remove(); location.hash = ""; boot(); }
+        catch (err) { const m = dlg.querySelector(".msg"); m.textContent = err.message; m.className = "msg err"; }
+      }
+    };
+  };
   $("#bio")?.addEventListener("click", async (e) => {
     try { await busy(e.target, () => api("/api/unlock/biometric", { method: "POST" })); boot(); }
     catch (err) { formMsg($("#f"), err.message); }

@@ -6,3 +6,14 @@
 .or { display: flex; align-items: center; gap: 12px; color: var(--muted); margin: 26px 0; }
 .or::before, .or::after { content: ""; flex: 1; border-top: 2.5px dotted var(--trail); }
 .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+.foot { margin-top: 36px; text-align: center; font-size: 14px; }
+.link.quiet { color: var(--muted); }
+#about h2 { font-size: var(--fs-1); margin: 0 0 8px; }
+#about .block { border-top: 1px solid var(--line); padding: 18px 0 6px; }
+#about .block p { margin: 0 0 12px; }
+#about .actions { margin: 12px 0 8px; }
+#about .check { margin: 4px 0; }
+.notes { margin: 0 0 10px; padding-left: 20px; }
+.facts { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0 0 8px; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; overflow-wrap: anywhere; }

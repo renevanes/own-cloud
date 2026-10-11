@@ -323,6 +323,12 @@ public final class ConsoleApi {
                 touch();
                 return ok(Json.obj("ok", true));
             }
+            case "POST /api/vault/forget": {
+                // Wachtwoordzin vergeten: de kluis van deze telefoon wissen (herstellen kan met de herstelsleutel).
+                if (!Boolean.TRUE.equals(b.get("confirm"))) return err(400, "Bevestig dat je de kluis wilt wissen");
+                vault.destroy();
+                return ok(Json.obj("ok", true));
+            }
             case "POST /api/unlock": {
                 try {
                     vault.unlock(Json.str(b, "passphrase") == null ? "" : Json.str(b, "passphrase"));

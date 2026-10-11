@@ -390,6 +390,14 @@ export async function buildConsole() {
     }
   });
 
+  // Wachtwoordzin vergeten: de kluis van dit toestel wissen (je cloud blijft draaien; herstellen kan met de herstelsleutel).
+  app.post<{ Body: { confirm?: boolean } }>("/api/vault/forget", async (req, reply) => {
+    if (req.body?.confirm !== true) return reply.code(400).send({ error: "Bevestig dat je de kluis wilt wissen" });
+    vault.destroy();
+    session = null;
+    return { ok: true };
+  });
+
   app.post<{ Body: { passphrase: string } }>("/api/unlock", async (req, reply) => {
     try { vault.unlock(req.body?.passphrase ?? ""); } catch (e) { await new Promise((r) => setTimeout(r, 800)); return reply.code(401).send({ error: (e as Error).message }); }
     newSession(reply);

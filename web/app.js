@@ -1002,7 +1002,7 @@ function renderPhone() {
       </div>` : ""}
       <div class="row-actions">${i.updates.status.available ? `<button class="primary" id="phoneInstall">Nu bijwerken</button>` : ""}<button class="ghost" id="phoneCheck">Zoeken naar nieuwe versie</button>${typeof phone.whatsNew === "function" ? `<button class="ghost" id="phoneNews">Wat is er nieuw</button>` : ""}</div>
       ${phoneUpdateMsg || i.updates.status.error ? `<p class="phone-state${i.updates.status.error && !phoneUpdateMsg ? " warn" : ""}">${esc(phoneUpdateMsg || i.updates.status.error)}</p>` : ""}
-      <p><button class="link danger" id="phoneForget">Deze telefoon loskoppelen</button></p>
+      <p><button class="link danger" id="phoneForget">Deze telefoon loskoppelen</button>${typeof phone.resetApp === "function" ? ` · <a href="https://appassets.androidplatform.net/start.html#over">Over deze app en opnieuw instellen</a>` : ""}</p>
     </div>`;
   box.querySelectorAll("[data-flag]").forEach((el) => el.onchange = () => {
     if (el.dataset.flag === "backupPhotos" && el.checked && !b.last && !phoneAskScope) { phoneAskScope = true; return renderPhone(); }

@@ -169,4 +169,13 @@ test("één sleutel bij Scaleway: opslag, servers en mail klaar; terug en opnieu
     assert.equal(r.status, 409);
     assert.ok(fs.existsSync(process.env.EIGEN_VAULT!));
   });
+
+  await t.test("wachtwoordzin vergeten: kluis wissen zonder te ontgrendelen", async () => {
+    await c("POST", "/api/lock");
+    assert.equal((await c("POST", "/api/vault/forget", {})).status, 400);
+    assert.ok(fs.existsSync(process.env.EIGEN_VAULT!), "niet zonder bevestiging");
+    assert.equal((await c("POST", "/api/vault/forget", { confirm: true })).status, 200);
+    assert.equal(fs.existsSync(process.env.EIGEN_VAULT!), false);
+    assert.equal((await c("GET", "/api/state")).json.vault, false);
+  });
 });

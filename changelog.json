@@ -1,5 +1,15 @@
 [
   {
+    "version": "1.6",
+    "date": "2026-10-11",
+    "changes": [
+      "Nieuw: Over Eigen Cloud (onderaan het startscherm): je versie, zoeken naar een nieuwe versie, wat er nieuw is, automatisch bijwerken aan of uit, informatie over je telefoon en privacy",
+      "Opnieuw instellen vanuit de app: alleen de beheerkluis wissen, of de app helemaal leeg maken alsof hij net is geïnstalleerd (je cloud blijft bestaan)",
+      "Wachtwoordzin van het beheer vergeten? Op het slotscherm kun je de kluis wissen en daarna met je herstelsleutel terugzetten",
+      "Ook vanuit je cloud (Instellingen → Telefoon) kom je bij Over deze app"
+    ]
+  },
+  {
     "version": "1.5",
     "date": "2026-10-11",
     "changes": [

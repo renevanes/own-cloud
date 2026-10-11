@@ -254,7 +254,8 @@ public final class MainActivity extends Activity {
                     "wifiOnly", Prefs.flag(c, Prefs.BACKUP_WIFI_ONLY), "chargingOnly", Prefs.flag(c, Prefs.BACKUP_CHARGING_ONLY),
                     "permitted", PhotoBackup.permitted(c), "pending", Prefs.flag(c, Prefs.BACKUP_PHOTOS) ? PhotoBackup.pending(c) : null,
                     "last", Prefs.num(c, "backup.last"), "state", Prefs.str(c, "backup.state"), "blocker", Prefs.flag(c, Prefs.BACKUP_PHOTOS) ? PhotoBackup.blocker(c) : null);
-            return Json.stringify(Json.obj("version", BuildConfig.VERSION_NAME, "cloud", cloud,
+            return Json.stringify(Json.obj("version", BuildConfig.VERSION_NAME, "versionCode", BuildConfig.VERSION_CODE, "repo", BuildConfig.UPDATE_REPO,
+                    "android", android.os.Build.VERSION.RELEASE, "device", android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL, "cloud", cloud,
                     "backgroundLogin", cloud != null && CloudApi.sessionToken(cloud) != null,
                     "backup", backup,
                     "calendar", Json.obj("on", Prefs.flag(c, Prefs.CALENDAR), "permitted", CalendarSync.permitted(c), "last", Prefs.num(c, "calendar.last"),
@@ -365,6 +366,31 @@ public final class MainActivity extends Activity {
         public void retry() {
             if (!trusted()) return;
             main.post(() -> open(null));
+        }
+
+        /**
+         * Opnieuw instellen. "console": alleen de beheerkluis van deze telefoon wissen (met je herstelsleutel haal je
+         * hem terug). "all": de app helemaal leeg, alsof hij net is geïnstalleerd. Je cloud zelf blijft altijd bestaan.
+         */
+        @JavascriptInterface
+        public void resetApp(String scope) {
+            if (!trusted()) return;
+            main.post(() -> {
+                MainActivity c = MainActivity.this;
+                ConsoleBackend.get(c).vault.destroy();
+                Biometrics.forget(c);
+                if ("all".equals(scope)) {
+                    c.getSystemService(android.app.job.JobScheduler.class).cancelAll();
+                    new Thread(() -> CalendarSync.remove(c)).start();
+                    Prefs.get(c).edit().clear().apply();
+                    CookieManager.getInstance().removeAllCookies(null);
+                    android.webkit.WebStorage.getInstance().deleteAllData();
+                    c.getSystemService(android.app.NotificationManager.class).cancelAll();
+                    SyncJob.schedule(c); // updates van de app blijven komen
+                }
+                web.clearHistory();
+                web.loadUrl(Assets.ORIGIN + "/start.html");
+            });
         }
 
         /** Loskoppelen: vergeet het adres en de sessie op deze telefoon (je cloud zelf blijft gewoon bestaan). */
