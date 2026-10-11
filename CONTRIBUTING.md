@@ -30,6 +30,12 @@ Draai je een Eigen Cloud Dienst, dan kun je in de app op de lijst komen:
 Velden: `naam`, `url` (het https-adres van je dienst), `land`, `contact`, `omschrijving`, `sleutel` (publieke
 Ed25519-sleutel van je dienst, voor de gedeelde adressendienst).
 
+## Een cloudaanbieder toevoegen
+
+Aanbieders (servers, opslag, DNS) zijn adapters in `src/cluster/adapters/`, met één lijst in
+`src/cluster/adapters.ts`. Een nieuwe aanbieder is één bestand plus tests tegen een nagebootste API; de console en
+`catalog.json` volgen vanzelf. Het stappenplan staat in [PROVIDERS.md](PROVIDERS.md#een-aanbieder-toevoegen).
+
 ## Fouten melden
 
 Open een issue op GitHub met wat je deed, wat je verwachtte en wat er gebeurde. Zet nooit sleutels, wachtwoorden of

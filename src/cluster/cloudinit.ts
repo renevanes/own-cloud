@@ -1,4 +1,6 @@
 import type { ClusterConfig } from "./config.js";
+import { getAdapter } from "./adapters.js";
+import { dnsFields } from "./dns.js";
 
 /**
  * Het opstartscript voor een nieuwe server. Bevat GEEN geheimen: alleen een tijdelijke download-URL
@@ -360,11 +362,13 @@ PY`;
 /** Caddyfile met DNS-01 (werkt ook als cloud.<domein> naar meerdere servers wijst). */
 export function caddyfile(c: ClusterConfig): string | null {
   if (!c.domain) return null;
-  const d = c.dns.find((x) => x.type === "desec" || x.type === "hetzner");
+  // De eerste DNS-koppeling waarvan de adapter een Caddy-module heeft (deSEC, Hetzner). Andere aanbieders:
+  // geen DNS-01, Caddy valt terug op HTTP-01 (zie PROVIDERS.md).
+  const d = c.dns.find((x) => !!getAdapter(x.type)?.dns?.caddy);
   // Via de Eigen Cloud Dienst: het token werkt alleen bij de dienst, dus certificaten via diens acme-dns-adres.
   const dnsLine = d?.api && d.acme ? `dns acmedns {\n\t\t\tusername ${d.acme.username}\n\t\t\tpassword ${d.acme.password}\n\t\t\tsubdomain ${d.acme.subdomain}\n\t\t\tserver_url ${d.acme.server_url}\n\t\t}`
     : d?.api ? ""
-    : d?.type === "desec" ? `dns desec {\n\t\t\ttoken ${d.token}\n\t\t}` : d ? `dns hetzner ${d.token}` : "";
+    : d ? getAdapter(d.type)!.dns!.caddy!({ token: String(d.token), ...dnsFields(d) }) : "";
   const tls = d && dnsLine ? `\ttls {\n\t\t${dnsLine}\n\t}\n` : "";
   return `{\n\temail postmaster@${c.domain}\n}\ncloud.${c.domain}, mail.${c.domain} {\n${tls}\tencode zstd gzip\n\trequest_body {\n\t\tmax_size 8GB\n\t}\n\treverse_proxy 127.0.0.1:3000\n}\n`;
 }

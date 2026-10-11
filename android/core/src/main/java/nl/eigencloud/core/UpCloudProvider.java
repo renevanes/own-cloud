@@ -5,9 +5,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /** UpCloud (Finland; zones in Amsterdam, Frankfurt …). Config: token, or username + password; template?, sshKey?. */
 public final class UpCloudProvider implements Provider {
+    /** The registry entry (servers and storage; UpCloud has no DNS service). */
+    static final Adapters.Adapter ADAPTER = new Adapters.Adapter("upcloud", new Adapters.Servers(UpCloudProvider::new, UpCloudProvider::fetchSizes), true, null);
+
     private final Map<String, Object> cfg;
     private String base = Endpoints.UPCLOUD;
     private long pollDelayMs = 3000;
@@ -104,4 +108,21 @@ public final class UpCloudProvider implements Provider {
     @Override public boolean supportsPtr() { return false; }
 
     @Override public void setPtr(ServerInfo server, String hostname) { /* not supported */ }
+
+    private static final Pattern PLAN = Pattern.compile("^\\d+xCPU-\\d+GB$");
+
+    /** Plans (no prices in the API: "prijs onbekend"), smallest first. */
+    public static List<Catalog.SizeOption> fetchSizes(Map<String, Object> cfg, String region) throws IOException {
+        List<Catalog.SizeOption> out = new ArrayList<>();
+        Object j = Catalog.getJson(Endpoints.UPCLOUD + "/plan", Http.headers("authorization", "Bearer " + Json.jsString(cfg.get("token"))));
+        for (Object p : Json.listAt(j, "plans", "plan")) {
+            String name = Json.str(p, "name");
+            if (name == null || !PLAN.matcher(name).find()) continue;
+            double ram = Catalog.d(Json.path(p, "memory_amount")) / 1024;
+            Object cores = Json.path(p, "core_number");
+            out.add(new Catalog.SizeOption(name, Json.jsString(cores) + " vCPU, " + Json.numberToString(ram) + " GB", ram, Catalog.d(cores), null));
+        }
+        Catalog.sortByRamCpus(out);
+        return out;
+    }
 }

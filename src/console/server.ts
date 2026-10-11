@@ -14,16 +14,20 @@ import fastifyStatic from "@fastify/static";
 import nodemailer from "nodemailer";
 import { request } from "undici";
 import { Vault, type AdminConfig } from "./vault.js";
-import { STORE_OFFERS, SERVER_OFFERS, fetchSizes, pickSize, buildPresets, type SizeOption, type ServerOffer, type StoreOffer } from "./catalog.js";
+import * as catalog from "./catalog.js";
+import { fetchSizes, pickSize, buildPresets, type SizeOption, type ServerOffer, type StoreOffer, type DnsOffer } from "./catalog.js";
 import { DEFAULT_POLICY, keysFor, type Placement } from "../cluster/config.js";
 import { randomKeyHex } from "../cluster/crypto.js";
 import { hashPassword } from "../auth.js";
 import { makeProvider } from "../cluster/providers.js";
+import { getAdapter, isSecretField } from "../cluster/adapters.js";
+import { dnsFields } from "../cluster/dns.js";
 import { makeStore, S3Store, type StoreConfig } from "../cluster/stores.js";
 import { restoreFromAny, restoreFromStore } from "../cluster/backup.js";
 import { rpc } from "../cluster/transport.js";
 import * as extras from "./extras.js";
 import * as aanbieder from "./aanbieder.js";
+import * as overstap from "./overstap.js";
 import { findAdminConfig } from "../cluster/admin.js";
 import { consoleSettings } from "../cluster/admin.js";
 import { clusterStatus, findLeader, prepareStore, probeCluster, provisionFirstNode, readManifest, recoverAdminConfig, saveAdminCopy, sendJob, adminProof, pushAdminConfig } from "../cluster/admin.js";
@@ -32,18 +36,18 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const LOCAL = process.env.EIGEN_CONSOLE_LOCAL === "1";
 const vault = new Vault(process.env.EIGEN_VAULT ?? path.join(os.homedir(), ".eigen-cloud", "kluis.json"));
 
-const serverOffers = (): ServerOffer[] => LOCAL
-  ? [...SERVER_OFFERS, { id: "local", name: "Lokaal (test)", owner: "Deze computer", home: "NL", regions: [
-      { id: "ams", label: "Amsterdam (test)", country: "NL", city: "Amsterdam" },
-      { id: "fra", label: "Frankfurt (test)", country: "DE", city: "Frankfurt" },
-      { id: "hel", label: "Helsinki (test)", country: "FI", city: "Helsinki" }], fields: [], signupUrl: "" }]
-  : SERVER_OFFERS;
+// Alle aanbieders komen uit de registry (src/cluster/adapters.ts); de testaanbieder "local" alleen met EIGEN_CONSOLE_LOCAL=1.
+const serverOffers = (): ServerOffer[] => catalog.serverOffers(LOCAL);
+const dnsOffers = (): DnsOffer[] => catalog.dnsOffers(LOCAL);
 // Alleen voor tests: alle S3-opslag naar één nepserver (EIGEN_TEST_S3).
 const TEST_S3 = process.env.EIGEN_TEST_S3;
-const BASE_STORES = TEST_S3 ? STORE_OFFERS.map((o) => ({ ...o, regions: o.regions.map((r) => ({ ...r, endpoint: r.endpoint ? TEST_S3 : r.endpoint })) })) : STORE_OFFERS;
+const baseStores = () => {
+  const list = catalog.storeOffers(LOCAL);
+  return TEST_S3 ? list.map((o) => ({ ...o, regions: o.regions.map((r) => ({ ...r, endpoint: r.endpoint ? TEST_S3 : r.endpoint })) })) : list;
+};
 const storeOffers = (): StoreOffer[] => LOCAL
-  ? [...BASE_STORES, { id: "localfs", name: "Map op deze computer (test)", owner: "Jijzelf", regions: [{ id: "nl", label: "Lokaal", country: "NL", endpoint: "" }], help: "", signupUrl: "" }]
-  : BASE_STORES;
+  ? [...baseStores(), { id: "localfs", name: "Map op deze computer (test)", owner: "Jijzelf", regions: [{ id: "nl", label: "Lokaal", country: "NL", endpoint: "" }], help: "", signupUrl: "" }]
+  : baseStores();
 
 // ───────── Sessie ─────────
 
@@ -67,7 +71,8 @@ function newSession(reply: FastifyReply) {
 }
 
 function hasSession(req: FastifyRequest) {
-  if (session && Date.now() - session.lastUse > IDLE_MS) { vault.lock(); session = null; }
+  // Tijdens het overstappen niet op slot: dat loopt op de achtergrond verder en moet de kluis kunnen bijwerken.
+  if (session && Date.now() - session.lastUse > IDLE_MS && !overstap.busy()) { vault.lock(); session = null; }
   const t = req.cookies.beheer;
   return !!(vault.unlocked() && session && t && t.length === session.token.length && crypto.timingSafeEqual(Buffer.from(t), Buffer.from(session.token)));
 }
@@ -96,8 +101,8 @@ function sanitized(c: AdminConfig) {
   return {
     cluster: c.cluster, domain: c.domain, mailFrom: c.appEnv.MAIL_FROM, alertEmail: c.console.alertEmail ?? "",
     stores: c.stores.map((s) => ({ ...s, accessKey: s.accessKey ? mask(s.accessKey) : undefined, secretKey: s.secretKey ? "••••••••" : undefined })),
-    providers: Object.fromEntries(Object.entries(c.providers).map(([k, v]) => [k, Object.fromEntries(Object.entries(v).map(([f, x]) => [f, /token|secret|password/i.test(f) ? mask(x) : x]))])),
-    dns: c.dns.map((d) => ({ ...d, token: d.token ? mask(d.token) : undefined })),
+    providers: Object.fromEntries(Object.entries(c.providers).map(([k, v]) => [k, Object.fromEntries(Object.entries(v).map(([f, x]) => [f, isSecretField(v.type ?? k, f) ? mask(x) : x]))])),
+    dns: c.dns.map((d) => ({ ...d, token: d.token ? mask(d.token) : undefined, ...(d.fields ? { fields: Object.fromEntries(Object.entries(d.fields).map(([f, x]) => [f, isSecretField(d.type, f) ? mask(x) : x])) } : {}) })),
     dnsMode: c.console.dnsMode ?? null,
     mailRelay: c.console.mailRelay ? (() => { try { const u = new URL(c.console.mailRelay!); return { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username), secure: u.protocol === "smtps:" }; } catch { return null; } })() : null,
     spfExtra: c.console.spfExtra ?? "",
@@ -107,55 +112,62 @@ function sanitized(c: AdminConfig) {
     quick: c.console.quick ?? null,
     dienst: c.console.dienst ? { url: c.console.dienst.url ?? null, invite: c.console.dienst.invite ?? null, email: c.console.dienst.email ?? null, loggedIn: !!c.console.dienst.token, orderId: c.console.dienst.orderId ?? null, bundle: c.console.dienst.bundle ?? null, applied: !!c.console.dienst.applied } : null,
     maxUsers: c.console.maxUsers ?? 0,
+    overstap: c.console.overstap ? { naar: c.console.overstap.naar, stap: c.console.overstap.stap } : null,
   };
 }
 
 interface Step { id: string; label: string; state: "wait" | "busy" | "done" | "fail"; detail?: string }
 let launch: { steps: Step[]; appUrl: string | null; done: boolean; startedAt: number } | null = null;
+/** Elke nieuwe start krijgt een nummer; het volgen van een eerdere (bijv. mislukte wekpoging bij overstappen) stopt dan. */
+let launchGen = 0;
 
 function setStep(id: string, state: Step["state"], detail?: string) {
   const s = launch?.steps.find((x) => x.id === id);
   if (s) { s.state = state; if (detail !== undefined) s.detail = detail; }
 }
 
-async function followLaunch(clusterUrl: string, apiUrl: string | null, wantNodes: number) {
+async function followLaunch(clusterUrl: string, apiUrl: string | null, wantNodes: number, gen = launchGen) {
   const c = cfg();
   const keys = keysFor(c);
-  const deadline = Date.now() + 45 * 60_000;
+  const end = Date.now() + 45 * 60_000;
+  // Doorgaan tot de deadline, of tot een nieuwere start deze vervangt.
+  const alive = () => gen === launchGen && Date.now() < end;
+  const set = (id: string, state: Step["state"], detail?: string) => { if (gen === launchGen) setStep(id, state, detail); };
   const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  setStep("boot", "busy", "Software installeren en starten (meestal 2 à 4 minuten)");
-  while (Date.now() < deadline) {
+  set("boot", "busy", "Software installeren en starten (meestal 2 à 4 minuten)");
+  while (alive()) {
     const r = await request(`${clusterUrl}/cluster/health`, { signal: AbortSignal.timeout(4000) }).catch(() => null);
     if (r) { await r.body.dump(); if (r.statusCode === 200) break; }
     await wait(3000);
   }
-  setStep("boot", "done", "");
-  setStep("start", "busy", "Back-up terugzetten en de leiding nemen");
+  set("boot", "done", "");
+  set("start", "busy", "Back-up terugzetten en de leiding nemen");
   let leaderSince = 0;
-  while (Date.now() < deadline) {
+  while (alive()) {
     const st = await rpc<any>(keys.cluster, clusterUrl, { type: "status" }, 3000).catch(() => null);
     if (st?.role === "leader") { leaderSince = Date.now(); break; }
     await wait(2000);
   }
-  setStep("start", "done", "");
-  setStep("grow", "busy", "Tweede server en witness worden aangemaakt");
-  while (Date.now() < deadline) {
+  set("start", "done", "");
+  set("grow", "busy", "Tweede server en witness worden aangemaakt");
+  while (alive()) {
     const leader = await findLeader(c, [clusterUrl]);
     const sum = leader ? await rpc<any>(keys.cluster, leader.url, { type: "clusterSummary" }, 5000).catch(() => null) : null;
     const ready = (sum?.nodes ?? []).filter((n: { status: string }) => n.status === "ready").length;
-    if (sum) setStep("grow", "busy", `${ready} van ${wantNodes} servers klaar`);
+    if (sum) set("grow", "busy", `${ready} van ${wantNodes} servers klaar`);
     if (ready >= wantNodes) break;
     await wait(3000);
   }
-  setStep("grow", "done", `${wantNodes} servers actief`);
-  setStep("https", "busy", c.domain ? `Wachten tot cloud.${c.domain} bereikbaar is (DNS en certificaat)` : "");
+  set("grow", "done", `${wantNodes} servers actief`);
+  set("https", "busy", c.domain ? `Wachten tot cloud.${c.domain} bereikbaar is (DNS en certificaat)` : "");
   const url = launch!.appUrl ?? apiUrl;
-  while (Date.now() < deadline && url) {
+  while (alive() && url) {
     const r = await request(`${url}/healthz`, { signal: AbortSignal.timeout(5000) }).catch(() => null);
     if (r) { await r.body.dump(); if (r.statusCode === 200) break; }
     await wait(5000);
   }
-  setStep("https", "done", "");
+  if (gen !== launchGen) return;
+  set("https", "done", "");
   launch!.done = true;
   void leaderSince;
 }
@@ -168,13 +180,16 @@ function adminPolicy(placement: Placement[]) {
 
 type StoreInput = { offer: string; region: string; endpoint?: string; accessKey?: string; secretKey?: string; bucket?: string; purpose: "replica" | "backup"; dir?: string };
 
-/** Opslag koppelen: bucket aanmaken en instellen (versiebeheer, onveranderbaar), en bij succes bewaren. */
-async function addStore(b: StoreInput) {
+/**
+ * Opslag koppelen: bucket aanmaken en instellen (versiebeheer, onveranderbaar), en bij succes bewaren.
+ * Met een andere configuratie t (overstappen: de nieuwe plek) komt hij daarin en wordt de kluis niet bewaard.
+ */
+async function addStore(b: StoreInput, t: AdminConfig = cfg()) {
   const offer = storeOffers().find((o) => o.id === b.offer);
   const region = offer?.regions.find((r) => r.id === b.region);
   if (!offer || !region) throw new Error("Kies een aanbieder en locatie");
   const name = `${offer.id}-${region.id}${b.purpose === "backup" ? "-backup" : ""}`;
-  const existing = cfg().stores.find((x) => x.name === name);
+  const existing = t.stores.find((x) => x.name === name);
   let store: StoreConfig;
   if (offer.id === "localfs") {
     store = { name, type: "fs", purpose: b.purpose, country: region.country, dir: b.dir || path.join(path.dirname(vault.file), "opslag", name) };
@@ -184,7 +199,7 @@ async function addStore(b: StoreInput) {
     store = {
       name, type: "s3", purpose: b.purpose, country: region.country, endpoint, region: region.id === "eigen" ? "us-east-1" : region.id,
       // Zelfde plek opnieuw koppelen (bijv. de assistent nog eens doorlopen): dezelfde bucket houden.
-      bucket: b.bucket || (existing?.endpoint === endpoint ? existing?.bucket : undefined) || `${cfg().cluster}-${b.purpose === "backup" ? "backup" : "data"}-${crypto.randomBytes(3).toString("hex")}`,
+      bucket: b.bucket || (existing?.endpoint === endpoint ? existing?.bucket : undefined) || `${t.cluster}-${b.purpose === "backup" ? "backup" : "data"}-${crypto.randomBytes(3).toString("hex")}`,
       accessKey: b.accessKey || existing?.accessKey, secretKey: b.secretKey || existing?.secretKey,
     };
     if (!store.accessKey || !store.secretKey) throw new Error("Vul de toegangssleutel en geheime sleutel in");
@@ -192,21 +207,21 @@ async function addStore(b: StoreInput) {
   const steps = await prepareStore(store);
   const ok = steps.every((x) => x.ok || /Versiebeheer|Onveranderbaar/.test(x.label));
   if (ok) {
-    cfg().stores = [...cfg().stores.filter((x) => x.name !== name), store];
-    save();
+    t.stores = [...t.stores.filter((x) => x.name !== name), store];
+    if (t === cfg()) save();
   }
   return { ok, steps, name };
 }
 
 /** Aanbieder van servers koppelen: inloggen controleren en de live formaten en prijzen per regio ophalen. */
-async function linkProvider(id: string, fieldsIn: Record<string, string>) {
+async function linkProvider(id: string, fieldsIn: Record<string, string>, t: AdminConfig = cfg()) {
   const offer = serverOffers().find((o) => o.id === id);
   if (!offer) throw new Error("Onbekende aanbieder");
-  const fields = { ...(cfg().providers[offer.id] ?? {}) };
+  const fields = { ...(t.providers[offer.id] ?? {}) };
   for (const [k, v] of Object.entries(fieldsIn)) if (v && !v.startsWith("••")) fields[k] = v.trim();
   if (offer.id === "local" && !fields.baseDir) fields.baseDir = path.join(path.dirname(vault.file), "servers");
   try {
-    await makeProvider(offer.id, fields).list(cfg().cluster);
+    await makeProvider(offer.id, fields).list(t.cluster);
   } catch (e) {
     throw new Error(`Inloggen bij ${offer.name} lukt niet: ${(e as Error).message.replace(/https?:\/\/\S+/, "").slice(0, 160)}`);
   }
@@ -220,16 +235,16 @@ async function linkProvider(id: string, fieldsIn: Record<string, string>) {
     }
   }));
   regions.sort((a, b) => offer.regions.findIndex((r) => r.id === a.region) - offer.regions.findIndex((r) => r.id === b.region));
-  cfg().providers[offer.id] = fields;
-  const cat = (cfg().console.catalog ??= {});
+  t.providers[offer.id] = fields;
+  const cat = (t.console.catalog ??= {});
   cat[offer.id] = Object.fromEntries(regions.filter((r) => r.data).map((r) => [r.region, { data: r.data, witness: r.witness }]));
-  save();
+  if (t === cfg()) save();
   return { ok: true, regions };
 }
 
 /** Verspreiding kiezen; extra plekken als reserve voor zelfherstel (lagere voorkeur). */
-function choosePreset(id: string) {
-  const cat = cfg().console.catalog ?? {};
+function choosePreset(id: string, t: AdminConfig = cfg()) {
+  const cat = t.console.catalog ?? {};
   const available = serverOffers().flatMap((o) => o.regions.filter((r) => cat[o.id]?.[r.id]).map((r) => ({ provider: o.id, region: r, ...cat[o.id][r.id] })));
   const p = buildPresets(available).find((x) => x.id === id);
   if (!p || !p.placement.length) throw new Error(p?.missing ?? "Onbekende keuze");
@@ -238,14 +253,38 @@ function choosePreset(id: string) {
     ...(a.witness ? [{ provider: a.provider, region: a.region.id, size: a.witness.size, country: a.region.country, kind: "witness" as const }] : []),
   ]).filter((r) => id !== "nl" || r.country === "NL");
   const seen = new Set<string>();
-  cfg().policy = { ...cfg().policy, placement: [...p.placement, ...reserve].filter((x) => { const k = `${x.kind}/${x.provider}/${x.region}`; if (seen.has(k)) return false; seen.add(k); return true; }) };
-  cfg().console.preset = p.id;
-  save();
+  t.policy = { ...t.policy, placement: [...p.placement, ...reserve].filter((x) => { const k = `${x.kind}/${x.provider}/${x.region}`; if (seen.has(k)) return false; seen.add(k); return true; }) };
+  t.console.preset = p.id;
+  if (t === cfg()) save();
   return p;
 }
 
-/** DNS koppelen bij deSEC of Hetzner (of handmatig). */
-async function configureDns(c: AdminConfig, mode: "desec" | "hetzner" | "manual", tokenIn?: string) {
+/**
+ * Alleen voor tests (EIGEN_CONSOLE_LOCAL=1 en EIGEN_TEST_KIT_LOCAL=1): het pakket van een Dienst op deze computer
+ * laten draaien (lokale "aanbieder" en opslag in een map per bestelling), zodat slapen, overstappen en wekken
+ * met echte processen te testen zijn.
+ */
+function localKit(kit: extras.Kit, orderId: string): extras.Kit {
+  if (!LOCAL || process.env.EIGEN_TEST_KIT_LOCAL !== "1") return kit;
+  const dir = path.dirname(vault.file);
+  return {
+    ...kit,
+    provider: { id: "local", fields: { baseDir: path.join(dir, `servers-${orderId}`) } },
+    storage: kit.storage.map((s) => ({ ...s, offer: "localfs", region: "nl", dir: path.join(dir, "opslag", `${orderId}-${s.purpose}`) })),
+    placement: [
+      { provider: "local", region: "ams", size: "local", country: "NL", kind: "data" },
+      { provider: "local", region: "fra", size: "local", country: "DE", kind: "data" },
+      { provider: "local", region: "hel", size: "local", country: "FI", kind: "witness" },
+    ],
+  };
+}
+
+/**
+ * DNS koppelen bij een aanbieder met DNS uit de registry (deSEC, Hetzner, Scaleway, Exoscale, OVHcloud, …) of
+ * handmatig. Inloggegevens: de sleutel van dezelfde aanbieder bij Servers, daarover wat eerder voor DNS gekoppeld
+ * was, daarover wat de gebruiker nu invult (gemaskeerde waarden "••…" tellen niet).
+ */
+async function configureDns(c: AdminConfig, mode: string, tokenIn?: string, fieldsIn?: Record<string, string>) {
   const d = c.domain!;
   if (mode === "manual") {
     c.dns = [];
@@ -253,28 +292,21 @@ async function configureDns(c: AdminConfig, mode: "desec" | "hetzner" | "manual"
     save();
     return { ok: true, ns: null, delegated: null };
   }
-  const token = tokenIn && !tokenIn.startsWith("••") ? tokenIn.trim() : c.dns.find((x) => x.type === mode)?.token;
-  if (!token) throw new Error("Vul je API-token in");
-  let ns: string[] = [];
-  if (mode === "desec") {
-    const base = extras.DESEC_URL();
-    const h = { authorization: `Token ${token}`, "content-type": "application/json" };
-    const r = await fetch(`${base}/domains/${d}/`, { headers: h });
-    if (r.status === 401 || r.status === 403) throw new Error("deSEC accepteert dit token niet");
-    if (r.status === 404) {
-      if (d.endsWith(".dedyn.io")) throw new Error(`${d} bestaat (nog) niet bij deSEC. Maak het account opnieuw aan met een andere naam.`);
-      const cr = await fetch(`${base}/domains/`, { method: "POST", headers: h, body: JSON.stringify({ name: d }) });
-      if (!cr.ok) throw new Error(`Domein toevoegen bij deSEC mislukt: ${(await cr.text()).slice(0, 200)}`);
-    }
-    ns = ["ns1.desec.io", "ns2.desec.org"];
-  } else {
-    const r = await fetch(`https://api.hetzner.cloud/v1/zones?name=${d}`, { headers: { authorization: `Bearer ${token}` } });
-    if (!r.ok) throw new Error("Hetzner accepteert dit token niet (of DNS staat nog in de oude DNS-console)");
-    const j = (await r.json()) as { zones?: { authoritative_nameservers?: { assigned?: string[] } }[] };
-    if (!j.zones?.length) throw new Error(`Maak eerst de zone ${d} aan in de Hetzner Console → DNS`);
-    ns = j.zones[0].authoritative_nameservers?.assigned ?? ["hydrogen.ns.hetzner.com", "oxygen.ns.hetzner.com", "helium.ns.hetzner.de"];
-  }
-  c.dns = [{ type: mode, name: mode, token, zone: d }];
+  const a = getAdapter(mode);
+  if (!a?.dns || (a.testOnly && !LOCAL)) throw new Error("Kies een DNS-aanbieder");
+  const want = a.dns.fields ?? a.fields;
+  const prev = c.dns.find((x) => x.type === mode);
+  const fields: Record<string, string> = {};
+  const linked = c.providers[mode] ?? {};
+  for (const f of want) if (linked[f.key]) fields[f.key] = linked[f.key];
+  if (prev) Object.assign(fields, Object.fromEntries(Object.entries(dnsFields(prev)).filter(([k]) => k !== "api")));
+  const given = { ...(fieldsIn ?? {}), ...(tokenIn ? { token: tokenIn } : {}) };
+  for (const [k, v] of Object.entries(given)) if (typeof v === "string" && v.trim() && !v.startsWith("••") && want.some((f) => f.key === k)) fields[k] = v.trim();
+  const missing = want.filter((f) => !f.optional && !fields[f.key]);
+  if (missing.length) throw new Error(missing.length === 1 && missing[0].key === "token" ? "Vul je API-token in" : `Vul in: ${missing.map((f) => f.label).join(", ")}`);
+  const { nameservers: ns } = await a.dns.connect(fields, d);
+  const { token, ...rest } = fields;
+  c.dns = [{ type: mode, name: mode, ...(token ? { token } : {}), zone: d, ...(Object.keys(rest).length ? { fields: rest } : {}) }];
   c.console.dnsMode = mode;
   c.console.nameservers = ns;
   save();
@@ -310,7 +342,7 @@ export async function buildConsole() {
     step: vault.config?.console.step ?? null,
     done: vault.config?.console.done ?? false,
     domain: vault.config?.domain ?? null,
-    offers: { stores: storeOffers(), servers: serverOffers() },
+    offers: { stores: storeOffers(), servers: serverOffers(), dns: dnsOffers() },
     dienst: !!(extras.DIENST_URL() || vault.config?.console.dienst?.url || knownAanbieders > 0),
     aanbieder: vault.config?.console.dienst?.url ?? null,
     domainMode: vault.config?.console.domainMode ?? null,
@@ -462,7 +494,7 @@ export async function buildConsole() {
 
     // ── Opslag ──
     s.post<{ Body: StoreInput }>("/api/stores", async (req, reply) => {
-      try { return await addStore(req.body); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+      try { return await addStore(req.body ?? ({} as StoreInput)); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     });
     s.delete<{ Params: { name: string } }>("/api/stores/:name", async (req) => {
       cfg().stores = cfg().stores.filter((x) => x.name !== req.params.name);
@@ -546,8 +578,8 @@ export async function buildConsole() {
     });
 
     // ── DNS ──
-    s.post<{ Body: { mode: "desec" | "hetzner" | "manual"; token?: string } }>("/api/dns", async (req, reply) => {
-      try { return await configureDns(cfg(), req.body.mode, req.body.token); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    s.post<{ Body: { mode: string; token?: string; fields?: Record<string, string> } }>("/api/dns", async (req, reply) => {
+      try { return await configureDns(cfg(), req.body.mode, req.body.token, req.body.fields); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     });
     s.get("/api/dns/check", async () => {
       const c = cfg();
@@ -658,10 +690,54 @@ export async function buildConsole() {
     s.post("/api/dienst/apply", async (_req, reply) => {
       const c = cfg();
       try {
-        const r = await extras.dienstApply(c, addStore);
+        const r = await extras.dienstApply(c, (b) => addStore(b), localKit);
         save();
         return r;
       } catch (e) { save(); return reply.code(400).send({ error: (e as Error).message }); }
+    });
+
+    // ── Overstappen naar een andere aanbieder of naar zelf beheren ──
+    const oDeps = (): overstap.Deps => ({
+      cfg, save, saveVault: () => vault.save(),
+      addStore: (b, t) => addStore(b, t),
+      linkProvider: (id, fields, t) => linkProvider(id, fields, t),
+      choosePreset: (id, t) => choosePreset(id, t),
+      localKit,
+      launch: async (c, first, term, adminOverride) => {
+        await startLaunch(c, first, term, adminOverride);
+        return { clusterUrl: c.console.firstLaunch!.clusterUrl! };
+      },
+    });
+    const oFail = (reply: FastifyReply, e: unknown) => reply.code(400).send({ error: (e as Error).message });
+    s.get("/api/overstap", async () => {
+      const c = cfg();
+      if (await overstap.refresh(c).catch(() => false)) vault.save();
+      overstap.ensureRunning(oDeps());
+      return overstap.view(c);
+    });
+    s.post<{ Body: { naar?: string } }>("/api/overstap/start", async (req, reply) => {
+      try { const r = await overstap.start(cfg(), req.body?.naar ?? ""); save(); return r; } catch (e) { return oFail(reply, e); }
+    });
+    s.post<{ Body: { email?: string } }>("/api/overstap/login", async (req, reply) => {
+      try { const r = await overstap.login(cfg(), req.body?.email ?? ""); vault.save(); return r; } catch (e) { return oFail(reply, e); }
+    });
+    s.post<{ Body: { code?: string } }>("/api/overstap/verify", async (req, reply) => {
+      try { const r = await overstap.verify(cfg(), req.body?.code ?? ""); vault.save(); return r; } catch (e) { return oFail(reply, e); }
+    });
+    s.post<{ Body: { bundle?: string; acceptTerms?: boolean; registrant?: Record<string, string> } }>("/api/overstap/order", async (req, reply) => {
+      try { const r = await overstap.order(cfg(), req.body ?? {}); vault.save(); return r; } catch (e) { return oFail(reply, e); }
+    });
+    s.post<{ Body: { accessKey?: string; secretKey?: string; projectId?: string; desecToken?: string } }>("/api/overstap/zelf", async (req, reply) => {
+      try { const r = await overstap.zelf(cfg(), req.body ?? {}); vault.save(); return r; } catch (e) { return oFail(reply, e); }
+    });
+    s.post<{ Body: { confirm?: boolean } }>("/api/overstap/nu", async (req, reply) => {
+      try { return overstap.overzetten(oDeps(), req.body?.confirm); } catch (e) { return oFail(reply, e); }
+    });
+    s.post("/api/overstap/terug", async (_req, reply) => {
+      try { return overstap.terug(oDeps()); } catch (e) { return oFail(reply, e); }
+    });
+    s.post("/api/overstap/stoppen", async (_req, reply) => {
+      try { return await overstap.stoppen(oDeps()); } catch (e) { return oFail(reply, e); }
     });
 
     // ── Aanbieder worden: je eigen Eigen Cloud Dienst opzetten en bijhouden ──
@@ -817,9 +893,10 @@ function appUrl(c: AdminConfig) {
   return c.domain ? `https://cloud.${c.domain}` : null;
 }
 
-async function startLaunch(c: AdminConfig, first: { provider: string; region: string; size: string; country?: string }, term: number) {
+async function startLaunch(c: AdminConfig, first: { provider: string; region: string; size: string; country?: string }, term: number, adminOverride?: { settings: Record<string, string> }) {
   const offer = serverOffers().find((o) => o.id === first.provider);
   const region = offer?.regions.find((r) => r.id === first.region);
+  const gen = ++launchGen;
   launch = {
     startedAt: Date.now(), done: false, appUrl: null,
     steps: [
@@ -840,7 +917,7 @@ async function startLaunch(c: AdminConfig, first: { provider: string; region: st
     const cs = consoleSettings(c, extras.DIENST_URL());
     if (cs.max_users !== "0") initialSettings.max_users = cs.max_users;
     if (cs.dienst_report) initialSettings.dienst_report = cs.dienst_report;
-    const r = await provisionFirstNode(c, { ...first, term, initialSettings: term ? undefined : initialSettings });
+    const r = await provisionFirstNode(c, { ...first, term, initialSettings: term ? undefined : initialSettings, ...(adminOverride ? { adminOverride } : {}) });
     setStep("server", "done", r.info.ipv4 ? `IP-adres ${r.info.ipv4}` : "");
     c.console.firstLaunch = { at: Date.now(), nodeId: r.nodeId, provider: first.provider, region: first.region, clusterUrl: r.clusterUrl, apiUrl: r.info.apiUrl };
     c.console.done = true;
@@ -848,7 +925,7 @@ async function startLaunch(c: AdminConfig, first: { provider: string; region: st
     vault.save();
     launch.appUrl = appUrl(c);
     const want = c.policy.minDataNodes + c.policy.witnesses;
-    void followLaunch(r.clusterUrl, r.info.apiUrl ?? null, want).catch((e) => setStep("grow", "fail", (e as Error).message));
+    void followLaunch(r.clusterUrl, r.info.apiUrl ?? null, want, gen).catch((e) => { if (gen === launchGen) setStep("grow", "fail", (e as Error).message); });
     return { ok: true, nodeId: r.nodeId };
   } catch (e) {
     setStep("server", "fail", (e as Error).message);

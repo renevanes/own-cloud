@@ -369,6 +369,38 @@ Hij kan daar zelf:
 - **Domein meenemen.** Bij een geregistreerd of verhuisd domein (klaar of opgezegd) haalt de dienst de
   verhuiscode op bij Openprovider. Bij een eigen domein kan dat niet; dat beheert de klant al zelf.
 
+## Overstappen naar een andere aanbieder
+
+Een klant kan met zijn cloud naar een andere aanbieder (een andere Dienst van de lijst) of naar zelf beheren. De
+console regelt dat (paneel *Abonnement* → *Overstappen*, zie de README): bestellen bij de nieuwe aanbieder, de cloud
+laten slapen, de opslag kopiëren, de instellingen omzetten, wakker worden bij de nieuwe aanbieder en hier opzeggen. Wat
+de Dienst daarbij doet:
+
+- **Gratis adres van de adressendienst**: de nieuwe aanbieder bestelt `mode: "sub"` met de `transferCode` en neemt het
+  adres over (zie 4b). Hier hoeft niets.
+- **Eigen domein, of geregistreerd/verhuisd via ons**: deSEC-zonenamen zijn uniek over alle accounts, dus de zone moet
+  hier weg voordat de nieuwe aanbieder hem kan maken. De console vraagt dat pas aan als de cloud slaapt:
+  `POST /v1/orders/:id/dns-vrijgeven {overstap: true}` (klanttoken). Alleen bij `own`, `register` en `transfer` (een
+  gratis adres: 400). Zolang het abonnement loopt alleen met `{overstap: true}` (anders 409); na opzeggen ook zonder.
+  Nog eens aanroepen verandert niets. Bij een domein dat wij registreerden gaat eerst DNSSEC uit bij het register
+  (Openprovider `PUT /domains/{id}` met `is_dnssec_enabled: false`): de nameservers blijven `ns1.desec.io`/`ns2.desec.org`,
+  maar de nieuwe zone heeft andere sleutels; zonder DS-records blijft het domein bereikbaar tot de nieuwe aanbieder de
+  verhuizing (met de verhuiscode) afrondt en zijn eigen sleutels zet. Bij een eigen domein beheert de klant de DS-records
+  zelf (`dnssec: "zelf"`); de console laat hem na het overstappen de nieuwe zien (`kit.ds` van de nieuwe aanbieder).
+- **Wachten bij de nieuwe aanbieder**: bestaat de zone nog in een ander deSEC-account (deSEC antwoordt 409, of 400 met
+  "conflict"), dan mislukt de stap *DNS-zone* niet maar wacht hij: de stap blijft *bezig* met de tekst "Wacht tot je
+  vorige aanbieder je DNS vrijgeeft", wordt elke `BROKER_LOOP_MS` opnieuw geprobeerd (zonder oplopende wachttijd en
+  zonder de mail na 10 pogingen) en de stappen die de zone niet nodig hebben (project en sleutel bij Scaleway) lopen
+  alvast door. Na een dag wachten krijgt `BROKER_ADMIN_EMAIL` één mail (de zone kan ook bij iemand anders staan).
+- **Terug** (overstappen mislukt): de nieuwe aanbieder zegt op en geeft de zone vrij; daarna zet
+  `POST /v1/orders/:id/dns-terug` de zone hier weer neer, met DKIM van de mail-relay en de acme-verwijzingen, en zet
+  DNSSEC weer aan bij een domein dat wij registreerden. 409 zolang de zone nog bij de andere aanbieder staat. Bij een
+  gratis adres van de adressendienst: `{transferCode}` (de nieuwe code uit het pakket van de andere aanbieder) en het
+  adres komt terug.
+- **Na het overstappen** zegt de console het abonnement hier op. De cloud sliep al (alle servers weg; servers die nog
+  bestonden heeft de console met de projectsleutel weggehaald). Buckets en project ruim je na de opzegtermijn op zoals
+  bij elke opzegging (handmatig, zie *Opzeggen*).
+
 ## Facturen
 
 Elke echte betaling krijgt een factuur: de eerste betaling, elke maandelijkse incasso en een betaalde
@@ -613,6 +645,10 @@ Controleer met echte (test)accounts vóór je live gaat:
   `POST /domains/{id}/authcode/reset`. Gebouwd volgens de documentatie, nog niet met een echt account getest.
   Controleer ook per extensie of de code direct terugkomt (bij sommige registries gaat hij per mail naar de houder).
 
+- **Overstappen**: welk antwoord deSEC geeft als een zone al in een ander account bestaat (de Dienst rekent op 409, of
+  400 met "conflict"/"exists"); `PUT /domains/{id}` bij Openprovider om DNSSEC uit en weer aan te zetten; en of een
+  verhuizing tussen twee Openprovider-resellers met `POST /domains` + `auth_code` werkt.
+
 **Opzetten vanuit de app** (nog niet tegen echte accounts gedraaid): of `GET /account/v3/projects?organization_id=…`
 werkt met een sleutel van een IAM-applicatie met `ProjectManager`; of een nieuwe IAM-sleutel binnen een paar seconden
 bij Object Storage werkt (de console probeert het 4 keer); `DELETE …/servers/{id}/user_data/cloud-init`; of
@@ -650,7 +686,7 @@ JSON; fouten als `{ "error": "…" }`. Inloggen met `Authorization: Bearer <toke
 | `GET /v1/domains/check?name=` | → `{domain, available, price}` |
 | `POST /v1/orders` | `{bundle, domain:{mode,name,authCode?,transferCode?}, registrant?, acceptTerms:true, invite?}` → `{orderId, checkoutUrl}`. Een ongeldige `invite` geeft 400; een geldige wordt bij de bestelling bewaard en geteld. `transferCode` (ook op het hoogste niveau toegestaan) alleen bij `mode: "sub"` met de adressendienst: het adres overnemen van een andere aanbieder; een foute code geeft 400, een adres dat niet bestaat 404 |
 | `GET /v1/orders/:id` | Status en stappen |
-| `GET /v1/orders/:id/kit` | Het pakket (alleen als het klaar is; anders 409). Bij een gratis adres van de adressendienst met `dns.transferCode` (de overdrachtscode van de klant) |
+| `GET /v1/orders/:id/kit` | Het pakket (alleen als het klaar is; anders 409). Bij een gratis adres van de adressendienst met `dns.transferCode` (de overdrachtscode van de klant); bij een eigen of geregistreerd domein met `ds` (de DS-records van de zone, DNSSEC) |
 | `GET /v1/me` | Klant en bestellingen. Herstellen op een nieuw toestel gebruikt dit: inloggen met e-mail en code → nieuwste bestelling → `kit` → de console zoekt met de herstelsleutel de versleutelde configuratie in de opslag van het pakket (de dienst kan die zelf niet lezen) |
 | `POST /v1/orders/:id/cancel` | Opzeggen → `{ok, endsAt}` (`endsAt` hier als datum `JJJJ-MM-DD`) |
 | `GET /v1/orders/:id/billing` | Abonnement en betalingen, zie hieronder |
@@ -659,6 +695,8 @@ JSON; fouten als `{ "error": "…" }`. Inloggen met `Authorization: Bearer <toke
 | `POST /v1/orders/:id/settle` | → `{checkoutUrl}` (eenmalige betaling van het openstaande bedrag). 409: niets open |
 | `POST /v1/orders/:id/resume` | → `{ok, status:"ready", nextPaymentDate}`. 409: niet opgezegd, of `endsAt` voorbij, of opgeruimd |
 | `GET /v1/orders/:id/authcode` | → `{domain, authCode}`. 409: eigen domein, of niet *klaar*/*opgezegd* |
+| `POST /v1/orders/:id/dns-vrijgeven` | `{overstap: true}` → `{ok, domain, released: true, dnssec: "uitgezet"\|"zelf"\|"mislukt"}`. Overstappen: de DNS-zone weghalen uit ons deSEC-account, zodat de nieuwe aanbieder hem kan maken. Zie *Overstappen* |
+| `POST /v1/orders/:id/dns-terug` | `{transferCode?}` → `{ok, domain, ds?, dnssec?, transferCode?}`. Na een mislukte overstap de DNS weer hier. Zie *Overstappen* |
 | `GET /v1/invoices/:id` | De factuur als HTML (om te bekijken of af te drukken; A4) |
 | `POST /v1/orders/:id/users` | `{count}` → `{ok, users:{included,extra,total}, amount, effective}`. Zie *Extra gebruikers* |
 | `GET /v1/tickets` · `POST /v1/tickets {subject, message, orderId?}` | Eigen hulpvragen; een nieuwe vraag mailt de medewerkers (eigenaar, beheer, support) en `BROKER_ADMIN_EMAIL` |

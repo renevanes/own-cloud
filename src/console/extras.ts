@@ -104,6 +104,11 @@ export function changeDomain(c: AdminConfig, domain: string, mode: "own" | "free
 /** Bij welke aanbieder (dienst) hoort deze kluis: de gekozen aanbieder, anders de standaard van deze versie. */
 export const baseOf = (c?: AdminConfig | null) => (c?.console.dienst?.url || DIENST_URL()).replace(/\/$/, "");
 
+/** Verzoek aan een Dienst (aanbieder); fouten als Nederlandse melding. Ook voor overstappen (andere basis en sessie). */
+export async function dienstCall(path: string, opts: { method?: string; body?: unknown; token?: string; base?: string } = {}) {
+  return dienst(path, opts);
+}
+
 async function dienst(path: string, opts: { method?: string; body?: unknown; token?: string; base?: string } = {}) {
   const base = (opts.base || DIENST_URL()).replace(/\/$/, "");
   if (!base) throw new Error("Kies eerst een aanbieder");
@@ -246,30 +251,46 @@ export interface Kit {
   nameservers: string[];
   delegated: boolean;
   provider: { id: string; fields: Record<string, string> };
-  storage: { offer: string; region: string; accessKey: string; secretKey: string; purpose: "replica" | "backup" }[];
+  storage: { offer: string; region: string; accessKey: string; secretKey: string; purpose: "replica" | "backup"; dir?: string }[];
   placement: Placement[];
   policy: { minDataNodes: number; witnesses: number };
-  dns: { type: "desec"; name: string; token: string; zone: string; api: string; acme?: { username: string; password: string; subdomain: string; server_url: string } };
+  dns: { type: "desec"; name: string; token: string; zone: string; api: string; acme?: { username: string; password: string; subdomain: string; server_url: string }; transferCode?: string };
   mailRelay: { host: string; port: number; user: string; password: string; secure: boolean } | null;
   spfExtra: string;
   /** Aantal gebruikers in de cloud (bundel + bijgekocht); ontbreekt bij oudere diensten. */
   users?: number;
+  /** DS-records van de zone (DNSSEC); ontbreekt bij een gratis adres van de adressendienst en bij oudere diensten. */
+  ds?: string[];
 }
 
 /**
  * Het pakket van de dienst overnemen: aanbieder, opslag (buckets worden hier aangemaakt en ingesteld), plekken,
  * DNS via de dienst en de mail-relay. Je herstelsleutel blijft bij jou; de dienst kent hem niet.
  */
-export async function dienstApply(c: AdminConfig, addStore: (b: { offer: string; region: string; accessKey: string; secretKey: string; purpose: "replica" | "backup" }) => Promise<{ ok: boolean; steps: { label: string; ok: boolean; detail?: string }[]; name: string }>) {
+export type KitStoreInput = { offer: string; region: string; accessKey: string; secretKey: string; purpose: "replica" | "backup"; dir?: string };
+export type AddStoreFn = (b: KitStoreInput) => Promise<{ ok: boolean; steps: { label: string; ok: boolean; detail?: string }[]; name: string }>;
+
+export async function dienstApply(c: AdminConfig, addStore: AddStoreFn, localKit: (kit: Kit, orderId: string) => Kit = (k) => k) {
   const d = c.console.dienst;
   if (!d?.token || !d.orderId) throw new Error("Er is nog geen bestelling");
-  const kit = (await dienst(`/v1/orders/${d.orderId}/kit`, { token: d.token, base: baseOf(c) })) as Kit;
+  const kit = localKit((await dienst(`/v1/orders/${d.orderId}/kit`, { token: d.token, base: baseOf(c) })) as Kit, d.orderId);
   if (kit.domain !== c.domain) throw new Error(`Het pakket is voor ${kit.domain}, niet voor ${c.domain}`);
+  const results = await applyKit(c, kit, addStore);
+  // De overdrachtscode van een gratis adres (adressendienst) hoort bij de klant: nodig om over te stappen.
+  c.console.dienst = { ...d, applied: true, ...(kit.dns.transferCode ? { transferCode: kit.dns.transferCode } : {}) };
+  return { ok: true, stores: results, nameservers: kit.nameservers, delegated: kit.delegated };
+}
+
+/**
+ * Het pakket in een configuratie zetten: aanbieder, opslag (buckets aanmaken en instellen), plekken, DNS via de
+ * dienst, mail-relay en het aantal gebruikers. Ook voor overstappen (dan op een kopie, de "nieuwe plek").
+ */
+export async function applyKit(c: AdminConfig, kit: Kit, addStore: AddStoreFn) {
   c.providers[kit.provider.id] = { ...kit.provider.fields };
-  const results = [];
+  const results: string[] = [];
   for (const st of kit.storage) {
-    const r = await addStore({ offer: st.offer, region: st.region, accessKey: st.accessKey, secretKey: st.secretKey, purpose: st.purpose });
-    results.push(r);
+    const r = await addStore({ offer: st.offer, region: st.region, accessKey: st.accessKey, secretKey: st.secretKey, purpose: st.purpose, ...(st.dir ? { dir: st.dir } : {}) });
+    results.push(r.name);
     if (!r.ok) throw new Error(`Opslag ${r.name} klaarzetten lukte niet: ${r.steps.filter((x) => !x.ok).map((x) => x.label + (x.detail ? ` (${x.detail})` : "")).join(", ")}`);
   }
   c.policy = { ...DEFAULT_POLICY, ...c.policy, placement: kit.placement, minDataNodes: kit.policy.minDataNodes, witnesses: kit.policy.witnesses };
@@ -283,8 +304,7 @@ export async function dienstApply(c: AdminConfig, addStore: (b: { offer: string;
     c.console.mailRelay = `${m.secure ? "smtps" : "smtp"}://${encodeURIComponent(m.user)}:${encodeURIComponent(m.password)}@${m.host}:${m.port}`;
   }
   c.console.spfExtra = kit.spfExtra ?? "";
-  c.console.dienst = { ...d, applied: true };
-  return { ok: true, stores: results.map((r) => r.name), nameservers: kit.nameservers, delegated: kit.delegated };
+  return results;
 }
 
 // ───────── Eén sleutel bij Scaleway: de console regelt de rest ─────────

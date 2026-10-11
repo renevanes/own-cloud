@@ -49,6 +49,8 @@ export interface Kit {
   spfExtra: string;
   /** Hoeveel gebruikers de cloud mag hebben (bundel + extra gekocht). */
   users: number;
+  /** DS-records van de zone (DNSSEC), behalve bij een adres van de adressendienst. */
+  ds?: string[];
 }
 
 export const readInput = (ctx: Ctx, o: OrderRow) => ctx.secrets.open<OrderInput>(o.input_enc, `input:${o.id}`) ?? {};
@@ -130,6 +132,56 @@ export function parseDnskey(s: string) {
 export { txtRecord, subnameOf, temRecords } from "../tem.js";
 import { txtRecord, subnameOf, temRecords } from "../tem.js";
 
+// ───────── Zone en records (ook gebruikt bij overstappen: dns-vrijgeven en dns-terug) ─────────
+
+/**
+ * De zone staat nog bij een andere aanbieder (deSEC-zonenamen zijn uniek over alle accounts): wachten tot die
+ * hem vrijgeeft. Tijdelijk (geen mislukte bestelling) en zonder oplopende wachttijd; zie provisionOrder.
+ */
+export class WaitError extends ApiError {
+  constructor(readonly detail: string) { super("deSEC", 409, detail); }
+  override get permanent() { return false; }
+}
+export const WAIT_RELEASE = "Wacht tot je vorige aanbieder je DNS vrijgeeft";
+
+/** Zone in ons deSEC-account: bestaande ophalen, anders aanmaken. Staat hij in een ander account, dan WaitError. */
+export async function ensureZone(ctx: Ctx, o: OrderRow) {
+  let z = await ctx.apis.desec.getZone(o.domain);
+  if (z) return z;
+  try { z = await ctx.apis.desec.createZone(o.domain); }
+  catch (e) {
+    // Bestaat al (bijv. na een onderbroken poging)? Dan alsnog ophalen.
+    if (e instanceof ApiError && (e.status === 409 || e.status === 400)) z = await ctx.apis.desec.getZone(o.domain);
+    // Niet in ons account maar wel bezet: bij een andere aanbieder (overstappen) of iemand anders.
+    if (!z && e instanceof ApiError && (e.status === 409 || (e.status === 400 && /conflict|exist|unavailable|already|bezet/i.test(e.message)))) throw new WaitError(WAIT_RELEASE);
+    if (!z) throw e;
+  }
+  return z;
+}
+
+/** DKIM (en DMARC als die er nog niet is) van het maildomein bij Scaleway in de zone van de klant. */
+export async function writeMailRecords(ctx: Ctx, o: OrderRow, dom: unknown, projectId: string) {
+  const rec = temRecords(dom as never, projectId);
+  const desec = desecFor(ctx, o);
+  const rrsets: { subname: string; type: string; ttl: number; records: string[] }[] = [];
+  if (rec.dkim) rrsets.push({ subname: subnameOf(rec.dkim.name, o.domain), type: "TXT", ttl: 3600, records: [txtRecord(rec.dkim.value)] });
+  if (rec.dmarc) {
+    const sub = subnameOf(rec.dmarc.name || "_dmarc", o.domain);
+    if (!(await desec.getRrset(o.domain, sub, "TXT"))) rrsets.push({ subname: sub, type: "TXT", ttl: 3600, records: [txtRecord(rec.dmarc.value)] });
+  }
+  // Geen SPF hier: het cluster beheert het apex-TXT-record zelf en voegt spfExtra toe.
+  if (rrsets.length) await desec.putRrsets(o.domain, rrsets);
+  return rec;
+}
+
+/**
+ * Certificaten (Let's Encrypt, DNS-01) gaan via ons acme-dns-adres: de uitdagingen voor cloud. en mail.
+ * wijzen naar _acme.<domein>; alleen dat ene TXT-record kan de server via ons bijwerken.
+ */
+export async function writeAcmeCnames(ctx: Ctx, o: OrderRow) {
+  await desecFor(ctx, o).putRrsets(o.domain, ["cloud", "mail"].map((h) => ({ subname: `_acme-challenge.${h}`, type: "CNAME", ttl: 3600, records: [`_acme.${o.domain}.`] })));
+}
+
 // ───────── De stappen ─────────
 
 type StepFn = (ctx: Ctx, o: OrderRow) => Promise<string | undefined>;
@@ -150,15 +202,7 @@ const STEPS: [string, StepFn][] = [
       event(ctx.db, o.id, transferCode ? "adres-overgenomen" : "adres-aangevraagd", { naam: r.naam });
       return transferCode ? "Je adres is overgenomen, met al je DNS-records" : "Je adres is aangevraagd bij de adressendienst";
     }
-    let z = await ctx.apis.desec.getZone(o.domain);
-    if (!z) {
-      try { z = await ctx.apis.desec.createZone(o.domain); }
-      catch (e) {
-        // Bestaat al (bijv. na een onderbroken poging)? Dan alsnog ophalen.
-        if (e instanceof ApiError && e.status === 409) z = await ctx.apis.desec.getZone(o.domain);
-        if (!z) throw e;
-      }
-    }
+    const z = await ensureZone(ctx, o);
     const dnskeys = ((z.keys ?? []) as any[]).map((k) => k.dnskey).filter(Boolean);
     const ds = ((z.keys ?? []) as any[]).flatMap((k) => k.ds ?? []).filter(Boolean);
     patchState(ctx.db, o.id, { zone: true, dnskeys, ds });
@@ -277,16 +321,7 @@ const STEPS: [string, StepFn][] = [
     if (!dom?.id) throw new ApiError("Scaleway", 502, "Scaleway gaf geen maildomein-id terug");
     st = patchState(ctx.db, o.id, { temDomainId: dom.id });
 
-    const rec = temRecords(dom, st.projectId);
-    const desec = desecFor(ctx, o);
-    const rrsets: { subname: string; type: string; ttl: number; records: string[] }[] = [];
-    if (rec.dkim) rrsets.push({ subname: subnameOf(rec.dkim.name, o.domain), type: "TXT", ttl: 3600, records: [txtRecord(rec.dkim.value)] });
-    if (rec.dmarc) {
-      const sub = subnameOf(rec.dmarc.name || "_dmarc", o.domain);
-      if (!(await desec.getRrset(o.domain, sub, "TXT"))) rrsets.push({ subname: sub, type: "TXT", ttl: 3600, records: [txtRecord(rec.dmarc.value)] });
-    }
-    // Geen SPF hier: het cluster beheert het apex-TXT-record zelf en voegt spfExtra toe.
-    if (rrsets.length) await desec.putRrsets(o.domain, rrsets);
+    const rec = await writeMailRecords(ctx, o, dom, st.projectId);
     patchState(ctx.db, o.id, { spfExtra: rec.spfExtra });
     // Laat Scaleway de records controleren; dat gebeurt op de achtergrond en houdt "klaar" niet op.
     await scw.req("POST", `${base}/${dom.id}/check`, {}).catch((e) => event(ctx.db, o.id, "tem-check", (e as Error).message));
@@ -294,9 +329,7 @@ const STEPS: [string, StepFn][] = [
   }],
 
   ["dns-token", async (ctx, o) => {
-    // Certificaten (Let's Encrypt, DNS-01) gaan via ons acme-dns-adres: de uitdagingen voor cloud. en mail.
-    // wijzen naar _acme.<domein>; alleen dat ene TXT-record kan de server via ons bijwerken.
-    await desecFor(ctx, o).putRrsets(o.domain, ["cloud", "mail"].map((h) => ({ subname: `_acme-challenge.${h}`, type: "CNAME", ttl: 3600, records: [`_acme.${o.domain}.`] })));
+    await writeAcmeCnames(ctx, o);
     const s = readSecrets(ctx, o);
     if (s.dnsToken && o.dns_token_hash === sha256(s.dnsToken)) return undefined;
     const token = crypto.randomBytes(32).toString("hex");
@@ -348,10 +381,15 @@ export function saveKit(ctx: Ctx, orderId: string): Kit {
     mailRelay: b.includes.mail ? { host: "smtp.tem.scaleway.com", port: 587, user: st.projectId, password: s.apiKey.secretKey, secure: false } : null,
     spfExtra: st.spfExtra ?? "",
     users: b.includes.users + (o.extra_users ?? 0),
+    // DNSSEC van de zone (niet bij een adres van de adressendienst): bij een eigen domein zet de klant deze DS-records bij zijn registrar.
+    ...(!isCentral(o) && Array.isArray(st.ds) && st.ds.length ? { ds: st.ds as string[] } : {}),
   };
   ctx.db.prepare("UPDATE orders SET kit_enc = ? WHERE id = ?").run(ctx.secrets.seal(kit, `kit:${orderId}`), orderId);
   return kit;
 }
+
+/** Stappen die de DNS-zone niet nodig hebben: die lopen alvast door terwijl we op de vorige aanbieder wachten. */
+const ZONE_FREE_STEPS = new Set(["scaleway-project", "scaleway-iam"]);
 
 const LABEL_FAIL: Record<string, string> = {
   "dns-zone": "De DNS-zone kon niet worden aangemaakt",
@@ -370,15 +408,32 @@ export function provisionOrder(ctx: Ctx, orderId: string) {
     if (!o || !["paid", "provisioning"].includes(o.status)) return o?.status;
     if (o.status === "paid") setStatus(ctx.db, o.id, "provisioning");
     const done = new Set(getSteps(ctx.db, o.id).filter((s) => s.state === "done").map((s) => s.id));
+    /** Wachten op de vorige aanbieder (zone nog daar): alleen stappen doen die de zone niet nodig hebben. */
+    let waiting: string | null = null;
     for (const [id, fn] of STEPS) {
       if (done.has(id)) continue;
+      if (waiting && !ZONE_FREE_STEPS.has(id)) continue;
       o = getOrder(ctx.db, orderId)!;
-      setStep(ctx.db, o.id, id, "busy");
+      // Wachten we al op de vorige aanbieder? Dan blijft dat zichtbaar terwijl we opnieuw kijken.
+      setStep(ctx.db, o.id, id, "busy", id === "dns-zone" && orderState(o).waitingSince && !orderState(o).zone ? WAIT_RELEASE : undefined);
       try {
         const detail = await fn(ctx, o);
         setStep(ctx.db, o.id, id, "done", detail);
       } catch (e) {
         const msg = (e as Error).message;
+        if (e instanceof WaitError) {
+          // Geen fout: snel opnieuw kijken, zonder oplopende wachttijd en zonder mail na 10 keer.
+          const ws = orderState(o);
+          if (!ws.waitingSince) { patchState(ctx.db, o.id, { waitingSince: Date.now() }); event(ctx.db, o.id, "wacht-op-dns", msg); }
+          else if (!ws.waitMailed && Date.now() - ws.waitingSince > 24 * 3600_000) {
+            patchState(ctx.db, o.id, { waitMailed: true });
+            await trySend(ctx.mail, ctx.cfg.adminEmail, `Wacht al een dag op DNS: ${o.domain}`, `Bestelling ${o.id} (${o.domain}) wacht al een dag tot de DNS-zone bij deSEC vrijkomt. Die staat in een ander deSEC-account: bij de vorige aanbieder van de klant, of bij iemand anders.`);
+          }
+          setStep(ctx.db, o.id, id, "busy", e.detail);
+          ctx.db.prepare("UPDATE orders SET next_attempt_at = ? WHERE id = ?").run(Date.now() + ctx.cfg.loopMs, o.id);
+          waiting = e.detail;
+          continue;
+        }
         event(ctx.db, o.id, `step-${id}-error`, msg);
         if (isPermanent(e)) {
           const text = `${LABEL_FAIL[id] ?? "Er ging iets mis"}: ${msg}`;
@@ -395,6 +450,7 @@ export function provisionOrder(ctx: Ctx, orderId: string) {
         return "provisioning";
       }
     }
+    if (waiting) return "provisioning";
     ctx.db.prepare("UPDATE orders SET attempts = 0, next_attempt_at = 0 WHERE id = ?").run(orderId);
     setStatus(ctx.db, orderId, "ready");
     event(ctx.db, orderId, "ready");

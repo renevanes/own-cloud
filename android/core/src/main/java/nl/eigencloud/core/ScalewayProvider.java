@@ -4,9 +4,15 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
-/** Scaleway (France, Netherlands, Poland). Config: secretKey, projectId, imageLabel?. */
+/** Scaleway (France, Netherlands, Poland): servers and DNS (adapters/scaleway.ts). Config: secretKey, projectId, imageLabel?. */
 public final class ScalewayProvider implements Provider {
+    /** The registry entry (servers, storage, DNS; no Caddy module). */
+    static final Adapters.Adapter ADAPTER = new Adapters.Adapter("scaleway",
+            new Adapters.Servers(ScalewayProvider::new, ScalewayProvider::fetchSizes), true,
+            new Adapters.Dns(ScalewayProvider::connect, (name, f, zone) -> new Dns(name, Adapters.field(f, "secretKey"), zone), null));
+
     static final String[] ZONES = {"nl-ams-1", "nl-ams-2", "nl-ams-3", "fr-par-1", "fr-par-2", "fr-par-3", "pl-waw-1", "pl-waw-2", "pl-waw-3"};
 
     private final Map<String, Object> cfg;
@@ -120,4 +126,100 @@ public final class ScalewayProvider implements Provider {
     @Override public boolean supportsPtr() { return false; }
 
     @Override public void setPtr(ServerInfo server, String hostname) { /* not supported */ }
+
+    // ───────── Sizes ─────────
+
+    private static final Pattern TYPES = Pattern.compile("^(DEV1|PLAY2|PRO2|GP1|STARDUST|POP2)", Pattern.CASE_INSENSITIVE);
+
+    /** Live server types (x86) with monthly prices, cheapest first. */
+    public static List<Catalog.SizeOption> fetchSizes(Map<String, Object> cfg, String region) throws IOException {
+        List<Catalog.SizeOption> out = new ArrayList<>();
+        Object j = Catalog.getJson(Endpoints.SCALEWAY + "/instance/v1/zones/" + region + "/products/servers?per_page=100", Http.headers("x-auth-token", Json.jsString(cfg.get("secretKey"))));
+        Map<String, Object> srv = Json.map(j, "servers");
+        if (srv == null) throw new IOException("Scaleway: onverwacht antwoord");
+        for (Map.Entry<String, Object> e : srv.entrySet()) {
+            Object s = e.getValue();
+            if (!TYPES.matcher(e.getKey()).find() || !"x86_64".equals(Json.str(s, "arch"))) continue;
+            double ram = Catalog.jsRound(Catalog.d(Json.path(s, "ram")) / Math.pow(1024, 3));
+            Object ncpus = Json.path(s, "ncpus");
+            Object mp = Json.path(s, "monthly_price");
+            Double monthly;
+            if (mp != null) monthly = Catalog.d(mp);
+            else {
+                Object hp = Json.path(s, "hourly_price");
+                monthly = Json.truthy(hp) ? Catalog.jsRound(Catalog.d(hp) * 730 * 100) / 100 : null;
+            }
+            out.add(new Catalog.SizeOption(e.getKey(), Json.jsString(ncpus) + " vCPU, " + Json.numberToString(ram) + " GB", ram, Catalog.d(ncpus), monthly));
+        }
+        Catalog.sortBy(out, s -> s.monthly != null ? s.monthly : 999);
+        return out;
+    }
+
+    // ───────── DNS (Domains and DNS, domain/v2beta1) ─────────
+
+    /** Checks the key and that the zone is in Domains and DNS; returns its nameservers. */
+    public static List<String> connect(Map<String, Object> fields, String zone) throws IOException {
+        Http.Response r = Http.request("GET", Endpoints.SCALEWAY + "/domain/v2beta1/dns-zones?dns_zone=" + Bytes.encodeURIComponent(zone),
+                Http.headers("x-auth-token", Adapters.fieldJs(fields, "secretKey")), null, ProviderApi.TIMEOUT_MS);
+        if (r.status == 401 || r.status == 403) throw new IOException("Scaleway accepteert deze sleutel niet voor DNS (recht DomainsDNSFullAccess nodig)");
+        if (!r.ok()) throw new IOException("Scaleway DNS: " + r.status + " " + Bytes.head(r.text(), 160));
+        Object j = Json.parse(r.text());
+        for (Object z : Json.listAt(j, "dns_zones")) {
+            String sub = Json.str(z, "subdomain"), dom = Json.str(z, "domain");
+            String full = sub != null && !sub.isEmpty() ? sub + "." + dom : dom;
+            if (!zone.equals(full)) continue;
+            List<Object> ns = Json.listAt(z, "ns");
+            if (ns.isEmpty()) ns = Json.listAt(z, "ns_default");
+            List<String> out = new ArrayList<>();
+            for (Object n : ns) out.add(Json.jsString(n));
+            if (out.isEmpty()) {
+                out.add("ns0.dom.scw.cloud");
+                out.add("ns1.dom.scw.cloud");
+            }
+            return out;
+        }
+        throw new IOException("Zet " + zone + " eerst bij Scaleway: Console → Domains and DNS → domein toevoegen");
+    }
+
+    /**
+     * Scaleway Domains and DNS: all records of a name+type replaced with one PATCH ("set"), or removed ("delete").
+     * Not tested against a live account (MX as data + priority, TXT without quotes), see PROVIDERS.md.
+     */
+    public static final class Dns implements DnsProvider {
+        private final String name, secretKey, zone;
+        private final String root = Endpoints.SCALEWAY;
+
+        public Dns(String name, String secretKey, String zone) {
+            this.name = name;
+            this.secretKey = secretKey;
+            this.zone = zone;
+        }
+
+        @Override public String name() { return name; }
+
+        /** The PATCH body for one setRecords call (also used by the golden tests). */
+        static Map<String, Object> body(String sub, String type, List<String> values, int ttl) {
+            Map<String, Object> idFields = Json.obj("name", sub, "type", type);
+            List<Object> records = new ArrayList<>();
+            for (String v : values) {
+                if ("MX".equals(type)) {
+                    DnsProvider.Mx mx = DnsProvider.parseMx(v);
+                    records.add(Json.obj("name", sub, "type", type, "ttl", (long) ttl, "data", mx.host + ".", "priority", mx.priority));
+                } else {
+                    records.add(Json.obj("name", sub, "type", type, "ttl", (long) ttl, "data", "TXT".equals(type) ? DnsProvider.unquoteTxt(v) : v));
+                }
+            }
+            Map<String, Object> change = values.isEmpty() ? Json.obj("delete", Json.obj("id_fields", idFields))
+                    : Json.obj("set", Json.obj("id_fields", idFields, "records", records));
+            return Json.obj("changes", Json.list(change), "return_all_records", false);
+        }
+
+        @Override
+        public void setRecords(String sub, String type, List<String> values, int ttl) throws IOException {
+            String url = root + "/domain/v2beta1/dns-zones/" + Bytes.encodeURIComponent(zone) + "/records";
+            Map<String, String> h = Http.headers("x-auth-token", secretKey, "content-type", "application/json");
+            if (values.isEmpty()) ProviderApi.call("PATCH", url, h, Json.stringify(body(sub, type, values, ttl)), 404);
+            else ProviderApi.call("PATCH", url, h, Json.stringify(body(sub, type, values, ttl)));
+        }
+    }
 }

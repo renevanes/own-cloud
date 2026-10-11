@@ -1,5 +1,15 @@
 [
   {
+    "version": "1.10",
+    "date": "2026-10-11",
+    "changes": [
+      "Je cloud kan nu ook draaien bij Exoscale en OVHcloud, naast Scaleway, Hetzner en UpCloud; aanbieders mag je mengen",
+      "Domeinen kun je nu ook laten beheren door Scaleway, Hetzner, Exoscale of OVHcloud",
+      "Overstappen naar een andere aanbieder of naar zelf beheren, met je gegevens en je gratis adres mee",
+      "Nieuwe aanbieders kunnen eenvoudig worden toegevoegd via GitHub (zie PROVIDERS.md)"
+    ]
+  },
+  {
     "version": "1.9",
     "date": "2026-10-11",
     "changes": [

@@ -227,6 +227,8 @@ export class ClusterService {
   private adminV = 0;
   /** Neemt opslag/aanbieders/DNS uit de (gerepliceerde) beheerconfiguratie over. Draait op elke data-node. */
   async applyAdminConfig() {
+    // Wakker worden na overstappen: tot de leider de nieuwe configuratie heeft vastgelegd, geldt die uit het opstarten.
+    if (this.cfg.adminOverride) return;
     const raw = this.getSetting("admin_config");
     if (!raw) return;
     const a = JSON.parse(raw) as { v: number; stores?: ClusterConfig["stores"]; providers?: ClusterConfig["providers"]; dns?: ClusterConfig["dns"] };
@@ -310,6 +312,20 @@ export class ClusterService {
       db.prepare("UPDATE cluster_jobs SET status = 'failed', error = 'onderbroken (cluster sliep)', updated = ? WHERE status IN ('pending','running')").run(now);
       if (this.getSetting("cluster_mode") === "sleeping") db.prepare("UPDATE settings SET value = 'awake' WHERE key = 'cluster_mode'").run();
       const woke = !!this.cfg.bootstrapTerm;
+      if (this.cfg.adminOverride) {
+        // Overstappen: de teruggezette database kent nog de opslag en aanbieders van de vorige plek.
+        const up = db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+        const ov = this.cfg.adminOverride;
+        db.transaction(() => {
+          up.run("admin_config", JSON.stringify({ v: Date.now(), stores: this.cfg.stores, providers: this.cfg.providers, dns: this.cfg.dns }));
+          const cur = JSON.parse(this.getSetting("cluster_policy") ?? "{}");
+          up.run("cluster_policy", JSON.stringify({ ...cur, placement: this.cfg.policy.placement, minDataNodes: this.cfg.policy.minDataNodes, witnesses: this.cfg.policy.witnesses }));
+          for (const [k, v] of Object.entries(ov.settings ?? {})) up.run(k, v);
+        })();
+        this.adminV = Number(JSON.parse(this.getSetting("admin_config")!).v);
+        delete this.cfg.adminOverride;
+        this.event("config", "Opslag, servers en DNS van de nieuwe aanbieder overgenomen");
+      }
       this.cfg.bootstrapLeader = false;
       delete this.cfg.bootstrapTerm;
       writeClusterConfig(this.cfgFile, this.cfg);

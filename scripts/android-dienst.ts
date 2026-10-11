@@ -9,6 +9,12 @@
  *   POST <control>/invite          → uitnodigingscode maken (door de eigenaar) → {code}
  *   POST <control>/announcement    → bericht van de aanbieder ({title, body, severity})
  *   POST <control>/staff-reply     → antwoord van de aanbieder op een hulpvraag ({ticket, message})
+ * Overstappen: er draait ook een tweede aanbieder (Dienst B, eigen deSEC-account "b"), adres in "b" van het bestand.
+ *   GET  <control>/mails?dienst=b       → mails van B
+ *   POST <control>/pay?order=<id>&dienst=b
+ *   GET  <control>/zone?name=<domein>   → {account} van de zone bij de nep-deSEC (404 als hij er niet is)
+ *   GET  <control>/order?id=<id>[&dienst=b] → {status, domainMode}
+ *   POST <control>/overstap-view   → wat de TS-console laat zien bij deze toestand ({state} = console.overstap)
  */
 import fs from "node:fs";
 import http from "node:http";
@@ -21,6 +27,7 @@ import { freePort } from "../test/helpers/cluster.js";
 import { updateBrand, saveLogo } from "../src/broker/brand.js";
 import { ensureOwner } from "../src/broker/staff.js";
 import { createInvite, createAnnouncement, staffReply } from "../src/broker/support.js";
+import { view as overstapView } from "../src/console/overstap.js";
 
 const out = process.argv[2];
 const smtp = await smtpSink();
@@ -41,6 +48,24 @@ const broker = await createBroker(loadConfig({
 }));
 await broker.app.listen({ port, host: "127.0.0.1" });
 
+// Tweede aanbieder voor overstappen: zelfde nep-upstream, eigen deSEC-account en mailserver.
+up.desecAccount("desec-b", "b");
+const smtpB = await smtpSink();
+const portB = await freePort();
+const PUBLIC_B = `http://127.0.0.1:${portB}`;
+const brokerB = await createBroker(loadConfig({
+  BROKER_DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "dienst-java-b-")), BROKER_PORT: String(portB), BROKER_PUBLIC_URL: PUBLIC_B,
+  MOLLIE_API_KEY: "test_mollie", MOLLIE_API_URL: `${U}/mollie`,
+  OPENPROVIDER_USERNAME: "rene", OPENPROVIDER_PASSWORD: "op-geheim", OPENPROVIDER_URL: `${U}/op`,
+  DESEC_TOKEN: "desec-b", DESEC_URL: `${U}/desec`,
+  SCW_SECRET_KEY: "scw-org-geheim", SCW_ORGANIZATION_ID: "org-1", SCW_API_URL: `${U}/scw`,
+  BROKER_SMTP_URL: `smtp://127.0.0.1:${smtpB.port}`, BROKER_MAIL_FROM: "Dienst B <dienst@b.test>", BROKER_LOOP_MS: "20", BROKER_BRAND_NAME: "Dienst B",
+}));
+await brokerB.app.listen({ port: portB, host: "127.0.0.1" });
+brokerB.startLoops();
+// De nep-Scaleway kent ook de projectsleutels uit de pakketten (servers aanmaken en opruimen bij overstappen).
+const keyTimer = setInterval(() => { for (const k of up.st.scw.apiKeys) up.st.scw.keys.add(k.secret_key); }, 100);
+
 const readBody = async (req: http.IncomingMessage): Promise<any> => {
   const parts: Buffer[] = [];
   for await (const p of req) parts.push(p as Buffer);
@@ -59,6 +84,10 @@ const control = http.createServer(async (req, res) => {
       if (b.logoPng) saveLogo(broker.ctx.db, "image/png", Buffer.from(b.logoPng, "base64"));
       delete b.logoPng;
       return res.end(JSON.stringify(updateBrand(broker.ctx, b)));
+    }
+    if (req.method === "POST" && u.pathname === "/overstap-view") {
+      const b = await readBody(req);
+      return res.end(JSON.stringify(overstapView({ console: { overstap: b.state } } as never)));
     }
     if (req.method === "POST" && u.pathname === "/invite") {
       const i = createInvite(broker.ctx, owner(), await readBody(req));
@@ -79,20 +108,31 @@ const control = http.createServer(async (req, res) => {
     res.statusCode = 500;
     return res.end(JSON.stringify({ error: (e as Error).message }));
   }
-  if (u.pathname === "/mails") return res.end(JSON.stringify(smtp.mails));
+  const isB = u.searchParams.get("dienst") === "b";
+  if (u.pathname === "/mails") return res.end(JSON.stringify((isB ? smtpB : smtp).mails));
   if (u.pathname === "/pay") {
     const pay = [...up.st.mollie.payments.values()].find((p) => p.metadata?.orderId === u.searchParams.get("order"));
     if (!pay) { res.statusCode = 404; return res.end("{}"); }
     pay.status = "paid";
-    await fetch(`${PUBLIC}/v1/mollie/webhook`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: `id=${pay.id}` });
+    await fetch(`${isB ? PUBLIC_B : PUBLIC}/v1/mollie/webhook`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: `id=${pay.id}` });
     return res.end(JSON.stringify({ ok: true }));
+  }
+  if (u.pathname === "/zone") {
+    const z = up.st.desec.zones.get(u.searchParams.get("name") ?? "");
+    if (!z) { res.statusCode = 404; return res.end("{}"); }
+    return res.end(JSON.stringify({ account: z.account ?? "dienst" }));
+  }
+  if (u.pathname === "/order") {
+    const o = (isB ? brokerB : broker).ctx.db.prepare("SELECT status, domain_mode FROM orders WHERE id = ?").get(u.searchParams.get("id") ?? "") as { status: string; domain_mode: string } | undefined;
+    if (!o) { res.statusCode = 404; return res.end("{}"); }
+    return res.end(JSON.stringify({ status: o.status, domainMode: o.domain_mode }));
   }
   res.statusCode = 404;
   res.end("{}");
 });
 const cport = await freePort();
 control.listen(cport, "127.0.0.1");
-fs.writeFileSync(out, JSON.stringify({ url: PUBLIC, control: `http://127.0.0.1:${cport}`, pid: process.pid }));
-const stop = async () => { control.close(); await broker.close(); await up.close(); await smtp.close(); process.exit(0); };
+fs.writeFileSync(out, JSON.stringify({ url: PUBLIC, control: `http://127.0.0.1:${cport}`, pid: process.pid, b: PUBLIC_B, upstream: U }));
+const stop = async () => { clearInterval(keyTimer); control.close(); await broker.close(); await brokerB.close(); await up.close(); await smtp.close(); await smtpB.close(); process.exit(0); };
 process.on("SIGTERM", stop);
 process.on("SIGINT", stop);

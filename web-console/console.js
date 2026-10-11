@@ -6,7 +6,8 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const root = $("#root");
-const FLAGS = { NL: "🇳🇱", DE: "🇩🇪", FI: "🇫🇮", FR: "🇫🇷", PL: "🇵🇱", SE: "🇸🇪", AT: "🇦🇹", CH: "🇨🇭", BE: "🇧🇪" };
+/** Vlag bij een landcode (NL → 🇳🇱), voor elk land dat een aanbieder opgeeft. */
+const FLAGS = new Proxy({}, { get: (_t, cc) => (typeof cc === "string" && /^[A-Z]{2}$/.test(cc) ? String.fromCodePoint(...[...cc].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65)) : undefined) });
 const eurStr = (m) => (m ? "€ " + String(m.value).replace(".", ",") : "");
 const eur = (n) => (n == null ? "prijs onbekend" : "€ " + Number(n).toFixed(2).replace(".", ","));
 const time = (ms) => {
@@ -71,7 +72,7 @@ if (NATIVE) {
   }, true);
 }
 
-let state = null, config = null, timer = null, dienstTimer = null, aanbiederTimer = null;
+let state = null, config = null, timer = null, dienstTimer = null, aanbiederTimer = null, overstapTimer = null;
 
 const BASE_STEPS = [
   { id: "jij", label: "Jij en je adres" },
@@ -101,6 +102,7 @@ async function render() {
   clearInterval(timer);
   clearTimeout(dienstTimer);
   clearInterval(aanbiederTimer);
+  clearTimeout(overstapTimer);
   $("#lockBtn").hidden = !state.unlocked;
   if (!state.vault) return renderStart();
   if (!state.unlocked) return renderLock();
@@ -480,7 +482,7 @@ async function stepRegelen() {
     <h1>Waar draait je cloud?</h1>
     <p class="lead">Je cloud heeft servers, opslag voor back-ups en een manier om mail te versturen nodig. ${info ? "Dat kunnen wij voor je regelen, of de app zet het klaar bij een aanbieder van jezelf." : "De app zet dat zelf voor je klaar."} Je gegevens zijn altijd versleuteld met jouw sleutel${info ? "; ook de dienst kan ze niet lezen" : ""}.</p>
     ${q ? quickHtml + dienstHtml : dienstHtml + quickHtml}
-    <p class="advanced"><button class="link" id="zelf">Zelf per onderdeel kiezen</button> <span class="muted">— voor wie aanbieders wil combineren (Hetzner, UpCloud, Exoscale, eigen opslag)</span></p>`);
+    <p class="advanced"><button class="link" id="zelf">Zelf per onderdeel kiezen</button> <span class="muted">— voor wie aanbieders wil combineren (${esc([...new Set([...state.offers.servers, ...state.offers.stores].map((o) => o.name.split(" ")[0]))].join(", "))})</span></p>`);
   $("#zelf").onclick = async () => { if (q) await api("/api/quick/off", { method: "POST" }); config = await api("/api/config"); go("opslag"); };
   $("#otherAanbieder")?.addEventListener("click", () => chooseAanbieder(list));
   root.onclick = async (e) => {
@@ -861,8 +863,9 @@ async function stepServers() {
     if (link) {
       const o = offers.find((x) => x.id === link);
       $("#linkForm").innerHTML = `<form class="panel" id="lf"><b>${esc(o.name)} koppelen</b>
-        ${o.fields.map((fl) => `<label>${esc(fl.label)}<input name="${fl.key}" ${fl.secret ? 'type="password"' : ""} autocomplete="off" required></label>`).join("")}
-        ${o.signupUrl ? `<p class="muted" style="margin:0">Maak een API-token aan in de <a href="${o.signupUrl}" target="_blank" rel="noopener">console van ${esc(o.name)}</a>.</p>` : ""}
+        ${o.keyHelp ? `<p class="muted" style="margin:0">${esc(o.keyHelp)}</p>` : ""}
+        ${fieldInputs(o.fields)}
+        ${o.signupUrl ? `<p class="muted" style="margin:0">Nog geen account? <a href="${esc(o.signupUrl)}" target="_blank" rel="noopener">Naar ${esc(o.name)}</a>.</p>` : ""}
         <ul class="results" id="lres"></ul><p class="msg"></p><div><button class="btn">Koppelen en prijzen ophalen</button></div></form>`;
       const lf = $("#lf");
       lf.onsubmit = async (ev) => {
@@ -899,18 +902,22 @@ async function stepDns() {
     return;
   }
   const free = config.domainMode === "free";
+  // Alle aanbieders met DNS komen uit de registry (state.offers.dns); "zelf regelen" is altijd mogelijk.
+  const offers = state.offers.dns ?? [];
+  const cur = config.dnsMode && config.dnsMode !== "dienst" ? config.dnsMode : offers[0]?.id ?? "manual";
+  const whoOf = (id) => offers.find((o) => o.id === id)?.name.replace(/ \(.*\)$/, "") ?? id;
   root.innerHTML = wizardShell("domein", `
     <h1>Domein koppelen</h1>
     <p class="lead">${free ? `${esc(d)} komt van deSEC: gratis, open source en zonder reclame. De console maakt het account voor je aan; jij hoeft alleen een plaatje over te typen en een link in je mail aan te klikken.`
       : `Je cloud zet zelf de juiste DNS-records voor ${esc(d)}: waar de site en je mail te vinden zijn, en de beveiliging van je mail. Daarvoor heeft hij toegang nodig tot je DNS.`}</p>
     ${free ? "" : `<form class="fields" id="f">
       <fieldset class="radios">
-        <label class="check"><input type="radio" name="mode" value="desec" ${config.dnsMode !== "hetzner" && config.dnsMode !== "manual" ? "checked" : ""}> deSEC (gratis, open source, Berlijn — aanbevolen)</label>
-        <label class="check"><input type="radio" name="mode" value="hetzner" ${config.dnsMode === "hetzner" ? "checked" : ""}> Hetzner DNS</label>
-        <label class="check"><input type="radio" name="mode" value="manual" ${config.dnsMode === "manual" ? "checked" : ""}> Ik regel DNS zelf</label>
+        ${offers.map((o, i) => `<label class="check"><input type="radio" name="mode" value="${esc(o.id)}" ${cur === o.id ? "checked" : ""}> ${FLAGS[o.home] ?? ""} ${esc(o.name)}${i === 0 && o.id === "desec" ? " — aanbevolen" : ""}${o.sharesKeyWith && config.providers[o.sharesKeyWith] ? ` <span class="muted">(sleutel al gekoppeld)</span>` : ""}</label>`).join("")}
+        <label class="check"><input type="radio" name="mode" value="manual" ${cur === "manual" ? "checked" : ""}> Ik regel DNS zelf</label>
       </fieldset>
       <p class="desecNew" style="margin:0"><button type="button" class="btn" id="newDesec">Nog geen deSEC-account? Laat de console er een maken</button></p>
-      <label class="tok">API-token<input name="token" type="password" autocomplete="off" placeholder="${config.dns[0]?.token ?? ""}"><small class="hint"></small></label>
+      <div class="dnsFields"></div>
+      <p class="muted hint" style="margin:0"></p>
       <p class="msg"></p>
       <div><button class="btn">Koppelen</button></div>
     </form>`}
@@ -925,28 +932,40 @@ async function stepDns() {
     const f = $("#f");
     const upd = () => {
       const m = f.mode.value;
-      $(".tok", f).hidden = m === "manual";
+      const o = offers.find((x) => x.id === m);
+      const prev = config.dns.find((x) => x.type === m);
+      // Al gekoppeld (voor DNS, of dezelfde sleutel bij Servers): velden mogen leeg blijven.
+      const known = !!prev || !!(o?.sharesKeyWith && config.providers[o.sharesKeyWith]);
+      $(".dnsFields", f).innerHTML = o ? fieldInputs(o.fields, { optional: known, placeholder: (k) => prev?.[k] ?? prev?.fields?.[k] ?? config.providers[o.id]?.[k] ?? "" }) : "";
       $(".desecNew", f).hidden = m !== "desec" || !!config.dnsMode;
-      $(".hint", f).innerHTML = m === "desec" ? 'Al een account op <a href="https://desec.io" target="_blank" rel="noopener">desec.io</a>? Maak een token onder "Token Management" en plak het hier.' : m === "hetzner" ? "Hetzner Console → je project → Beveiliging → API-tokens. Maak de DNS-zone eerst aan." : "";
-      $("button[type=submit], form#f > div > button", f).textContent = m === "manual" ? "Opslaan" : "Koppelen";
+      $(".hint", f).innerHTML = o ? `${esc(o.keyHelp)}${known && !prev ? " Je sleutel van Servers wordt gebruikt; je hoeft niets in te vullen." : ""}${o.signupUrl ? ` <a href="${esc(o.signupUrl)}" target="_blank" rel="noopener">Naar ${esc(whoOf(o.id))}</a>` : ""}` : "";
+      $("form#f > div > button", f).textContent = m === "manual" ? "Opslaan" : "Koppelen";
     };
-    f.onchange = upd;
+    f.onchange = (e) => { if (e.target.name === "mode") upd(); };
     upd();
     $("#newDesec").onclick = () => { $(".desecNew", f).hidden = true; desecSignup($("#signup"), done); };
-    if (config.dnsMode && config.dnsMode !== "manual") api("/api/dns/check").then((r) => nsPanel(r, d, f.mode.value === "desec" ? "deSEC" : "Hetzner")).catch(() => {});
+    if (config.dnsMode && config.dnsMode !== "manual") api("/api/dns/check").then((r) => nsPanel(r, d, whoOf(config.dnsMode))).catch(() => {});
     f.onsubmit = async (e) => {
       e.preventDefault();
+      const m = f.mode.value;
+      const o = offers.find((x) => x.id === m);
+      const fields = Object.fromEntries((o?.fields ?? []).map((fl) => [fl.key, f[fl.key]?.value ?? ""]));
       try {
-        const r = await busy($("form#f > div > button", f), () => api("/api/dns", { method: "POST", body: { mode: f.mode.value, token: f.token.value } }));
+        const r = await busy($("form#f > div > button", f), () => api("/api/dns", { method: "POST", body: { mode: m, token: fields.token, fields } }));
         config = await api("/api/config");
-        formMsg(f, f.mode.value === "manual" ? "Opgeslagen." : "Gekoppeld.", true);
+        formMsg(f, m === "manual" ? "Opgeslagen." : "Gekoppeld.", true);
         $("#nx").disabled = false;
-        if (f.mode.value === "manual") $("#nsBox").innerHTML = `<div class="note">Na het starten laat je cloud onder <b>Instellingen → Gezondheid</b> precies zien welke records je moet zetten.</div>`;
-        else nsPanel(r, d, f.mode.value === "desec" ? "deSEC" : "Hetzner");
+        if (m === "manual") $("#nsBox").innerHTML = `<div class="note">Na het starten laat je cloud onder <b>Instellingen → Gezondheid</b> precies zien welke records je moet zetten.</div>`;
+        else nsPanel(r, d, whoOf(m));
       } catch (err) { formMsg(f, err.message); }
     };
   }
   $("#nx").onclick = () => go(nextOf("domein"));
+}
+
+/** Invoervelden voor inloggegevens van een aanbieder (uit de registry: label, geheim, uitleg, optioneel). */
+function fieldInputs(fields, { optional = false, placeholder = () => "" } = {}) {
+  return fields.map((fl) => `<label>${esc(fl.label)}<input name="${esc(fl.key)}" ${fl.secret ? 'type="password"' : ""} autocomplete="off" spellcheck="false" ${optional || fl.optional ? "" : "required"} placeholder="${esc(placeholder(fl.key) || fl.placeholder || "")}">${fl.help ? `<small>${esc(fl.help)}</small>` : ""}</label>`).join("");
 }
 
 /** Waar je domein naar moet wijzen, en of dat al zo is. */
@@ -1111,6 +1130,7 @@ const day = (d) => new Date(typeof d === "number" ? d : d + "T12:00:00").toLocal
 async function renderAbo(msg) {
   const box = $("#abo");
   if (!box) return;
+  if (config?.overstap) return renderOverstap();
   let b;
   try { b = await api("/api/dienst/billing"); }
   catch (err) { box.innerHTML = `<h2>Abonnement</h2><p class="msg err">${esc(err.message)}</p>`; return; }
@@ -1131,6 +1151,7 @@ async function renderAbo(msg) {
         ${!cancelled ? `<button class="btn" data-a="bundle">Ander pakket</button><button class="btn" data-a="payment-method">Betaalmethode wijzigen</button>` : ""}
         ${b.canResume ? `<button class="btn primary" data-a="resume">Toch doorgaan</button>` : ""}
         ${b.domainTransferable ? `<button class="btn" data-a="authcode">Verhuiscode domein</button>` : ""}
+        ${!cancelled ? `<button class="btn" data-a="overstap">Overstappen</button>` : ""}
         ${users && users.extraUserMonthly && !cancelled ? `<button class="btn" data-a="users">Gebruikers</button>` : ""}
         <button class="btn" data-a="help">Hulp vragen</button>
         ${!cancelled ? `<button class="btn danger" data-a="cancel">Opzeggen</button>` : ""}
@@ -1162,6 +1183,7 @@ async function renderAbo(msg) {
       return;
     }
     if (a === "help") return helpPanel(extra, fail);
+    if (a === "overstap") return overstapKiezen(box);
     if (a === "bundle") {
       extra.innerHTML = `<form class="fields" id="bf"><fieldset class="radios">${b.bundles.map((x) => `<label class="check"><input type="radio" name="bundle" value="${esc(x.id)}" ${x.current ? "checked" : ""}> ${esc(x.title)} — ${eurStr(x.monthly)} per maand${x.current ? " (nu)" : ""}</label>`).join("")}</fieldset>
         <p class="muted" style="margin:0"><small>Meer servers kun je meteen gebruiken; het nieuwe bedrag geldt vanaf de volgende betaling.</small></p>
@@ -1181,6 +1203,174 @@ async function renderAbo(msg) {
       renderAbo({ ok: true, text: a === "cancel" ? `Opgezegd. Je cloud loopt door tot ${r.endsAt ? day(r.endsAt) : "het einde van de periode"}.` : a === "resume" ? "Je abonnement loopt weer door." : "Gelukt." });
     } catch (err) { fail(err); }
   };
+}
+
+// ═════════ Overstappen naar een andere aanbieder of naar zelf beheren ═════════
+
+const mbStr = (b) => (b < 1e6 ? `${Math.max(1, Math.round(b / 1e3))} kB` : b < 1e9 ? `${Math.round(b / 1e6)} MB` : `${(b / 1e9).toFixed(1).replace(".", ",")} GB`);
+
+/** Kiezen waar je cloud heen gaat: een andere aanbieder van de lijst, of zelf beheren. */
+async function overstapKiezen(box) {
+  const { aanbieders: all, gekozen } = await api("/api/aanbieders").catch(() => ({ aanbieders: [] }));
+  const cur = gekozen ?? state.aanbieder ?? null;
+  const list = all.filter((a) => a.url !== cur && a.url !== config.dienst?.url);
+  box.innerHTML = `<h2>Overstappen</h2><div class="panel">
+    <p style="margin:0">Je cloud verhuist met al je mail, agenda's en foto's. Hij gaat daarvoor even slapen, je gegevens gaan versleuteld naar de nieuwe plek en daar wordt hij weer wakker. Je huidige abonnement wordt daarna opgezegd.</p>
+    <div class="choices" id="olist">${list.map((a, i) => `<button class="choice aanbieder" data-i="${i}"><span class="alogo" id="ologo${i}"></span><span><b>${esc(a.naam)}</b><span class="muted">${esc([a.land, a.omschrijving].filter(Boolean).join(" · "))}</span><span class="muted aprice" id="oprice${i}"></span></span></button>`).join("")}
+      <button class="choice" data-zelf="1"><span><b>Zelf beheren</b><span class="muted">Met je eigen account bij Scaleway (één sleutel) en je eigen DNS bij deSEC. Je betaalt Scaleway rechtstreeks.</span></span></button></div>
+    <p class="msg" id="omsg"></p>
+    <div><button class="link" id="oback">Terug naar je abonnement</button></div></div>`;
+  list.forEach(async (a, i) => {
+    try {
+      const b = await api(`/api/aanbieder/brand?url=${encodeURIComponent(a.url)}`);
+      if (b.logo && $(`#ologo${i}`)) $(`#ologo${i}`).innerHTML = `<img src="${esc(b.logo)}" alt="">`;
+      const from = (b.bundles ?? []).map((x) => Number(x.monthly?.value)).filter((n) => n > 0).sort((x, y) => x - y)[0];
+      if (from && $(`#oprice${i}`)) $(`#oprice${i}`).textContent = `vanaf ${eurStr({ currency: "EUR", value: from.toFixed(2) })} per maand`;
+    } catch { if ($(`#oprice${i}`)) $(`#oprice${i}`).textContent = "nu niet bereikbaar"; }
+  });
+  $("#oback").onclick = () => renderAbo();
+  $("#olist").onclick = async (e) => {
+    const el = e.target.closest?.("[data-i],[data-zelf]");
+    if (!el) return;
+    const naar = el.dataset.zelf ? "zelf" : list[Number(el.dataset.i)].url;
+    try {
+      await busy(el, () => api("/api/overstap/start", { method: "POST", body: { naar } }));
+      config = await api("/api/config");
+      renderOverstap();
+    } catch (err) { $("#omsg").textContent = err.message; $("#omsg").className = "msg err"; }
+  };
+}
+
+/** Wat er gebeurt en hoe lang je cloud offline is. */
+function overstapUitleg(v) {
+  const naar = v.naar === "zelf" ? "je eigen account bij Scaleway" : esc(v.naarNaam);
+  const min = v.schatting?.minuten;
+  const dns = v.van.central
+    ? `<li>Je adres <b>${esc(v.van.domain)}</b> gaat mee met de overdrachtscode; er verandert niets aan. Zodra ${naar} klaarstaat, beheert ${naar} je adres al: zet daarna niet te lang over.</li>`
+    : v.van.mode === "own"
+      ? `<li>Je domein <b>${esc(v.van.domain)}</b> blijft bij je eigen registrar. De DNS verhuist naar ${naar}; de nameservers blijven hetzelfde. <b>Gebruik je DNSSEC?</b> Haal dan vóór het overzetten bij je registrar de DS-records weg; na het overzetten krijg je de nieuwe om in te vullen. Anders is je domein tussendoor voor sommige netwerken onbereikbaar.</li>`
+      : v.naar === "zelf"
+        ? `<li>Je domein <b>${esc(v.van.domain)}</b> staat geregistreerd via ${esc(v.van.naam)}. De DNS komt in je eigen deSEC-account; DNSSEC gaat bij het register even uit. Daarna krijg je de verhuiscode om je domein naar een registrar naar keuze te verhuizen.</li>`
+        : `<li>Je domein <b>${esc(v.van.domain)}</b> verhuist met de verhuiscode naar ${naar}. DNSSEC gaat even uit en ${naar} zet het daarna weer aan.</li>`;
+  return `<ul class="results">
+    <li>Je cloud gaat slapen bij ${esc(v.van.naam)}: alles wordt versleuteld weggeschreven en gecontroleerd.</li>
+    <li>Je gegevens gaan versleuteld naar ${naar}${v.schatting ? ` (${v.schatting.objects} bestanden, ${mbStr(v.schatting.bytes)})` : ""}. Laat ${DEVICE} aan staan en verbonden tot het klaar is.</li>
+    <li>Daarna wordt je cloud wakker bij ${naar} en zegt de console je abonnement bij ${esc(v.van.naam)} op. Je oude opslag ruimt ${esc(v.van.naam)} daarna op.</li>
+    ${dns}
+    <li><b>Je cloud is ${min ? `ongeveer ${min} minuten` : "een tijdje"} offline.</b> Mail die in die tijd binnenkomt, wordt door de afzenders later opnieuw aangeboden.</li>
+  </ul>`;
+}
+
+/** Het overstappen zelf: inloggen en bestellen bij de nieuwe aanbieder, betalen, overzetten, en de voortgang. */
+async function renderOverstap(msg) {
+  const box = $("#abo");
+  if (!box) return;
+  clearTimeout(overstapTimer);
+  let v;
+  try { v = await api("/api/overstap"); } catch (err) { box.innerHTML = `<h2>Overstappen</h2><p class="msg err">${esc(err.message)}</p>`; return; }
+  if (!v.actief) { config = await api("/api/config"); return renderAbo(); }
+  const brand = v.naar !== "zelf" ? await api(`/api/aanbieder/brand?url=${encodeURIComponent(v.naar)}`).catch(() => null) : null;
+  const title = v.stap === "klaar" ? `Je cloud draait nu ${v.naar === "zelf" ? "in je eigen account" : `bij ${esc(v.naarNaam)}`}` : v.naar === "zelf" ? "Overstappen naar zelf beheren" : `Overstappen naar ${esc(v.naarNaam)}`;
+  const stop = ["inloggen", "bestellen", "betalen", "zelf", "gereed"].includes(v.stap) ? `<p style="margin:0"><button class="link" id="oStop">Stoppen met overstappen</button></p>` : "";
+  let inner = "";
+  if (v.stap === "inloggen") {
+    inner = `${overstapUitleg(v)}<form class="fields" id="of"><label>Je e-mailadres voor ${esc(v.naarNaam)}<input type="email" name="email" required value="${esc(v.email ?? config.alertEmail ?? "")}"></label><div><button class="btn primary">Stuur de code</button></div></form>
+      <form class="fields" id="og" hidden><label>Code uit de mail<input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required></label><div><button class="btn primary">Inloggen</button></div></form>`;
+  } else if (v.stap === "bestellen") {
+    const reg = v.van.mode === "register" || v.van.mode === "transfer";
+    inner = `${overstapUitleg(v)}<form class="fields" id="of"><fieldset class="radios">${(brand?.bundles ?? []).map((x, i) => `<label class="check"><input type="radio" name="bundle" value="${esc(x.id)}" ${i === 0 ? "checked" : ""}> ${esc(x.title)} — ${eurStr(x.monthly)} per maand</label>`).join("")}</fieldset>
+      ${reg ? `<div class="reg"><h3 style="margin:0">Houder van het domein</h3><p class="muted" style="margin:0"><small>Nodig om je domein te verhuizen.</small></p>
+        <div class="row"><label>Voornaam<input name="firstName" required></label><label>Achternaam<input name="lastName" required></label></div>
+        <label>Bedrijf (optioneel)<input name="company"></label>
+        <div class="row"><label>Straat<input name="street" required></label><label style="flex:0 0 110px">Nummer<input name="number" required></label></div>
+        <div class="row"><label style="flex:0 0 140px">Postcode<input name="zipcode" required></label><label>Plaats<input name="city" required></label></div>
+        <div class="row"><label>Land<input name="country" value="NL" maxlength="2" required></label><label>Telefoon<input name="phone" type="tel" placeholder="+31 6 12345678" required></label></div>
+        <label>E-mailadres<input name="email" type="email" required value="${esc(v.email ?? "")}"></label></div>` : ""}
+      <label class="check"><input type="checkbox" name="terms" required><span>Ik ga akkoord met de ${brand?.termsUrl ? `<a href="${esc(brand.termsUrl)}" target="_blank" rel="noopener">voorwaarden</a>` : "voorwaarden"} van ${esc(v.naarNaam)}</span></label>
+      <div><button class="btn primary">Afrekenen met iDEAL</button></div></form>`;
+  } else if (v.stap === "betalen") {
+    const s = v.bestelling;
+    inner = `<p style="margin:0">${!s || s.status === "awaiting_payment" ? "Rond de betaling af. Daarna zet " + esc(v.naarNaam) + " alles voor je klaar." : s.status === "failed" ? `Er ging iets mis bij ${esc(v.naarNaam)}: ${esc(s.error ?? "")}` : `${esc(v.naarNaam)} zet alles voor je klaar.`}</p>
+      ${s?.steps?.length ? launchView(s) : ""}
+      ${v.checkoutUrl && (!s || s.status === "awaiting_payment") ? `<p><button class="btn" id="oPay">Naar de betaalpagina</button></p>` : ""}`;
+  } else if (v.stap === "zelf") {
+    inner = `${overstapUitleg(v)}<form class="fields" id="of">
+      <p class="muted" style="margin:0">Maak bij Scaleway een API-sleutel voor jezelf (zie <button type="button" class="link" data-open="${esc(state.scaleway.keys)}">de sleutelpagina</button>) en bij deSEC een token dat domeinen mag aanmaken (<button type="button" class="link" data-open="https://desec.io/tokens">tokens bij deSEC</button>).</p>
+      <label>Toegangssleutel (access key)<input name="accessKey" placeholder="SCW…" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
+      <label>Geheime sleutel (secret key)<input name="secretKey" type="password" autocomplete="off" spellcheck="false" required></label>
+      <details class="adv"><summary>Project kiezen (meestal niet nodig)</summary><label>Project-ID<input name="projectId" autocomplete="off" spellcheck="false"></label></details>
+      <label>Token van deSEC<input name="desecToken" autocomplete="off" spellcheck="false" required></label>
+      <div><button class="btn primary">Controleren</button></div></form>`;
+  } else if (v.stap === "gereed") {
+    inner = `${overstapUitleg(v)}<p class="note" style="margin:0">${v.naar === "zelf" ? "Je sleutels werken." : `${esc(v.naarNaam)} staat klaar${v.bestelling?.status === "ready" ? "" : " en wacht op je DNS"}.`} Kies een rustig moment: tijdens het overzetten is je cloud offline.</p>
+      <div><button class="btn primary big" id="oNu">Nu overzetten</button></div>`;
+  } else if (v.stap === "klaar") {
+    const k = v.klaar ?? {};
+    inner = `<p style="margin:0">Je mail, agenda's en foto's zijn mee. Je abonnement bij ${esc(v.van.naam)} is opgezegd${k.endsAt ? ` (loopt af op ${day(k.endsAt)})` : ""}; zij ruimen je oude opslag op.</p>
+      ${k.ds?.length ? `<p class="note warn" style="margin:0"><b>Nog één ding:</b> zet bij je registrar de nieuwe DNSSEC-gegevens (DS-records) voor ${esc(v.van.domain)}:</p><div class="ns">${k.ds.map((x) => `<code>${esc(x)}</code>`).join("")}</div>` : ""}
+      ${k.authCode ? `<p style="margin:0">Verhuiscode voor <b>${esc(v.van.domain)}</b> (om je domein bij ${esc(v.van.naam)} weg te halen):</p><div class="ns"><code>${esc(k.authCode)}</code></div>` : ""}
+      <div><button class="btn primary" id="oClose">Sluiten</button></div>`;
+  } else if (v.stap === "teruggezet") {
+    inner = `<p style="margin:0">Je cloud draait weer bij ${esc(v.van.naam)}, met al je gegevens.${v.klaar?.ds?.length ? "" : ""}</p>
+      ${v.klaar?.ds?.length ? `<p class="note warn" style="margin:0">Zet bij je registrar deze DNSSEC-gegevens (DS-records):</p><div class="ns">${v.klaar.ds.map((x) => `<code>${esc(x)}</code>`).join("")}</div>` : ""}
+      <div><button class="btn primary" id="oClose">Sluiten</button></div>`;
+  } else {
+    // overzetten, mislukt, terug
+    inner = `${launchView({ steps: v.stappen })}
+      ${v.fout ? `<p class="note warn" style="margin:0">${esc(v.fout)}</p>
+        <div class="actions" style="margin:0">${v.stap === "mislukt" ? `<button class="btn primary" id="oNu">Opnieuw proberen</button>` : ""}${v.kanTerug ? `<button class="btn" id="oTerug">Terug naar ${esc(v.van.naam)}</button>` : ""}</div>` : `<p class="muted" style="margin:0"><small>Laat ${DEVICE} aan staan tot het klaar is. Je kunt dit scherm sluiten; de console gaat verder waar hij was.</small></p>`}`;
+  }
+  box.innerHTML = `<h2>${title}</h2>${brandLine(brand)}<div class="panel">${inner}${stop}<p class="msg ${msg?.ok ? "ok" : msg ? "err" : ""}" id="omsg">${esc(msg?.text ?? "")}</p></div>`;
+  const fail = (err) => { $("#omsg").textContent = err.message; $("#omsg").className = "msg err"; };
+  box.onclick = null;
+  box.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => (NATIVE ? NATIVE.openUrl(b.dataset.open) : window.open(b.dataset.open, "_blank", "noopener")));
+  $("#oStop")?.addEventListener("click", async (e) => {
+    if (!confirm(v.orderId ? `Stoppen met overstappen?\n\nJe bestelling bij ${v.naarNaam} wordt opgezegd. Je cloud blijft bij ${v.van.naam}.` : "Stoppen met overstappen?")) return;
+    try { await busy(e.target, () => api("/api/overstap/stoppen", { method: "POST" })); config = await api("/api/config"); renderAbo(); } catch (err) { fail(err); }
+  });
+  $("#oClose")?.addEventListener("click", async (e) => { try { await busy(e.target, () => api("/api/overstap/stoppen", { method: "POST" })); config = await api("/api/config"); renderDash(); } catch (err) { fail(err); } });
+  $("#oPay")?.addEventListener("click", () => openCheckout(v.checkoutUrl));
+  $("#oNu")?.addEventListener("click", async (e) => {
+    if (!confirm(`Nu overzetten?\n\nJe cloud gaat slapen en is ${v.schatting?.minuten ? `ongeveer ${v.schatting.minuten} minuten` : "een tijdje"} offline. Daarna draait hij ${v.naar === "zelf" ? "in je eigen account" : `bij ${v.naarNaam}`}.`)) return;
+    try { await busy(e.target, () => api("/api/overstap/nu", { method: "POST", body: { confirm: true } })); renderOverstap(); } catch (err) { fail(err); }
+  });
+  $("#oTerug")?.addEventListener("click", async (e) => {
+    if (!confirm(`Terug naar ${v.van.naam}?\n\nJe cloud wordt weer wakker bij ${v.van.naam}, met je gegevens van vóór het overstappen.`)) return;
+    try { await busy(e.target, () => api("/api/overstap/terug", { method: "POST" })); renderOverstap(); } catch (err) { fail(err); }
+  });
+  const f = $("#of"), g = $("#og");
+  if (f && v.stap === "inloggen") {
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      try { await busy($("button", f), () => api("/api/overstap/login", { method: "POST", body: { email: f.email.value } })); f.hidden = true; g.hidden = false; g.code.focus(); }
+      catch (err) { fail(err); }
+    };
+    g.onsubmit = async (e) => {
+      e.preventDefault();
+      try { await busy($("button", g), () => api("/api/overstap/verify", { method: "POST", body: { code: g.code.value } })); renderOverstap(); }
+      catch (err) { fail(err); }
+    };
+  }
+  if (f && v.stap === "bestellen") {
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      const reg = f.firstName ? Object.fromEntries(["firstName", "lastName", "company", "street", "number", "zipcode", "city", "country", "phone", "email"].map((k) => [k, f[k].value.trim()])) : undefined;
+      try {
+        const r = await busy($("button.primary", f), () => api("/api/overstap/order", { method: "POST", body: { bundle: f.bundle?.value, acceptTerms: f.terms.checked, ...(reg ? { registrant: reg } : {}) } }));
+        openCheckout(r.checkoutUrl);
+        renderOverstap();
+      } catch (err) { fail(err); }
+    };
+  }
+  if (f && v.stap === "zelf") {
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      try { await busy($("button.primary", f), () => api("/api/overstap/zelf", { method: "POST", body: { accessKey: f.accessKey.value, secretKey: f.secretKey.value, projectId: f.projectId.value, desecToken: f.desecToken.value } })); renderOverstap({ ok: true, text: "Je sleutels werken." }); }
+      catch (err) { fail(err); }
+    };
+  }
+  // Bijwerken zolang er iets loopt (betalen, klaarzetten, overzetten, terug).
+  if (["betalen", "overzetten", "terug"].includes(v.stap) && !v.fout) overstapTimer = setTimeout(() => { if ($("#abo")) renderOverstap(); }, 2500);
 }
 
 /** Hulpvragen aan je aanbieder: nieuwe vraag, eerdere vragen en antwoorden. */

@@ -17,6 +17,11 @@ import { adminProof, consoleSettings } from "../src/cluster/admin.js";
 import * as aanbieder from "../src/console/aanbieder.js";
 import { buildPresets, pickSize, fetchSizes, SERVER_OFFERS, type SizeOption, type RegionInfo } from "../src/console/catalog.js";
 import { hashPassword } from "../src/auth.js";
+import { isSecretField } from "../src/cluster/adapters.js";
+import { parseMx, unquoteTxt } from "../src/cluster/adapters/http.js";
+import { exoSign } from "../src/cluster/adapters/exoscale.js";
+import { ovhSign } from "../src/cluster/adapters/ovh.js";
+import { ScalewayDns } from "../src/cluster/adapters/scaleway.js";
 
 const root = path.resolve(import.meta.dirname, "..");
 const outFile = path.resolve(process.argv[2] ?? path.join(root, "android/core/build/golden.json"));
@@ -124,6 +129,12 @@ const caddyCases = [
   { ...ccBase, dns: [] },
   { ...ccBase, domain: undefined },
   { ...ccBase, dns: [{ type: "desec", name: "d" }] },
+  // Adapter-raamwerk: alleen adapters met een Caddy-module (deSEC, Hetzner) geven DNS-01; de eerste telt.
+  { ...ccBase, dns: [{ type: "ovh", name: "o", zone: "vanes.nl", fields: { appKey: "a", appSecret: "s", consumerKey: "c" } }] },
+  { ...ccBase, dns: [{ type: "scaleway", name: "s", fields: { secretKey: "k" } }, { type: "exoscale", name: "e", fields: { apiKey: "EXO1", apiSecret: "x" } }] },
+  { ...ccBase, dns: [{ type: "exoscale", name: "e", fields: { apiKey: "EXO1" } }, { type: "hetzner", name: "h", token: "ht", fields: { extra: "1" } }, { type: "desec", name: "d", token: "dt" }] },
+  { ...ccBase, dns: [{ type: "onbekend", name: "x", token: "t" }, { type: "desec", name: "dienst", token: "dt", api: "https://dienst/dns" }] },
+  { ...ccBase, dns: [{ type: "hetzner", name: "h" }] },
 ] as unknown as ClusterConfig[];
 const caddyOut = caddyCases.map((cfg) => ({ cfg, out: caddyfile(cfg) }));
 
@@ -135,6 +146,8 @@ const sizeSets: Record<string, SizeOption[]> = {
   hetzner: [sz("cx23", 4, 2, 4.51), sz("cx33", 8, 4, 7.25), sz("cpx11", 2, 2, 5.18)],
   upcloud: [sz("1xCPU-1GB", 1, 1, null), sz("1xCPU-2GB", 2, 1, null), sz("2xCPU-4GB", 4, 2, null)],
   tiny: [sz("a", 0.25, 1, 1), sz("b", 0.5, 1, 2)],
+  exoscale: [sz("standard.micro", 0.5, 1, null), sz("standard.small", 2, 2, null), sz("standard.medium", 4, 2, null)],
+  ovh: [sz("d2-2", 2, 1, 7.3), sz("d2-4", 4, 2, null), sz("b3-8", 8, 2, 29.2)],
 };
 const pickCases = Object.entries(sizeSets).flatMap(([name, sizes]) => (["data", "witness"] as const).map((kind) => ({ name, sizes, kind, result: pickSize(sizes, kind) ?? null })));
 
@@ -152,6 +165,14 @@ const scenarios: Record<string, Avail[]> = {
   "nl+fi": [...avail("scaleway", "scaleway", (r) => r.country === "NL"), ...avail("hetzner", "hetzner", (r) => r.country === "FI")],
   "zonder-witness": [...avail("scaleway"), ...avail("hetzner")].map((a) => ({ ...a, witness: undefined })),
   leeg: [],
+  // Gemengde aanbieders uit het adapter-raamwerk (Exoscale en OVHcloud, met en zonder prijzen).
+  exoscale: avail("exoscale"),
+  ovh: avail("ovh"),
+  "exoscale+ovh": [...avail("exoscale"), ...avail("ovh")],
+  "scaleway+exoscale": [...avail("scaleway"), ...avail("exoscale")],
+  "ovh+hetzner+scaleway": [...avail("ovh"), ...avail("hetzner"), ...avail("scaleway")],
+  alle: [...avail("scaleway"), ...avail("hetzner"), ...avail("upcloud"), ...avail("exoscale"), ...avail("ovh")],
+  "nl-alleen-scaleway+ovh": [...avail("scaleway", "scaleway", (r) => r.country === "NL"), ...avail("ovh")],
 };
 const presets = Object.entries(scenarios).map(([name, available]) => ({ name, available, presets: buildPresets(available) }));
 
@@ -183,17 +204,86 @@ const apiResponses = {
     { name: "4xCPU-4GB", core_number: 4, memory_amount: 4096 },
     { name: "1xCPU-1GB", core_number: 1, memory_amount: 1536 },
   ] } },
+  exoscale: { "instance-types": [
+    { id: "it-micro", family: "standard", size: "micro", cpus: 1, memory: 536870912, authorized: true, zones: ["at-vie-1", "ch-gva-2"] },
+    { id: "it-tiny", family: "standard", size: "tiny", cpus: 1, memory: 1073741824, authorized: true },
+    { id: "it-small", family: "standard", size: "small", cpus: 2, memory: 2147483648, authorized: true, zones: ["at-vie-1", "ch-gva-2"] },
+    { id: "it-medium", family: "standard", size: "medium", cpus: 2, memory: 4294967296, zones: ["at-vie-1", "ch-gva-2"] },
+    { id: "it-medium4", family: "standard", size: "medium-4", cpus: 4, memory: 4294967296, authorized: true },
+    { id: "it-odd", family: "standard", size: "odd", cpus: 2, memory: 3000000000, authorized: true },
+    { id: "it-large", family: "standard", size: "large", cpus: 4, memory: 8589934592, authorized: false },
+    { id: "it-gpu", family: "gpu", size: "small", cpus: 12, memory: 60129542144, authorized: true },
+    { id: "it-ch", family: "standard", size: "huge", cpus: 8, memory: 34359738368, authorized: true, zones: ["ch-gva-2"] },
+  ] },
+  ovhTime: 1760000000,
+  ovhFlavors: [
+    { id: "fl-d2-2", name: "d2-2", ram: 2, vcpus: 1, osType: "linux", available: true, planCodes: { hourly: "d2-2.consumption", monthly: "d2-2.monthly" } },
+    { id: "fl-b3-8", name: "b3-8", ram: 8, vcpus: 2, osType: "linux", available: true, planCodes: { hourly: "b3-8.consumption" } },
+    { id: "fl-d2-4", name: "d2-4", ram: 4, vcpus: 2, osType: "linux", available: true, planCodes: { hourly: "onbekend" } },
+    { id: "fl-c3-4", name: "C3-4", ram: 4, vcpus: 2, available: true, planCodes: { hourly: "c3-4.consumption", monthly: null } },
+    { id: "fl-r3-16", name: "r3-16", ram: 16, vcpus: 2, osType: "linux", planCodes: { hourly: null } },
+    { id: "fl-win", name: "win-b2-7", ram: 7, vcpus: 2, osType: "windows", available: true },
+    { id: "fl-gpu", name: "t1-45", ram: 45, vcpus: 8, osType: "linux", available: true },
+    { id: "fl-weg", name: "d2-8", ram: 8, vcpus: 4, osType: "linux", available: false },
+  ],
+  ovhCatalog: { addons: [
+    { planCode: "d2-2.consumption", pricings: [{ price: 1000000 }, { price: 5 }] },
+    { planCode: "b3-8.consumption", pricings: [{ price: 4000000 }] },
+    { planCode: "c3-4.consumption", pricings: [{ price: 2345678 }] },
+    { planCode: "leeg", pricings: [] },
+  ] },
 };
 const realFetch = globalThis.fetch;
 const fetchSizesOut: { provider: string; region: string; result: unknown }[] = [];
 globalThis.fetch = (async (url: string) => {
   const u = String(url);
-  const body = u.includes("hetzner") ? apiResponses.hetzner : u.includes("scaleway") ? apiResponses.scaleway : apiResponses.upcloud;
+  const body = u.includes("hetzner") ? apiResponses.hetzner : u.includes("scaleway") ? apiResponses.scaleway : u.includes("exoscale") ? apiResponses.exoscale
+    : u.includes("/auth/time") ? apiResponses.ovhTime : u.includes("/order/catalog/") ? apiResponses.ovhCatalog : u.includes("ovh") ? apiResponses.ovhFlavors : apiResponses.upcloud;
   return new Response(JSON.stringify(body), { status: 200 });
 }) as typeof fetch;
-for (const [provider, region] of [["hetzner", "fsn1"], ["hetzner", "nbg1"], ["hetzner", "hel1"], ["scaleway", "nl-ams-1"], ["upcloud", "nl-ams1"], ["local", "ams"], ["onbekend", "x"]]) {
-  fetchSizesOut.push({ provider, region, result: await fetchSizes(provider, { token: "t", secretKey: "s" }, region) });
+/** Inloggegevens voor alle aanbieders tegelijk (elke adapter pakt de zijne). */
+const sizeCfg = { token: "t", secretKey: "s", apiKey: "EXOk", apiSecret: "geheim", appKey: "ak", appSecret: "as", consumerKey: "ck", projectId: "p" };
+for (const [provider, region] of [["hetzner", "fsn1"], ["hetzner", "nbg1"], ["hetzner", "hel1"], ["scaleway", "nl-ams-1"], ["upcloud", "nl-ams1"], ["exoscale", "at-vie-1"], ["exoscale", "ch-gva-2"], ["exoscale", "de-fra-1"], ["ovh", "GRA11"], ["local", "ams"], ["onbekend", "x"], ["desec", "x"]]) {
+  fetchSizesOut.push({ provider, region, result: await fetchSizes(provider, sizeCfg, region) });
 }
+
+// DNS: notatie (TXT/MX) en de verzoeken van Scaleway DNS (één PATCH per naam en type).
+const dnsValues = ['"v=spf1 a:mail.vanes.nl -all"', '"v=DKIM1; k=rsa; p=AAA" "BBB"', '"a"  "b" "c"', "zonder aanhalingstekens", '""', '"\\"x\\""', "10 mail.vanes.nl.", " 20  mx.example.org ", "mail.vanes.nl.", "0 .", "abc 10 x"];
+const dnsFormat = dnsValues.map((v) => ({ value: v, unquoted: unquoteTxt(v), mx: parseMx(v) }));
+const scwBodies: unknown[] = [];
+globalThis.fetch = (async (_url: string, init: RequestInit) => { scwBodies.push(JSON.parse(String(init.body))); return new Response("{}", { status: 200 }); }) as typeof fetch;
+const scwCalls: [string, string, string[], number][] = [
+  ["", "MX", ["10 mail.vanes.nl.", "20 backup.vanes.nl"], 3600],
+  ["", "TXT", ['"v=spf1 a:mail.vanes.nl -all"'], 3600],
+  ["eigen._domainkey", "TXT", ['"v=DKIM1; k=rsa; p=AAA" "BBB"'], 300],
+  ["cloud", "A", ["192.0.2.1", "192.0.2.2"], 60],
+  ["cloud", "AAAA", [], 300],
+  ["mail", "AAAA", ["2001:db8::1"], 300],
+];
+const scwDns = new ScalewayDns("scw", { secretKey: "sk", zone: "vanes.nl" });
+for (const [sub, type, values, ttl] of scwCalls) await scwDns.setRecords(sub, type, values, ttl);
+const scalewayDns = scwCalls.map(([sub, type, values, ttl], i) => ({ sub, type, values, ttl, body: scwBodies[i] }));
+
+// Ondertekening van Exoscale en OVHcloud (Java moet precies dezelfde headers maken).
+const signatures = {
+  exo: [
+    ["GET", "https://api-de-fra-1.exoscale.com/v2/template?visibility=public", ""],
+    ["POST", "https://api-ch-gva-2.exoscale.com/v2/instance", JSON.stringify({ name: "eigen-n-1", "user-data": "IyEvYmluL2Jhc2g=", labels: { cluster: "é" } })],
+    ["GET", "https://api-at-vie-1.exoscale.com/v2/instance?b=2&a=1&c=x%20y", ""],
+    ["DELETE", "https://api-bg-sof-1.exoscale.com/v2/instance/abc-123", ""],
+    ["get", "http://127.0.0.1:8080/exo/ch-dk-2/v2/dns-domain/d-1/record?z=%C3%BC&a=", ""],
+  ].map(([method, url, body]) => ({ method, url, body, key: "EXOabc", secret: "geheim-ü", expires: 1760000600, header: exoSign(method, url, body, "EXOabc", "geheim-ü", 1760000600) })),
+  ovh: [
+    ["GET", "https://eu.api.ovh.com/1.0/cloud/project/p-1/instance", ""],
+    ["POST", "https://eu.api.ovh.com/1.0/domain/zone/vanes.nl/record", JSON.stringify({ fieldType: "TXT", subDomain: "", target: '"v=spf1 -all"', ttl: 3600 })],
+    ["get", "https://eu.api.ovh.com/1.0/domain/zone/vanes.nl/record?fieldType=A&subDomain=cloud", ""],
+  ].map(([method, url, body]) => ({ method, url, body, appSecret: "as-ü", consumerKey: "ck", ts: 1760000123, signature: ovhSign("as-ü", "ck", method, url, body, 1760000123) })),
+};
+
+// Welke velden geheim zijn (maskeren in de console).
+const secretFields = [["ovh", "appKey"], ["ovh", "appSecret"], ["ovh", "consumerKey"], ["ovh", "projectId"], ["exoscale", "apiKey"], ["exoscale", "apiSecret"], ["scaleway", "secretKey"], ["scaleway", "projectId"],
+  ["hetzner", "token"], ["upcloud", "token"], ["desec", "token"], ["custom", "x"], ["local", "baseDir"], ["onbekend", "password"], ["onbekend", "Consumer"], ["onbekend", "naam"], ["hetzner", "image"]]
+  .map(([adapter, key]) => ({ adapter, key, secret: isSecretField(adapter, key) }));
 globalThis.fetch = realFetch;
 
 // ───────── Console: herstelblad en checklist (niet geëxporteerd → uit de bron halen) ─────────
@@ -287,7 +377,7 @@ const out = {
   generated: new RealDate().toISOString(),
   masterKey, derived, derived16, derived64, seals, sealJson: sealJsonOut, rpc, bootstrap,
   json, presign, sign, userData: userDataOut, caddyfile: caddyOut,
-  pickSize: pickCases, presets, apiResponses, fetchSizes: fetchSizesOut,
+  pickSize: pickCases, presets, apiResponses, fetchSizes: fetchSizesOut, dnsFormat, scalewayDns, signatures, secretFields,
   sheets, sheetDateText: dateText, dates, checklists, pbkdf2, passwords, proofs, sampleConfig,
   aanbieder: aanbiederOut, dienstUserData: dienstUserDataOut, dienstCheckScript: dienstCheckScript(), updaterScript: updaterScript(), cleanUrl: urlCases, smtpDisplay: smtpCases,
 };

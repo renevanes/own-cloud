@@ -90,6 +90,11 @@ public final class Admin {
         public long term;
         /** One-time settings for a brand-new cluster (null when waking). */
         public Map<String, Object> initialSettings;
+        /**
+         * Waking after switching providers (overstappen): {settings}. The stores, providers, DNS and placement of this
+         * config win over what the restored database remembers (adminOverride in src/cluster/config.ts). Null otherwise.
+         */
+        public Map<String, Object> adminOverride;
 
         public FirstNode(String provider, String region, String size) {
             this.provider = provider;
@@ -286,6 +291,8 @@ public final class Admin {
         nodeCfg.put("selfInfo", Json.obj("provider", opts.provider, "region", opts.region, "size", opts.size, "serverId", info.serverId, "country", country));
         if (opts.initialSettings != null) nodeCfg.put("initialSettings", opts.initialSettings);
         else nodeCfg.remove("initialSettings");
+        if (opts.adminOverride != null) nodeCfg.put("adminOverride", opts.adminOverride);
+        else nodeCfg.remove("adminOverride");
         nodeCfg.remove("console");
         store.put(key, EigenCrypto.sealJson(EigenCrypto.deriveKey(Bytes.fromHex(token), "bootstrap"), nodeCfg, "bootstrap"));
         if (Json.truthy(c.get("domain")) && prov.supportsPtr()) {
@@ -501,8 +508,11 @@ public final class Admin {
     public static boolean pushAdminConfig(Map<String, Object> c) throws IOException { return pushAdminConfig(c, ""); }
 
     /** Sends changed admin settings to the running cluster (signed). Returns false when no leader is reachable. */
-    public static boolean pushAdminConfig(Map<String, Object> c, String defaultDienst) throws IOException {
-        Status st = clusterStatus(c);
+    public static boolean pushAdminConfig(Map<String, Object> c, String defaultDienst) throws IOException { return pushAdminConfig(c, defaultDienst, null); }
+
+    /** Same, to a known leader (e.g. a just-woken first node that is not in the manifest yet); null = look it up. */
+    public static boolean pushAdminConfig(Map<String, Object> c, String defaultDienst, String leaderUrl) throws IOException {
+        Status st = leaderUrl != null ? new Status(null, leaderUrl, null) : clusterStatus(c);
         if (st.leaderUrl == null) return false;
         Map<String, Object> settings = consoleSettings(c, defaultDienst);
         Map<String, Object> update = Json.obj();

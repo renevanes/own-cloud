@@ -1,7 +1,8 @@
 /**
  * Controleert met de TypeScript-code wat de Java-kern van de Android-app heeft gemaakt
  * (android/core/build/java-out/*.json, geschreven door CryptoGoldenTest en VaultTest):
- * Java seal → TS open, Java sealMsg → TS openMsg, Java adminProof → TS verifyAdminProof, Java-kluis → Node.
+ * Java seal → TS open, Java sealMsg → TS openMsg, Java adminProof → TS verifyAdminProof, Java-kluis → Node,
+ * en de handtekeningen van Exoscale/OVHcloud uit de Java-adapters → TS exoSign/ovhSign (FormatsGoldenTest).
  * Gebruik: npx tsx scripts/golden-verify.ts [build-map]
  */
 import fs from "node:fs";
@@ -12,6 +13,8 @@ import { deriveKey, open, openJson } from "../src/cluster/crypto.js";
 import { openMsg } from "../src/cluster/transport.js";
 import { keysFor } from "../src/cluster/config.js";
 import { verifyAdminProof } from "../src/cluster/admin.js";
+import { exoSign } from "../src/cluster/adapters/exoscale.js";
+import { ovhSign } from "../src/cluster/adapters/ovh.js";
 
 const root = path.resolve(import.meta.dirname, "..");
 const build = path.resolve(process.argv[2] ?? path.join(root, "android/core/build"));
@@ -54,6 +57,11 @@ attempt("Java-kluis te openen met Node (PBKDF2-SHA256 + AES-GCM, AAD vault)", ()
   const key = crypto.pbkdf2Sync(v.passphrase.normalize("NFKC"), b(f.salt), f.iter, 32, "sha256");
   return open(key, b(f.data), "vault").toString("utf8") === v.expected;
 });
+
+const sigs = read("signatures.json");
+for (const e of sigs.exo) attempt(`Exoscale-handtekening van Java = TS exoSign (${e.method} ${e.url})`, () => exoSign(e.method, e.url, e.body, e.key, e.secret, e.expires) === e.header);
+for (const o of sigs.ovh) attempt(`OVH-handtekening van Java = TS ovhSign (${o.method} ${o.url})`, () => ovhSign(o.appSecret, o.consumerKey, o.method, o.url, o.body, o.ts) === o.signature);
+check(sigs.exo.length === 3 && sigs.ovh.length === 2, "handtekeningen van Java aanwezig");
 
 console.log(`  golden-verify (TS): ${checks - failures}/${checks} checks passed`);
 process.exit(failures ? 1 : 0);

@@ -1,0 +1,221 @@
+import crypto from "node:crypto";
+import type { CreateSpec, DnsProvider, Provider, ProviderAdapter, ServerInfo, SizeOption } from "./types.js";
+import { api, sleep } from "./http.js";
+
+/**
+ * OVHcloud (Frankrijk). API https://eu.api.ovh.com/1.0 met een application key, application secret en consumer key.
+ *
+ * Ondertekening (zoals de officiële bibliotheken python-ovh en node-ovh):
+ *   X-Ovh-Signature = "$1$" + sha1_hex(AS + "+" + CK + "+" + METHOD + "+" + volledige URL incl. query + "+" + body + "+" + tijd)
+ * met X-Ovh-Application, X-Ovh-Consumer en X-Ovh-Timestamp erbij. De tijd is de servertijd: eenmalig opgevraagd via
+ * GET /auth/time (zonder ondertekening) en als verschil met de eigen klok bewaard.
+ *
+ * Servers zijn Public Cloud-instances in één project (serviceName = project-ID).
+ * De consumer key moet deze rechten hebben (zie PROVIDERS.md, of maak hem via OVH_CREATE_TOKEN_URL):
+ */
+export const OVH_ACCESS_RULES = (projectId = "{projectId}", zone = "{zone}") => [
+  { method: "GET", path: `/cloud/project/${projectId}/*` },
+  { method: "POST", path: `/cloud/project/${projectId}/instance` },
+  { method: "DELETE", path: `/cloud/project/${projectId}/instance/*` },
+  { method: "GET", path: `/domain/zone/${zone}` },
+  { method: "GET", path: `/domain/zone/${zone}/*` },
+  { method: "POST", path: `/domain/zone/${zone}/*` },
+  { method: "DELETE", path: `/domain/zone/${zone}/record/*` },
+];
+
+/** Pagina van OVHcloud waar je in één keer een sleutel met precies deze rechten maakt. */
+export const OVH_CREATE_TOKEN_URL = "https://eu.api.ovh.com/createToken/?GET=/cloud/project/*&POST=/cloud/project/*/instance&DELETE=/cloud/project/*/instance/*&GET=/domain/zone/*&POST=/domain/zone/*&DELETE=/domain/zone/*/record/*";
+
+export const ovhBase = () => (process.env.EIGEN_OVH_API ?? "https://eu.api.ovh.com/1.0").replace(/\/$/, "");
+
+/** Wachten tot een nieuwe instance een IP-adres heeft (tests zetten pollMs op 0). */
+export const ovhTiming = { pollMs: 5000, polls: 60 };
+
+export function ovhSign(appSecret: string, consumerKey: string, method: string, url: string, body: string, timestamp: number) {
+  return "$1$" + crypto.createHash("sha1").update([appSecret, consumerKey, method.toUpperCase(), url, body, String(timestamp)].join("+"), "utf8").digest("hex");
+}
+
+type OvhCfg = { appKey: string; appSecret: string; consumerKey: string; projectId?: string; image?: string };
+
+class OvhClient {
+  private delta?: number;
+  constructor(private cfg: OvhCfg) {}
+  private async now() {
+    if (this.delta === undefined) {
+      const { json } = await api(`${ovhBase()}/auth/time`);
+      this.delta = Number(json) - Math.floor(Date.now() / 1000);
+    }
+    return Math.floor(Date.now() / 1000) + this.delta;
+  }
+  async call(method: string, pathq: string, body?: unknown, okStatus?: number[]) {
+    const url = `${ovhBase()}${pathq}`;
+    const b = body === undefined ? "" : JSON.stringify(body);
+    const ts = await this.now();
+    return api(url, {
+      method,
+      headers: {
+        "X-Ovh-Application": this.cfg.appKey, "X-Ovh-Consumer": this.cfg.consumerKey, "X-Ovh-Timestamp": String(ts),
+        "X-Ovh-Signature": ovhSign(this.cfg.appSecret, this.cfg.consumerKey, method, url, b, ts), "content-type": "application/json",
+      },
+      body: b || undefined,
+      okStatus,
+    });
+  }
+}
+
+const COUNTRY: [RegExp, string][] = [[/^(GRA|SBG|RBX|EU-WEST-PAR)/, "FR"], [/^DE/, "DE"], [/^WAW/, "PL"], [/^UK/, "GB"], [/^(BHS|CA)/, "CA"]];
+
+type OvhInstance = { id: string; name: string; region?: string; status?: string; ipAddresses?: { ip: string; type: string; version: number }[] };
+
+export class OvhProvider implements Provider {
+  readonly name = "ovh";
+  private c: OvhClient;
+  constructor(private cfg: OvhCfg) {
+    if (!cfg.projectId) throw new Error("OVHcloud: vul het project-ID van je Public Cloud-project in");
+    this.c = new OvhClient(cfg);
+  }
+  private get p() { return `/cloud/project/${encodeURIComponent(this.cfg.projectId!)}`; }
+  country(region: string) {
+    return COUNTRY.find(([re]) => re.test(region.toUpperCase()))?.[1] ?? "FR";
+  }
+  private async image(region: string) {
+    const want = this.cfg.image ?? "Ubuntu 24.04";
+    const { json } = await this.c.call("GET", `${this.p}/image?osType=linux&region=${encodeURIComponent(region)}`);
+    const list = json as { id: string; name: string }[];
+    const img = list.find((i) => i.name === want) ?? list.find((i) => i.name.includes(want));
+    if (!img) throw new Error(`OVHcloud: geen image ${want} in ${region}`);
+    return img.id;
+  }
+  private async flavor(region: string, size: string) {
+    const { json } = await this.c.call("GET", `${this.p}/flavor?region=${encodeURIComponent(region)}`);
+    const f = (json as { id: string; name: string }[]).find((x) => x.name === size);
+    if (!f) throw new Error(`OVHcloud: formaat ${size} bestaat niet in ${region}`);
+    return f.id;
+  }
+  async create(s: CreateSpec): Promise<ServerInfo> {
+    const [imageId, flavorId] = [await this.image(s.region), await this.flavor(s.region, s.size)];
+    let { json: inst } = await this.c.call("POST", `${this.p}/instance`, {
+      name: `${s.cluster}-${s.nodeId}`, region: s.region, flavorId, imageId, userData: s.userData, monthlyBilling: false,
+    }) as { json: OvhInstance };
+    const pub = (i: OvhInstance, v: number) => i.ipAddresses?.find((a) => a.type === "public" && a.version === v)?.ip;
+    // Het IP-adres komt pas als de instance is opgebouwd.
+    for (let i = 0; !pub(inst, 4) && i < ovhTiming.polls; i++) {
+      await sleep(ovhTiming.pollMs);
+      inst = (await this.c.call("GET", `${this.p}/instance/${inst.id}`)).json;
+      if (inst.status === "ERROR") throw new Error(`OVHcloud: instance ${inst.id} kon niet starten`);
+    }
+    return { serverId: inst.id, ipv4: pub(inst, 4), ipv6: pub(inst, 6), country: this.country(s.region) };
+  }
+  async destroy(id: string) {
+    await this.c.call("DELETE", `${this.p}/instance/${encodeURIComponent(id)}`, undefined, [404]);
+  }
+  /** OVHcloud-instances hebben geen labels: we herkennen ze aan de naam <cluster>-<node-id>. */
+  async list(cluster: string) {
+    const { json } = await this.c.call("GET", `${this.p}/instance`);
+    const out: { serverId: string; nodeId: string }[] = [];
+    for (const i of json as OvhInstance[]) {
+      if (!i.name.startsWith(`${cluster}-`)) continue;
+      const node = i.name.slice(cluster.length + 1);
+      // Node-id's zijn "n-<hex>"; zo valt "eigen-x-n-1" (cluster eigen-x) niet onder cluster "eigen".
+      if (/^n-[0-9a-z]+$/.test(node)) out.push({ serverId: i.id, nodeId: node });
+    }
+    return out;
+  }
+  // Geen setPtr: reverse DNS van Public Cloud-adressen stel je in via het OVHcloud-beheer (zie PROVIDERS.md).
+}
+
+async function ovhSizes(cfg: OvhCfg, region: string): Promise<SizeOption[]> {
+  const c = new OvhClient(cfg);
+  const { json } = await c.call("GET", `/cloud/project/${encodeURIComponent(cfg.projectId ?? "")}/flavor?region=${encodeURIComponent(region)}`);
+  const flavors = (json as { name: string; ram: number; vcpus: number; osType?: string; available?: boolean; planCodes?: { hourly?: string | null; monthly?: string | null } }[])
+    .filter((f) => f.available !== false && (f.osType ?? "linux") === "linux" && /^(d2|b2|b3|c2|c3|r2|r3)-\d+$/i.test(f.name));
+  // Prijzen uit de openbare catalogus (geen sleutel nodig). Lukt dat niet, dan "prijs onbekend".
+  let prices = new Map<string, number>();
+  try {
+    const { json: cat } = await api(`${ovhBase()}/order/catalog/public/cloud?ovhSubsidiary=FR`);
+    prices = new Map(((cat.addons ?? []) as { planCode: string; pricings?: { price: number }[] }[])
+      .filter((a) => a.pricings?.length).map((a) => [a.planCode, a.pricings![0].price]));
+  } catch { /* geen prijzen */ }
+  return flavors.map((f) => {
+    const hourly = f.planCodes?.hourly ? prices.get(f.planCodes.hourly) : undefined;
+    // Catalogusprijzen staan in 1/100.000.000 euro per uur; een maand = 730 uur.
+    return { size: f.name, label: `${f.vcpus} vCPU, ${f.ram} GB`, ramGb: f.ram, cpus: f.vcpus, monthly: hourly !== undefined ? Math.round((hourly / 1e8) * 730 * 100) / 100 : null };
+  }).sort((a, b) => (a.monthly ?? a.ramGb * 3) - (b.monthly ?? b.ramGb * 3));
+}
+
+/** OVHcloud DNS: records van een zone, daarna de zone verversen. */
+export class OvhDns implements DnsProvider {
+  private c: OvhClient;
+  constructor(readonly name: string, private cfg: OvhCfg & { zone: string }) {
+    this.c = new OvhClient(cfg);
+  }
+  async setRecords(sub: string, type: string, values: string[], ttl: number) {
+    const z = `/domain/zone/${encodeURIComponent(this.cfg.zone)}`;
+    const { json: ids } = await this.c.call("GET", `${z}/record?fieldType=${type}${sub ? `&subDomain=${encodeURIComponent(sub)}` : ""}`);
+    const existing: { id: number; subDomain: string; target: string; ttl: number }[] = [];
+    for (const id of ids as number[]) existing.push((await this.c.call("GET", `${z}/record/${id}`)).json);
+    const mine = existing.filter((r) => (r.subDomain ?? "") === sub);
+    const keep = new Set<number>();
+    const todo = values.filter((v) => {
+      const same = mine.find((r) => !keep.has(r.id) && r.target === v && r.ttl === ttl);
+      if (same) keep.add(same.id);
+      return !same;
+    });
+    const stale = mine.filter((r) => !keep.has(r.id));
+    for (const r of stale) await this.c.call("DELETE", `${z}/record/${r.id}`, undefined, [404]);
+    for (const v of todo) await this.c.call("POST", `${z}/record`, { fieldType: type, subDomain: sub, target: v, ttl });
+    if (todo.length || stale.length) await this.c.call("POST", `${z}/refresh`);
+  }
+}
+
+const ovhFields = [
+  { key: "appKey", label: "Application key" },
+  { key: "appSecret", label: "Application secret", secret: true },
+  { key: "consumerKey", label: "Consumer key", secret: true },
+];
+
+export const ovh: ProviderAdapter = {
+  id: "ovh",
+  name: "OVHcloud",
+  owner: "OVH SAS (Frankrijk)",
+  home: "FR",
+  signupUrl: "https://www.ovhcloud.com/nl/public-cloud/",
+  keyHelp: `Maak een Public Cloud-project (het project-ID staat bovenaan in het project). Maak daarna op ${OVH_CREATE_TOKEN_URL.split("?")[0]} een sleutel met de rechten GET/POST/DELETE op /cloud/project/* en, voor DNS, op /domain/zone/*. Je krijgt een application key, application secret en consumer key.`,
+  fields: [...ovhFields, { key: "projectId", label: "Project-ID (Public Cloud)" }],
+  servers: {
+    regions: [
+      { id: "GRA11", label: "Gravelines", country: "FR", city: "Gravelines" },
+      { id: "SBG5", label: "Straatsburg", country: "FR", city: "Straatsburg" },
+      { id: "DE1", label: "Frankfurt", country: "DE", city: "Frankfurt" },
+      { id: "WAW1", label: "Warschau", country: "PL", city: "Warschau" },
+      { id: "UK1", label: "Londen", country: "GB", city: "Londen" },
+    ],
+    create: (f) => new OvhProvider(f as never),
+    fetchSizes: (f, region) => ovhSizes(f as never, region),
+  },
+  storage: {
+    name: "OVHcloud Object Storage",
+    regions: [
+      { id: "gra", label: "Gravelines", country: "FR", endpoint: "https://s3.gra.io.cloud.ovh.net" },
+      { id: "sbg", label: "Straatsburg", country: "FR", endpoint: "https://s3.sbg.io.cloud.ovh.net" },
+      { id: "de", label: "Frankfurt", country: "DE", endpoint: "https://s3.de.io.cloud.ovh.net" },
+      { id: "waw", label: "Warschau", country: "PL", endpoint: "https://s3.waw.io.cloud.ovh.net" },
+      { id: "uk", label: "Londen", country: "GB", endpoint: "https://s3.uk.io.cloud.ovh.net" },
+    ],
+    keyHelp: "Public Cloud → Users & Roles → gebruiker met de rol ObjectStore operator → S3-sleutels genereren.",
+  },
+  dns: {
+    name: "OVHcloud DNS",
+    fields: ovhFields,
+    keyHelp: "Je domein moet bij OVHcloud DNS staan (Web Cloud → Domeinen → DNS-zone). De sleutel heeft GET/POST/DELETE-rechten op /domain/zone/* nodig.",
+    async connect(fields, zone) {
+      const c = new OvhClient(fields as never);
+      const r = await c.call("GET", `/domain/zone/${encodeURIComponent(zone)}`, undefined, [401, 403, 404]);
+      if (r.status === 401 || r.status === 403) throw new Error("OVHcloud accepteert deze sleutels niet (controleer de rechten op /domain/zone)");
+      if (r.status === 404) throw new Error(`Zone ${zone} staat niet bij OVHcloud DNS. Zet hem eerst in het OVHcloud-beheer (Web Cloud → Domeinen).`);
+      const ns = (r.json.nameServers ?? []) as string[];
+      return { nameservers: ns.length ? ns : ["dns.ovh.net", "ns.ovh.net"] };
+    },
+    create: (name, f, zone) => new OvhDns(name, { ...(f as never as OvhCfg), zone }),
+  },
+};

@@ -10,7 +10,8 @@ import java.util.TimeZone;
 
 /**
  * Pure functions vs TS output: S3 presign (AWS vector + golden) and header signing, cloud-init, Caddyfile,
- * pickSize/buildPresets, recovery sheet, checklist, Dutch dates, PBKDF2 (vault KDF) and scrypt password hash.
+ * pickSize/buildPresets (also with Exoscale/OVHcloud), DNS notation and Scaleway DNS bodies, Exoscale/OVHcloud request
+ * signatures (both directions), isSecretField, recovery sheet, checklist, Dutch dates, PBKDF2 (vault KDF) and scrypt password hash.
  */
 public class FormatsGoldenTest {
     private static Catalog.SizeOption size(Object o) { return Catalog.SizeOption.fromJson(Json.asMap(o)); }
@@ -105,6 +106,9 @@ public class FormatsGoldenTest {
             try (FileInputStream in = new FileInputStream(asset)) {
                 Catalog cat = Catalog.load(in);
                 T.check(cat.storeOffers().size() >= 4 && cat.serverOffers().size() >= 3, "catalog.json loaded");
+                for (Object o : Json.listAt(g, "secretFields")) {
+                    T.eq(Json.path(o, "secret"), cat.isSecretField(Json.str(o, "adapter"), Json.str(o, "key")), "isSecretField " + Json.str(o, "adapter") + "." + Json.str(o, "key"));
+                }
                 T.eq("Amsterdam 1", cat.serverRegions("scaleway").get(0).label, "catalog regions");
                 T.eq("https://s3.nl-ams.scw.cloud", Json.str(cat.storeOffer("scaleway"), "regions", 0, "endpoint"), "store offer endpoint");
                 // available() from a console catalog + placementFor
@@ -124,6 +128,42 @@ public class FormatsGoldenTest {
                 T.eq("hel1", Json.str(eu.get(2), "region"), "placementFor(europa) witness in FI");
                 T.throwsWith("Koppel", () -> Catalog.placementFor("europa", cat.available(Json.obj())), "placementFor missing");
             }
+
+            // Adapter framework: DNS notation, Scaleway DNS requests, request signatures, secret fields.
+            for (Object o : Json.listAt(g, "dnsFormat")) {
+                String v = Json.str(o, "value");
+                T.eq(Json.str(o, "unquoted"), DnsProvider.unquoteTxt(v), "unquoteTxt " + v);
+                DnsProvider.Mx mx = DnsProvider.parseMx(v);
+                T.eq(Json.stringify(Json.path(o, "mx")), Json.stringify(Json.obj("priority", mx.priority, "host", mx.host)), "parseMx " + v);
+            }
+            for (Object o : Json.listAt(g, "scalewayDns")) {
+                List<String> values = new ArrayList<>();
+                for (Object v : Json.listAt(o, "values")) values.add((String) v);
+                T.eq(Json.stringify(Json.path(o, "body")), Json.stringify(ScalewayProvider.Dns.body(Json.str(o, "sub"), Json.str(o, "type"), values, Json.num(o, "ttl").intValue())),
+                        "Scaleway DNS body " + Json.str(o, "sub") + "/" + Json.str(o, "type"));
+            }
+            for (Object o : Json.listAt(g, "signatures", "exo")) {
+                T.eq(Json.str(o, "header"), ExoscaleProvider.sign(Json.str(o, "method"), Json.str(o, "url"), Json.str(o, "body"), Json.str(o, "key"), Json.str(o, "secret"), Json.num(o, "expires").longValue()),
+                        "EXO2-HMAC-SHA256 " + Json.str(o, "method") + " " + Json.str(o, "url"));
+            }
+            for (Object o : Json.listAt(g, "signatures", "ovh")) {
+                T.eq(Json.str(o, "signature"), OvhProvider.sign(Json.str(o, "appSecret"), Json.str(o, "consumerKey"), Json.str(o, "method"), Json.str(o, "url"), Json.str(o, "body"), Json.num(o, "ts").longValue()),
+                        "OVH signature " + Json.str(o, "method") + " " + Json.str(o, "url"));
+            }
+            // Java → TS (checked by scripts/golden-verify.ts with exoSign/ovhSign).
+            List<Object> exoOut = new ArrayList<>(), ovhOut = new ArrayList<>();
+            String[][] exoIn = {
+                    {"PUT", "https://api-de-muc-1.exoscale.com/v2/dns-domain/d/record/r-1", "{\"content\":\"v=DKIM1; k=rsa; p=ü😀\",\"ttl\":3600}"},
+                    {"GET", "https://api-at-vie-2.exoscale.com/v2/instance?labels=cluster%3Deigen&x=1&x=2&leeg=", ""},
+                    {"POST", "http://127.0.0.1:9/exo/ch-gva-2/v2/security-group/sg-1/rules", "{\"icmp\":{\"type\":-1,\"code\":-1}}"}};
+            for (String[] e : exoIn) exoOut.add(Json.obj("method", e[0], "url", e[1], "body", e[2], "key", "EXOjava", "secret", "java-ü-geheim", "expires", 1760001234L,
+                    "header", ExoscaleProvider.sign(e[0], e[1], e[2], "EXOjava", "java-ü-geheim", 1760001234L)));
+            String[][] ovhIn = {
+                    {"DELETE", "https://eu.api.ovh.com/1.0/cloud/project/p%201/instance/i-1", ""},
+                    {"POST", "https://eu.api.ovh.com/1.0/cloud/project/p/instance", "{\"name\":\"eigen-n-1\",\"userData\":\"#!/bin/bash\\necho é\",\"monthlyBilling\":false}"}};
+            for (String[] e : ovhIn) ovhOut.add(Json.obj("method", e[0], "url", e[1], "body", e[2], "appSecret", "as-java", "consumerKey", "ck-ü", "ts", 1760005678L,
+                    "signature", OvhProvider.sign("as-java", "ck-ü", e[0], e[1], e[2], 1760005678L)));
+            T.writeOut("signatures.json", Json.obj("exo", exoOut, "ovh", ovhOut));
 
             // Recovery sheet and checklist (extracted from src/console/server.ts by golden.ts)
             T.eq(Json.str(g, "sheetDateText"), Console.dutchLongDate(new Date(java.time.Instant.parse("2026-10-09T10:00:00Z").toEpochMilli()), TimeZone.getTimeZone("UTC")), "Dutch long date");

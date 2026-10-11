@@ -37,10 +37,13 @@ export interface Policy {
 }
 
 export interface DnsConfig {
-  type: "desec" | "hetzner" | "file";
+  /** Id van een adapter met DNS (desec, hetzner, scaleway, exoscale, ovh, …) of "file" (tests). */
+  type: string;
   name: string;
   token?: string;
   zone?: string;
+  /** Overige inloggegevens voor de DNS-adapter (bijv. apiKey/apiSecret bij Exoscale); `token` staat los. */
+  fields?: Record<string, string>;
   file?: string; // type file: voor tests
   /** deSEC: andere basis-URL (bijv. de DNS-proxy van de Eigen Cloud Dienst); standaard https://desec.io/api/v1 */
   api?: string;
@@ -76,6 +79,12 @@ export interface ClusterConfig {
   selfInfo?: { provider?: string; region?: string | null; size?: string | null; serverId?: string | null; country?: string | null };
   /** Eenmalig over te nemen instellingen bij de allereerste start (wachtwoord-hash, meldadres, relay …). */
   initialSettings?: Record<string, string>;
+  /**
+   * Wekken na overstappen naar een andere aanbieder: de opslag, aanbieders, DNS en plaatsing uit déze configuratie
+   * gelden, niet wat de console eerder in de (teruggezette) database zette; settings worden overschreven.
+   * Wordt bij het opstarten als leider toegepast en daarna weggehaald.
+   */
+  adminOverride?: { settings: Record<string, string> };
   /** Extra omgevingsvariabelen voor de app (MAIL_DOMAINS, MAIL_FROM, SMTP_RELAY, …). */
   appEnv: Record<string, string>;
   policy: Policy;

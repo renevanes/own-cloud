@@ -52,6 +52,14 @@ public final class ConsoleApi {
     // ───────── Starten (zoals startLaunch/followLaunch in server.ts) ─────────
 
     private Map<String, Object> launch; // {steps, appUrl, done, startedAt}
+    /** Every start gets a number; following an older one (e.g. a failed wake while switching providers) then stops. */
+    private long launchGen;
+
+    private synchronized void setStep(long gen, String id, String state, String detail) {
+        if (gen == launchGen) setStep(id, state, detail);
+    }
+
+    private synchronized boolean current(long gen) { return gen == launchGen; }
 
     private synchronized void setStep(String id, String state, String detail) {
         if (launch == null) return;
@@ -70,7 +78,9 @@ public final class ConsoleApi {
         String city = null;
         if (offer != null) for (Catalog.RegionInfo r : catalog.serverRegions(first.provider)) if (r.id.equals(first.region)) city = r.city;
         String domain = Json.jsString(c.get("domain"));
+        final long gen;
         synchronized (this) {
+            gen = ++launchGen;
             launch = Json.obj("startedAt", System.currentTimeMillis(), "done", false, "appUrl", null, "steps", Json.list(
                     Json.obj("id", "server", "label", "Server aanmaken bij " + (offer != null ? Json.str(offer, "name") : first.provider) + (city != null ? " in " + city : ""), "state", "busy"),
                     Json.obj("id", "boot", "label", "Opstarten", "state", "wait"),
@@ -90,7 +100,7 @@ public final class ConsoleApi {
             int want = (min == null ? 2 : min.intValue()) + (wit == null ? 1 : wit.intValue());
             String clusterUrl = r.clusterUrl, apiUrl = r.info.apiUrl;
             Thread t = new Thread(() -> {
-                try { followLaunch(c, clusterUrl, apiUrl, want); } catch (RuntimeException e) { setStep("grow", "fail", e.getMessage()); }
+                try { followLaunch(c, clusterUrl, apiUrl, want, gen); } catch (RuntimeException e) { setStep(gen, "grow", "fail", e.getMessage()); }
             }, "eigen-launch");
             t.setDaemon(true);
             t.start();
@@ -110,14 +120,14 @@ public final class ConsoleApi {
         try { return Http.request("GET", url, null, null, timeout).status == 200; } catch (IOException e) { return false; }
     }
 
-    private void followLaunch(Map<String, Object> c, String clusterUrl, String apiUrl, int want) {
+    private void followLaunch(Map<String, Object> c, String clusterUrl, String apiUrl, int want, long gen) {
         byte[] key = ClusterConfig.keysFor(c).cluster;
         long deadline = System.currentTimeMillis() + 45 * 60_000L;
-        setStep("boot", "busy", "Software installeren en starten (meestal 2 à 4 minuten)");
-        while (System.currentTimeMillis() < deadline && !http200(clusterUrl + "/cluster/health", 4000)) sleep(3000);
-        setStep("boot", "done", "");
-        setStep("start", "busy", "Back-up terugzetten en de leiding nemen");
-        while (System.currentTimeMillis() < deadline) {
+        setStep(gen, "boot", "busy", "Software installeren en starten (meestal 2 à 4 minuten)");
+        while (current(gen) && System.currentTimeMillis() < deadline && !http200(clusterUrl + "/cluster/health", 4000)) sleep(3000);
+        setStep(gen, "boot", "done", "");
+        setStep(gen, "start", "busy", "Back-up terugzetten en de leiding nemen");
+        while (current(gen) && System.currentTimeMillis() < deadline) {
             try {
                 if ("leader".equals(Transport.rpcObject(key, clusterUrl, Json.obj("type", "status"), 3000).get("role"))) break;
             } catch (IOException | RuntimeException ignored) {
@@ -125,18 +135,18 @@ public final class ConsoleApi {
             }
             sleep(2000);
         }
-        setStep("start", "done", "");
-        setStep("grow", "busy", "Tweede server en witness worden aangemaakt");
+        setStep(gen, "start", "done", "");
+        setStep(gen, "grow", "busy", "Tweede server en witness worden aangemaakt");
         List<String> urls = new ArrayList<>();
         urls.add(clusterUrl);
-        while (System.currentTimeMillis() < deadline) {
+        while (current(gen) && System.currentTimeMillis() < deadline) {
             Admin.Leader leader = Admin.findLeader(c, urls);
             int ready = 0;
             if (leader != null) {
                 try {
                     Map<String, Object> sum = Transport.rpcObject(key, leader.url, Json.obj("type", "clusterSummary"), 5000);
                     for (Object n : Json.listAt(sum, "nodes")) if ("ready".equals(Json.str(n, "status"))) ready++;
-                    setStep("grow", "busy", ready + " van " + want + " servers klaar");
+                    setStep(gen, "grow", "busy", ready + " van " + want + " servers klaar");
                 } catch (IOException | RuntimeException ignored) {
                     // straks opnieuw
                 }
@@ -144,13 +154,16 @@ public final class ConsoleApi {
             if (ready >= want) break;
             sleep(3000);
         }
-        setStep("grow", "done", want + " servers actief");
+        setStep(gen, "grow", "done", want + " servers actief");
         String domain = Json.jsString(c.get("domain"));
-        setStep("https", "busy", "Wachten tot cloud." + domain + " bereikbaar is (DNS en certificaat)");
+        setStep(gen, "https", "busy", "Wachten tot cloud." + domain + " bereikbaar is (DNS en certificaat)");
         String url = Console.appUrl(c) != null ? Console.appUrl(c) : apiUrl;
-        while (System.currentTimeMillis() < deadline && url != null && !http200(url + "/healthz", 5000)) sleep(5000);
-        setStep("https", "done", "");
-        synchronized (this) { launch.put("done", true); }
+        while (current(gen) && System.currentTimeMillis() < deadline && url != null && !http200(url + "/healthz", 5000)) sleep(5000);
+        setStep(gen, "https", "done", "");
+        synchronized (this) {
+            if (gen != launchGen) return;
+            launch.put("done", true);
+        }
         if (listener != null && url != null) listener.cloudReady(url);
     }
 
@@ -179,8 +192,6 @@ public final class ConsoleApi {
         return "••••••••" + v.substring(Math.max(0, v.length() - 4));
     }
 
-    private static final Pattern SECRET = Pattern.compile("token|secret|password", Pattern.CASE_INSENSITIVE);
-
     private Map<String, Object> sanitized(Map<String, Object> c) {
         List<Object> stores = new ArrayList<>();
         for (Map<String, Object> s : ClusterConfig.stores(c)) {
@@ -194,16 +205,29 @@ public final class ConsoleApi {
         if (pv != null) for (Map.Entry<String, Object> e : pv.entrySet()) {
             Map<String, Object> f = Json.obj();
             Map<String, Object> fields = Json.asMap(e.getValue());
+            String type = fields != null && fields.get("type") != null ? Json.jsString(fields.get("type")) : e.getKey();
             if (fields != null) for (Map.Entry<String, Object> x : fields.entrySet()) {
                 String v = Json.jsString(x.getValue());
-                f.put(x.getKey(), SECRET.matcher(x.getKey()).find() ? mask(v) : v);
+                f.put(x.getKey(), catalog.isSecretField(type, x.getKey()) ? mask(v) : v);
             }
             providers.put(e.getKey(), f);
         }
         List<Object> dns = new ArrayList<>();
         for (Object d : Json.listAt(c, "dns")) {
             Map<String, Object> m = Json.copy(Json.asMap(d));
-            if (Json.truthy(m.get("token"))) m.put("token", mask(Json.str(m, "token")));
+            // { ...d, token: d.token ? mask(d.token) : undefined, fields?: masked per field }
+            if (Json.truthy(m.get("token"))) m.put("token", mask(Json.jsString(m.get("token"))));
+            else m.remove("token");
+            Map<String, Object> df = Json.map(m, "fields");
+            if (df != null) {
+                String type = Json.str(m, "type");
+                Map<String, Object> masked = Json.obj();
+                for (Map.Entry<String, Object> x : df.entrySet()) {
+                    String v = Json.jsString(x.getValue());
+                    masked.put(x.getKey(), type != null && catalog.isSecretField(type, x.getKey()) ? mask(v) : x.getValue());
+                }
+                m.put("fields", masked);
+            }
             dns.add(m);
         }
         Map<String, Object> con = Json.map(c, "console");
@@ -225,7 +249,8 @@ public final class ConsoleApi {
                 "dienst", Json.map(con, "dienst") == null ? null : Json.obj("url", Json.path(con, "dienst", "url"), "invite", Json.path(con, "dienst", "invite"),
                         "email", Json.str(con, "dienst", "email"), "loggedIn", Json.str(con, "dienst", "token") != null,
                         "orderId", Json.str(con, "dienst", "orderId"), "bundle", Json.path(con, "dienst", "bundle"), "applied", Json.truthy(Json.path(con, "dienst", "applied"))),
-                "maxUsers", con == null || con.get("maxUsers") == null ? (Object) 0L : con.get("maxUsers"));
+                "maxUsers", con == null || con.get("maxUsers") == null ? (Object) 0L : con.get("maxUsers"),
+                "overstap", Json.map(con, "overstap") == null ? null : Json.obj("naar", Json.path(con, "overstap", "naar"), "stap", Json.path(con, "overstap", "stap")));
     }
 
     /** What /api/state reports about biometric unlock (filled in by the app). */
@@ -245,7 +270,8 @@ public final class ConsoleApi {
     }
 
     public synchronized boolean unlocked() {
-        if (vault.isUnlocked() && System.currentTimeMillis() - lastUse > idleMs && lastUse > 0) vault.lock();
+        // Tijdens het overstappen niet op slot: dat loopt op de achtergrond verder en moet de kluis kunnen bijwerken.
+        if (vault.isUnlocked() && System.currentTimeMillis() - lastUse > idleMs && lastUse > 0 && !Overstap.busy()) vault.lock();
         return vault.isUnlocked();
     }
 
@@ -304,7 +330,7 @@ public final class ConsoleApi {
                 Map<String, Object> con = vault.isUnlocked() ? Json.map(cfg(), "console") : null;
                 return ok(Json.obj("vault", vault.exists(), "unlocked", unlocked(), "step", con == null ? null : con.get("step"),
                         "done", con != null && Json.truthy(con.get("done")), "domain", vault.isUnlocked() ? cfg().get("domain") : null,
-                        "offers", Json.obj("stores", catalog.storeOffers(), "servers", catalog.serverOffers()),
+                        "offers", Json.obj("stores", catalog.storeOffers(), "servers", catalog.serverOffers(), "dns", catalog.dnsOffers()),
                         "phone", true, "biometric", biometric,
                         "dienst", (dienstUrl != null && !dienstUrl.isEmpty()) || Json.truthy(Json.path(con, "dienst", "url")) || knownAanbieders > 0,
                         "aanbieder", Json.path(con, "dienst", "url"),
@@ -488,7 +514,8 @@ public final class ConsoleApi {
             }
 
             case "POST /api/dns": {
-                DnsSetup.Result r = DnsSetup.configure(c, Json.str(b, "mode"), Json.str(b, "token"));
+                Object tok = b.get("token");
+                DnsSetup.Result r = DnsSetup.configure(c, catalog, Json.str(b, "mode"), tok instanceof String ? (String) tok : null, Json.map(b, "fields"));
                 save();
                 return ok(r.toJson());
             }
@@ -548,7 +575,7 @@ public final class ConsoleApi {
                     save();
                 }
                 if (token == null) return ok(Json.obj("pending", true, "email", Json.str(c, "console", "desec", "email")));
-                DnsSetup.Result r = DnsSetup.configure(c, "desec", token);
+                DnsSetup.Result r = DnsSetup.configure(c, catalog, "desec", token);
                 save();
                 return ok(r.toJson());
             }
@@ -631,6 +658,44 @@ public final class ConsoleApi {
                     save();
                 }
             }
+
+            // ── Overstappen naar een andere aanbieder of naar zelf beheren ──
+            case "GET /api/overstap": {
+                if (Overstap.refresh(c)) vault.save();
+                Overstap.ensureRunning(overstapDeps());
+                return ok(Overstap.view(c));
+            }
+            case "POST /api/overstap/start": {
+                Map<String, Object> r = Overstap.start(c, Json.str(b, "naar") == null ? "" : Json.str(b, "naar"), dienstUrl);
+                save();
+                return ok(r);
+            }
+            case "POST /api/overstap/login": {
+                Map<String, Object> r = Overstap.login(c, Json.str(b, "email"));
+                vault.save();
+                return ok(r);
+            }
+            case "POST /api/overstap/verify": {
+                Map<String, Object> r = Overstap.verify(c, Json.str(b, "code"));
+                vault.save();
+                return ok(r);
+            }
+            case "POST /api/overstap/order": {
+                Map<String, Object> r = Overstap.order(c, b);
+                vault.save();
+                return ok(r);
+            }
+            case "POST /api/overstap/zelf": {
+                Map<String, Object> r = Overstap.zelf(c, b);
+                vault.save();
+                return ok(r);
+            }
+            case "POST /api/overstap/nu":
+                return ok(Overstap.overzetten(overstapDeps(), b.get("confirm")));
+            case "POST /api/overstap/terug":
+                return ok(Overstap.terug(overstapDeps()));
+            case "POST /api/overstap/stoppen":
+                return ok(Overstap.stoppen(overstapDeps()));
 
             // ── Aanbieder worden: je eigen Eigen Cloud Dienst opzetten en bijhouden ──
             case "GET /api/aanbieder":
@@ -726,6 +791,25 @@ public final class ConsoleApi {
             return ok(Json.obj("ok", true));
         }
         return err(404, "Onbekend: " + key);
+    }
+
+    /** Wat het overstappen nodig heeft van de console. */
+    private Overstap.Deps overstapDeps() {
+        return new Overstap.Deps() {
+            @Override public Map<String, Object> cfg() { return vault.isUnlocked() ? vault.config() : null; }
+
+            @Override public void save() throws IOException { ConsoleApi.this.save(); }
+
+            @Override public void saveVault() throws IOException { vault.save(); }
+
+            @Override public Catalog catalog() { return catalog; }
+
+            @Override public String launch(Map<String, Object> c, Admin.FirstNode first, long term, Map<String, Object> adminOverride) throws IOException {
+                first.adminOverride = adminOverride;
+                startLaunch(c, first, term);
+                return Json.str(c, "console", "firstLaunch", "clusterUrl");
+            }
+        };
     }
 
     /** Wat Aanbieder nodig heeft: het opslag-endpoint per regio (uit de catalogus) en bewaren. */

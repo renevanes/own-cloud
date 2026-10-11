@@ -120,23 +120,34 @@ public final class CloudInit {
         return m.matches() ? m.group(1) : null;
     }
 
-    /** Caddyfile with DNS-01; null when the config has no domain. */
+    /**
+     * Caddyfile with DNS-01; null when the config has no domain. Uses the first DNS link whose adapter has a Caddy
+     * module (deSEC, Hetzner); with other providers Caddy falls back to HTTP-01 (see PROVIDERS.md).
+     */
     public static String caddyfile(Map<String, Object> c) {
         if (!Json.truthy(c.get("domain"))) return null;
         String domain = Json.jsString(c.get("domain"));
         Map<String, Object> d = null;
+        Adapters.Adapter adapter = null;
         for (Object x : Json.listAt(c, "dns")) {
             String t = Json.str(x, "type");
-            if ("desec".equals(t) || "hetzner".equals(t)) { d = Json.asMap(x); break; }
+            Adapters.Adapter a = t == null ? null : Adapters.get(t);
+            if (a != null && a.dns != null && a.dns.caddy != null) { d = Json.asMap(x); adapter = a; break; }
         }
-        String token = d == null ? null : (d.get("token") == null ? "undefined" : Json.jsString(d.get("token")));
         Map<String, Object> acme = d == null ? null : Json.map(d, "acme");
         boolean viaService = d != null && Json.truthy(d.get("api"));
-        String dnsLine = viaService && acme != null
-                ? "dns acmedns {\n\t\t\tusername " + Json.jsString(acme.get("username")) + "\n\t\t\tpassword " + Json.jsString(acme.get("password"))
-                  + "\n\t\t\tsubdomain " + Json.jsString(acme.get("subdomain")) + "\n\t\t\tserver_url " + Json.jsString(acme.get("server_url")) + "\n\t\t}"
-                : viaService ? ""
-                : d != null && "desec".equals(d.get("type")) ? "dns desec {\n\t\t\ttoken " + token + "\n\t\t}" : d != null ? "dns hetzner " + token : "";
+        String dnsLine;
+        if (viaService && acme != null) {
+            dnsLine = "dns acmedns {\n\t\t\tusername " + Json.jsString(acme.get("username")) + "\n\t\t\tpassword " + Json.jsString(acme.get("password"))
+                    + "\n\t\t\tsubdomain " + Json.jsString(acme.get("subdomain")) + "\n\t\t\tserver_url " + Json.jsString(acme.get("server_url")) + "\n\t\t}";
+        } else if (viaService) {
+            dnsLine = "";
+        } else if (d != null) {
+            // { token: String(d.token), ...dnsFields(d) }
+            Map<String, Object> f = Json.obj("token", d.get("token") == null ? "undefined" : Json.jsString(d.get("token")));
+            f.putAll(Adapters.dnsFields(d));
+            dnsLine = adapter.dns.caddy.line(f);
+        } else dnsLine = "";
         String tls = d != null && !dnsLine.isEmpty() ? "\ttls {\n\t\t" + dnsLine + "\n\t}\n" : "";
         return "{\n\temail postmaster@" + domain + "\n}\ncloud." + domain + ", mail." + domain + " {\n" + tls
                 + "\tencode zstd gzip\n\trequest_body {\n\t\tmax_size 8GB\n\t}\n\treverse_proxy 127.0.0.1:3000\n}\n";

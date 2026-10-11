@@ -1,36 +1,11 @@
 {
+  "version": 2,
   "stores": [
-    {
-      "id": "hetzner",
-      "name": "Hetzner Object Storage",
-      "owner": "Hetzner Online GmbH (Duitsland)",
-      "regions": [
-        {
-          "id": "fsn1",
-          "label": "Falkenstein",
-          "country": "DE",
-          "endpoint": "https://fsn1.your-objectstorage.com"
-        },
-        {
-          "id": "nbg1",
-          "label": "Neurenberg",
-          "country": "DE",
-          "endpoint": "https://nbg1.your-objectstorage.com"
-        },
-        {
-          "id": "hel1",
-          "label": "Helsinki",
-          "country": "FI",
-          "endpoint": "https://hel1.your-objectstorage.com"
-        }
-      ],
-      "help": "Cloud Console → je project → Object Storage → S3-sleutels aanmaken.",
-      "signupUrl": "https://console.hetzner.com"
-    },
     {
       "id": "scaleway",
       "name": "Scaleway Object Storage",
       "owner": "Scaleway SAS (Frankrijk)",
+      "home": "FR",
       "regions": [
         {
           "id": "nl-ams",
@@ -55,36 +30,38 @@
       "signupUrl": "https://console.scaleway.com"
     },
     {
-      "id": "exoscale",
-      "name": "Exoscale SOS",
-      "owner": "Exoscale (Zwitserland, A1 Telekom Austria)",
+      "id": "hetzner",
+      "name": "Hetzner Object Storage",
+      "owner": "Hetzner Online GmbH (Duitsland)",
+      "home": "DE",
       "regions": [
         {
-          "id": "de-fra-1",
-          "label": "Frankfurt",
+          "id": "fsn1",
+          "label": "Falkenstein",
           "country": "DE",
-          "endpoint": "https://sos-de-fra-1.exo.io"
+          "endpoint": "https://fsn1.your-objectstorage.com"
         },
         {
-          "id": "at-vie-1",
-          "label": "Wenen",
-          "country": "AT",
-          "endpoint": "https://sos-at-vie-1.exo.io"
+          "id": "nbg1",
+          "label": "Neurenberg",
+          "country": "DE",
+          "endpoint": "https://nbg1.your-objectstorage.com"
         },
         {
-          "id": "ch-gva-2",
-          "label": "Genève",
-          "country": "CH",
-          "endpoint": "https://sos-ch-gva-2.exo.io"
+          "id": "hel1",
+          "label": "Helsinki",
+          "country": "FI",
+          "endpoint": "https://hel1.your-objectstorage.com"
         }
       ],
-      "help": "Portal → IAM → API-sleutel met rechten op Object Storage.",
-      "signupUrl": "https://portal.exoscale.com"
+      "help": "Cloud Console → je project → Object Storage → S3-sleutels aanmaken.",
+      "signupUrl": "https://console.hetzner.com"
     },
     {
       "id": "upcloud",
       "name": "UpCloud Object Storage",
       "owner": "UpCloud Ltd (Finland)",
+      "home": "FI",
       "regions": [
         {
           "id": "europe-1",
@@ -98,9 +75,102 @@
       "signupUrl": "https://hub.upcloud.com"
     },
     {
+      "id": "exoscale",
+      "name": "Exoscale SOS",
+      "owner": "Exoscale (Zwitserland, A1 Telekom Austria)",
+      "home": "CH",
+      "regions": [
+        {
+          "id": "ch-gva-2",
+          "label": "Genève",
+          "country": "CH",
+          "endpoint": "https://sos-ch-gva-2.exo.io"
+        },
+        {
+          "id": "ch-dk-2",
+          "label": "Zürich",
+          "country": "CH",
+          "endpoint": "https://sos-ch-dk-2.exo.io"
+        },
+        {
+          "id": "de-fra-1",
+          "label": "Frankfurt",
+          "country": "DE",
+          "endpoint": "https://sos-de-fra-1.exo.io"
+        },
+        {
+          "id": "de-muc-1",
+          "label": "München",
+          "country": "DE",
+          "endpoint": "https://sos-de-muc-1.exo.io"
+        },
+        {
+          "id": "at-vie-1",
+          "label": "Wenen 1",
+          "country": "AT",
+          "endpoint": "https://sos-at-vie-1.exo.io"
+        },
+        {
+          "id": "at-vie-2",
+          "label": "Wenen 2",
+          "country": "AT",
+          "endpoint": "https://sos-at-vie-2.exo.io"
+        },
+        {
+          "id": "bg-sof-1",
+          "label": "Sofia",
+          "country": "BG",
+          "endpoint": "https://sos-bg-sof-1.exo.io"
+        }
+      ],
+      "help": "Portal → IAM → API-sleutel met rechten op Object Storage (SOS).",
+      "signupUrl": "https://portal.exoscale.com/register"
+    },
+    {
+      "id": "ovh",
+      "name": "OVHcloud Object Storage",
+      "owner": "OVH SAS (Frankrijk)",
+      "home": "FR",
+      "regions": [
+        {
+          "id": "gra",
+          "label": "Gravelines",
+          "country": "FR",
+          "endpoint": "https://s3.gra.io.cloud.ovh.net"
+        },
+        {
+          "id": "sbg",
+          "label": "Straatsburg",
+          "country": "FR",
+          "endpoint": "https://s3.sbg.io.cloud.ovh.net"
+        },
+        {
+          "id": "de",
+          "label": "Frankfurt",
+          "country": "DE",
+          "endpoint": "https://s3.de.io.cloud.ovh.net"
+        },
+        {
+          "id": "waw",
+          "label": "Warschau",
+          "country": "PL",
+          "endpoint": "https://s3.waw.io.cloud.ovh.net"
+        },
+        {
+          "id": "uk",
+          "label": "Londen",
+          "country": "GB",
+          "endpoint": "https://s3.uk.io.cloud.ovh.net"
+        }
+      ],
+      "help": "Public Cloud → Users & Roles → gebruiker met de rol ObjectStore operator → S3-sleutels genereren.",
+      "signupUrl": "https://www.ovhcloud.com/nl/public-cloud/"
+    },
+    {
       "id": "custom",
       "name": "Eigen opslag (NAS, MinIO, Garage)",
       "owner": "Jijzelf",
+      "home": "NL",
       "regions": [
         {
           "id": "eigen",
@@ -163,7 +233,8 @@
           "label": "Project-ID"
         }
       ],
-      "signupUrl": "https://console.scaleway.com"
+      "signupUrl": "https://console.scaleway.com",
+      "keyHelp": "Console → IAM → API-sleutels → sleutel maken. Kopieer de geheime sleutel; het project-ID staat bij Project → Instellingen."
     },
     {
       "id": "hetzner",
@@ -197,7 +268,8 @@
           "secret": true
         }
       ],
-      "signupUrl": "https://console.hetzner.com"
+      "signupUrl": "https://console.hetzner.com",
+      "keyHelp": "Hetzner Console → je project → Beveiliging → API-tokens → token met lezen en schrijven."
     },
     {
       "id": "upcloud",
@@ -237,7 +309,394 @@
           "secret": true
         }
       ],
-      "signupUrl": "https://hub.upcloud.com"
+      "signupUrl": "https://hub.upcloud.com",
+      "keyHelp": "UpCloud Hub → Account → API-tokens → token maken. Zet bij Account → Permissions ook 'API-toegang' aan."
+    },
+    {
+      "id": "exoscale",
+      "name": "Exoscale",
+      "owner": "Exoscale (Zwitserland, A1 Telekom Austria)",
+      "home": "CH",
+      "regions": [
+        {
+          "id": "ch-gva-2",
+          "label": "Genève",
+          "country": "CH",
+          "city": "Genève"
+        },
+        {
+          "id": "ch-dk-2",
+          "label": "Zürich",
+          "country": "CH",
+          "city": "Zürich"
+        },
+        {
+          "id": "de-fra-1",
+          "label": "Frankfurt",
+          "country": "DE",
+          "city": "Frankfurt"
+        },
+        {
+          "id": "de-muc-1",
+          "label": "München",
+          "country": "DE",
+          "city": "München"
+        },
+        {
+          "id": "at-vie-1",
+          "label": "Wenen 1",
+          "country": "AT",
+          "city": "Wenen"
+        },
+        {
+          "id": "at-vie-2",
+          "label": "Wenen 2",
+          "country": "AT",
+          "city": "Wenen"
+        },
+        {
+          "id": "bg-sof-1",
+          "label": "Sofia",
+          "country": "BG",
+          "city": "Sofia"
+        }
+      ],
+      "fields": [
+        {
+          "key": "apiKey",
+          "label": "API-sleutel (begint met EXO)"
+        },
+        {
+          "key": "apiSecret",
+          "label": "Geheim",
+          "secret": true
+        }
+      ],
+      "signupUrl": "https://portal.exoscale.com/register",
+      "keyHelp": "Portal → IAM → Rollen: maak een rol met de diensten Compute en DNS (en SOS voor opslag). Daarna IAM → API-sleutels → sleutel met die rol. Je krijgt een sleutel (begint met EXO) en een geheim."
+    },
+    {
+      "id": "ovh",
+      "name": "OVHcloud",
+      "owner": "OVH SAS (Frankrijk)",
+      "home": "FR",
+      "regions": [
+        {
+          "id": "GRA11",
+          "label": "Gravelines",
+          "country": "FR",
+          "city": "Gravelines"
+        },
+        {
+          "id": "SBG5",
+          "label": "Straatsburg",
+          "country": "FR",
+          "city": "Straatsburg"
+        },
+        {
+          "id": "DE1",
+          "label": "Frankfurt",
+          "country": "DE",
+          "city": "Frankfurt"
+        },
+        {
+          "id": "WAW1",
+          "label": "Warschau",
+          "country": "PL",
+          "city": "Warschau"
+        },
+        {
+          "id": "UK1",
+          "label": "Londen",
+          "country": "GB",
+          "city": "Londen"
+        }
+      ],
+      "fields": [
+        {
+          "key": "appKey",
+          "label": "Application key"
+        },
+        {
+          "key": "appSecret",
+          "label": "Application secret",
+          "secret": true
+        },
+        {
+          "key": "consumerKey",
+          "label": "Consumer key",
+          "secret": true
+        },
+        {
+          "key": "projectId",
+          "label": "Project-ID (Public Cloud)"
+        }
+      ],
+      "signupUrl": "https://www.ovhcloud.com/nl/public-cloud/",
+      "keyHelp": "Maak een Public Cloud-project (het project-ID staat bovenaan in het project). Maak daarna op https://eu.api.ovh.com/createToken/ een sleutel met de rechten GET/POST/DELETE op /cloud/project/* en, voor DNS, op /domain/zone/*. Je krijgt een application key, application secret en consumer key."
+    }
+  ],
+  "dns": [
+    {
+      "id": "desec",
+      "name": "deSEC (gratis, open source, Berlijn)",
+      "owner": "deSEC e.V. (Duitsland, non-profit)",
+      "home": "DE",
+      "fields": [
+        {
+          "key": "token",
+          "label": "API-token",
+          "secret": true
+        }
+      ],
+      "keyHelp": "Al een account op desec.io? Maak een token onder \"Token Management\" en plak het hier.",
+      "signupUrl": "https://desec.io"
+    },
+    {
+      "id": "scaleway",
+      "name": "Scaleway DNS",
+      "owner": "Scaleway SAS (Frankrijk)",
+      "home": "FR",
+      "fields": [
+        {
+          "key": "secretKey",
+          "label": "Geheime API-sleutel",
+          "secret": true
+        }
+      ],
+      "keyHelp": "Console → IAM → API-sleutels; de sleutel heeft het recht DomainsDNSFullAccess nodig. Zet je domein eerst in Domains and DNS (bij Scaleway geregistreerd, of als extern domein toegevoegd).",
+      "signupUrl": "https://console.scaleway.com",
+      "sharesKeyWith": "scaleway"
+    },
+    {
+      "id": "hetzner",
+      "name": "Hetzner DNS",
+      "owner": "Hetzner Online GmbH (Duitsland)",
+      "home": "DE",
+      "fields": [
+        {
+          "key": "token",
+          "label": "API-token (lezen en schrijven)",
+          "secret": true
+        }
+      ],
+      "keyHelp": "Hetzner Console → je project → Beveiliging → API-tokens. Maak de DNS-zone eerst aan (Console → DNS).",
+      "signupUrl": "https://console.hetzner.com",
+      "sharesKeyWith": "hetzner"
+    },
+    {
+      "id": "exoscale",
+      "name": "Exoscale DNS",
+      "owner": "Exoscale (Zwitserland, A1 Telekom Austria)",
+      "home": "CH",
+      "fields": [
+        {
+          "key": "apiKey",
+          "label": "API-sleutel (begint met EXO)"
+        },
+        {
+          "key": "apiSecret",
+          "label": "Geheim",
+          "secret": true
+        }
+      ],
+      "keyHelp": "Je hebt een DNS-abonnement bij Exoscale nodig (Portal → DNS). Gebruik een API-sleutel met een rol die DNS mag beheren; de console zet de zone zelf klaar.",
+      "signupUrl": "https://portal.exoscale.com/register",
+      "sharesKeyWith": "exoscale"
+    },
+    {
+      "id": "ovh",
+      "name": "OVHcloud DNS",
+      "owner": "OVH SAS (Frankrijk)",
+      "home": "FR",
+      "fields": [
+        {
+          "key": "appKey",
+          "label": "Application key"
+        },
+        {
+          "key": "appSecret",
+          "label": "Application secret",
+          "secret": true
+        },
+        {
+          "key": "consumerKey",
+          "label": "Consumer key",
+          "secret": true
+        }
+      ],
+      "keyHelp": "Je domein moet bij OVHcloud DNS staan (Web Cloud → Domeinen → DNS-zone). De sleutel heeft GET/POST/DELETE-rechten op /domain/zone/* nodig.",
+      "signupUrl": "https://www.ovhcloud.com/nl/public-cloud/",
+      "sharesKeyWith": "ovh"
+    }
+  ],
+  "adapters": [
+    {
+      "id": "desec",
+      "name": "deSEC",
+      "owner": "deSEC e.V. (Duitsland, non-profit)",
+      "home": "DE",
+      "signupUrl": "https://desec.io",
+      "keyHelp": "Al een account op desec.io? Maak een token onder \"Token Management\" en plak het hier.",
+      "fields": [
+        {
+          "key": "token",
+          "label": "API-token",
+          "secret": true
+        }
+      ],
+      "capabilities": {
+        "servers": false,
+        "storage": false,
+        "dns": true,
+        "quick": false
+      }
+    },
+    {
+      "id": "scaleway",
+      "name": "Scaleway",
+      "owner": "Scaleway SAS (Frankrijk)",
+      "home": "FR",
+      "signupUrl": "https://console.scaleway.com",
+      "keyHelp": "Console → IAM → API-sleutels → sleutel maken. Kopieer de geheime sleutel; het project-ID staat bij Project → Instellingen.",
+      "fields": [
+        {
+          "key": "secretKey",
+          "label": "Geheime API-sleutel",
+          "secret": true
+        },
+        {
+          "key": "projectId",
+          "label": "Project-ID"
+        }
+      ],
+      "capabilities": {
+        "servers": true,
+        "storage": true,
+        "dns": true,
+        "quick": true
+      },
+      "quick": {
+        "title": "Eén sleutel bij Scaleway",
+        "signupUrl": "https://account.scaleway.com/register",
+        "keysUrl": "https://console.scaleway.com/iam/api-keys"
+      }
+    },
+    {
+      "id": "hetzner",
+      "name": "Hetzner Cloud",
+      "owner": "Hetzner Online GmbH (Duitsland)",
+      "home": "DE",
+      "signupUrl": "https://console.hetzner.com",
+      "keyHelp": "Hetzner Console → je project → Beveiliging → API-tokens → token met lezen en schrijven.",
+      "fields": [
+        {
+          "key": "token",
+          "label": "API-token (lezen en schrijven)",
+          "secret": true
+        }
+      ],
+      "capabilities": {
+        "servers": true,
+        "storage": true,
+        "dns": true,
+        "quick": false
+      }
+    },
+    {
+      "id": "upcloud",
+      "name": "UpCloud",
+      "owner": "UpCloud Ltd (Finland)",
+      "home": "FI",
+      "signupUrl": "https://hub.upcloud.com",
+      "keyHelp": "UpCloud Hub → Account → API-tokens → token maken. Zet bij Account → Permissions ook 'API-toegang' aan.",
+      "fields": [
+        {
+          "key": "token",
+          "label": "API-token",
+          "secret": true
+        }
+      ],
+      "capabilities": {
+        "servers": true,
+        "storage": true,
+        "dns": false,
+        "quick": false
+      }
+    },
+    {
+      "id": "exoscale",
+      "name": "Exoscale",
+      "owner": "Exoscale (Zwitserland, A1 Telekom Austria)",
+      "home": "CH",
+      "signupUrl": "https://portal.exoscale.com/register",
+      "keyHelp": "Portal → IAM → Rollen: maak een rol met de diensten Compute en DNS (en SOS voor opslag). Daarna IAM → API-sleutels → sleutel met die rol. Je krijgt een sleutel (begint met EXO) en een geheim.",
+      "fields": [
+        {
+          "key": "apiKey",
+          "label": "API-sleutel (begint met EXO)"
+        },
+        {
+          "key": "apiSecret",
+          "label": "Geheim",
+          "secret": true
+        }
+      ],
+      "capabilities": {
+        "servers": true,
+        "storage": true,
+        "dns": true,
+        "quick": false
+      }
+    },
+    {
+      "id": "ovh",
+      "name": "OVHcloud",
+      "owner": "OVH SAS (Frankrijk)",
+      "home": "FR",
+      "signupUrl": "https://www.ovhcloud.com/nl/public-cloud/",
+      "keyHelp": "Maak een Public Cloud-project (het project-ID staat bovenaan in het project). Maak daarna op https://eu.api.ovh.com/createToken/ een sleutel met de rechten GET/POST/DELETE op /cloud/project/* en, voor DNS, op /domain/zone/*. Je krijgt een application key, application secret en consumer key.",
+      "fields": [
+        {
+          "key": "appKey",
+          "label": "Application key"
+        },
+        {
+          "key": "appSecret",
+          "label": "Application secret",
+          "secret": true
+        },
+        {
+          "key": "consumerKey",
+          "label": "Consumer key",
+          "secret": true
+        },
+        {
+          "key": "projectId",
+          "label": "Project-ID (Public Cloud)"
+        }
+      ],
+      "capabilities": {
+        "servers": true,
+        "storage": true,
+        "dns": true,
+        "quick": false
+      }
+    },
+    {
+      "id": "custom",
+      "name": "Eigen opslag",
+      "owner": "Jijzelf",
+      "home": "NL",
+      "signupUrl": "",
+      "keyHelp": "",
+      "fields": [],
+      "capabilities": {
+        "servers": false,
+        "storage": true,
+        "dns": false,
+        "quick": false
+      }
     }
   ]
 }

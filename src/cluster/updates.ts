@@ -20,9 +20,10 @@ export interface NodeInfo { version: string; updater: boolean; result: UpdateRes
 
 /**
  * Wat deze versie kan, voor de andere servers. "users" = kent de tabel users en de kolom user_id (meerdere gebruikers).
+ * "overstap" = kent adminOverride bij het wekken (overstappen naar een andere aanbieder).
  * Oudere servers melden geen features.
  */
-export const FEATURES = ["users"];
+export const FEATURES = ["users", "overstap"];
 export interface UpdateResult { id: string; version: string; ok: boolean; rolledBack: boolean; saved?: boolean; error: string | null; at: number }
 export type UpdateMode = "auto" | "melden" | "uit";
 

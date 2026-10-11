@@ -122,6 +122,13 @@ export function fakeUpstream() {
         d.authCode ??= `Ab3-${d.id}-Qz9!`;
         return [200, { code: 0, data: { auth_code: d.authCode, type: "internal" } }];
       }
+      if ((m = /^\/domains\/(\d+)$/.exec(q)) && c.method === "PUT") {
+        // DNSSEC aan/uit (overstappen); de rest van het domein blijft.
+        const d = st.op.domains.find((x) => String(x.id) === m![1]);
+        if (!d) return [404, { code: 320, desc: "Domain not found" }];
+        Object.assign(d, c.body);
+        return [200, { code: 0, data: { id: d.id, status: d.status } }];
+      }
       if (q === "/customers" && c.method === "POST") { const h = `RV${String(++st.n).padStart(6, "0")}-NL`; st.op.customers.push({ handle: h, ...c.body }); return [200, { code: 0, data: { handle: h } }]; }
       if (q === "/domains" && c.method === "POST") {
         if (st.op.rejectNext.delete(c.body.domain.name)) return [400, { code: 346, desc: "Domain name is not valid", data: "" }];
@@ -248,6 +255,10 @@ export function fakeUpstream() {
         if (m[2] === "/revoke") d.status = "revoked";
         return [200, d];
       }
+      if (/^\/instance\/v1\/zones\/[^/]+\/products\/servers$/.test(q)) return [200, { servers: {
+        "DEV1-S": { ncpus: 2, ram: 2 * 1024 ** 3, arch: "x86_64", monthly_price: 6.42 },
+        "STARDUST1-S": { ncpus: 1, ram: 1 * 1024 ** 3, arch: "x86_64", monthly_price: 0.5 },
+      } }];
       if ((m = /^\/instance\/v1\/zones\/([^/]+)\/servers$/.exec(q)) && c.method === "GET") return [200, { servers: st.scw.servers.filter((s) => s.zone === m![1] && (!c.query.get("project") || s.project === c.query.get("project")) && (!c.query.get("tags") || s.tags?.includes(c.query.get("tags")))) }];
       if ((m = /^\/instance\/v1\/zones\/([^/]+)\/servers$/.exec(q)) && c.method === "POST") {
         const x = { id: `srv-${++st.n}`, zone: m[1], state: "stopped", ...c.body, public_ips: (c.body.public_ips ?? []).map((i: string) => ({ id: i })) }; st.scw.servers.push(x); return [201, { server: x }];

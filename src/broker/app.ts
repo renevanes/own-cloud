@@ -27,6 +27,7 @@ import { registerStaffAuth, ensureOwner } from "./staff.js";
 import { registerAdmin } from "./admin.js";
 import { registerCustomerSupport, checkHealth, useInvite, SupportError, getInvite, inviteState } from "./support.js";
 import { DienstBackup, beheerToken } from "./backup.js";
+import { dnsRelease, dnsBack } from "./overstap.js";
 import { VERSION } from "../version.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -426,6 +427,11 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
   app.post("/v1/orders/:id/resume", selfService("resume", "Je abonnement voortzetten lukt nu even niet. Probeer het zo opnieuw.", (o) => resumeSubscription(ctx, o.id)));
   app.post<{ Params: { id: string }; Body: { count?: number } }>("/v1/orders/:id/users", (req, reply) =>
     selfService("users", "Het aantal gebruikers aanpassen lukt nu even niet. Probeer het zo opnieuw.", (o) => setExtraUsers(ctx, o.id, req.body?.count))(req, reply));
+  // Overstappen: DNS-zone vrijgeven voor de nieuwe aanbieder, of terughalen als het overstappen misging.
+  app.post<{ Params: { id: string }; Body: { overstap?: boolean } }>("/v1/orders/:id/dns-vrijgeven", (req, reply) =>
+    selfService("dns-vrijgeven", "Je DNS vrijgeven lukt nu even niet. Probeer het zo opnieuw.", (o) => dnsRelease(ctx, o.id, req.body ?? {}))(req, reply));
+  app.post<{ Params: { id: string }; Body: { transferCode?: string } }>("/v1/orders/:id/dns-terug", (req, reply) =>
+    selfService("dns-terug", "Je DNS terugzetten lukt nu even niet. Probeer het zo opnieuw.", (o) => dnsBack(ctx, o.id, req.body ?? {}))(req, reply));
   app.get("/v1/orders/:id/authcode", selfService("authcode", "De verhuiscode opvragen lukt nu even niet. Probeer het zo opnieuw.", (o) => domainAuthCode(ctx, o.id), limits.authcodeCustomer));
 
   app.get<{ Params: { id: string } }>("/v1/invoices/:id", async (req, reply) => {

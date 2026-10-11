@@ -86,6 +86,8 @@ public final class Bytes {
 
     public static byte[] md5(byte[] data) { return digest("MD5", data); }
 
+    public static byte[] sha1(byte[] data) { return digest("SHA-1", data); }
+
     private static byte[] digest(String alg, byte[] data) {
         try {
             return MessageDigest.getInstance(alg).digest(data);

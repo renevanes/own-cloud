@@ -93,7 +93,7 @@ export async function sendJob(c: ClusterConfig, leaderUrl: string, type: string,
 }
 
 /** Start de eerste node van een (nieuw of slapend) cluster. */
-export async function provisionFirstNode(c: ClusterConfig, opts: { provider: string; region: string; size: string; country?: string; term?: number; initialSettings?: Record<string, string> }) {
+export async function provisionFirstNode(c: ClusterConfig, opts: { provider: string; region: string; size: string; country?: string; term?: number; initialSettings?: Record<string, string>; adminOverride?: { settings: Record<string, string> } }) {
   const nodeId = `n-${crypto.randomBytes(3).toString("hex")}`;
   const token = crypto.randomBytes(32).toString("hex");
   const store = c.stores.map(makeStore).find((s) => s.purpose === "replica") ?? makeStore(c.stores[0]);
@@ -108,6 +108,7 @@ export async function provisionFirstNode(c: ClusterConfig, opts: { provider: str
     advertise: { clusterUrl: info.clusterUrl ?? `http://${info.ipv4}:${c.clusterPort}`, apiUrl: info.apiUrl ?? `https://${info.ipv4}`, ipv4: info.ipv4, ipv6: info.ipv6 },
     selfInfo: { provider: opts.provider, region: opts.region, size: opts.size, serverId: info.serverId, country: info.country ?? opts.country ?? prov.country(opts.region) },
     initialSettings: opts.initialSettings,
+    ...(opts.adminOverride ? { adminOverride: opts.adminOverride } : {}),
   };
   delete (nodeCfg as { console?: unknown }).console;
   await store.put(key, sealJson(deriveKey(Buffer.from(token, "hex"), "bootstrap"), nodeCfg, "bootstrap"));
@@ -244,8 +245,8 @@ export function consoleSettings(c: ClusterConfig & { console?: ConsolePart }, de
   return settings;
 }
 
-export async function pushAdminConfig(c: ClusterConfig & { console?: ConsolePart }, defaultDienst = "") {
-  const st = await clusterStatus(c);
+export async function pushAdminConfig(c: ClusterConfig & { console?: ConsolePart }, defaultDienst = "", leaderUrl?: string) {
+  const st = leaderUrl ? { leaderUrl } : await clusterStatus(c);
   if (!st.leaderUrl) return false;
   const settings = consoleSettings(c, defaultDienst);
   const update = { stores: c.stores, providers: c.providers, dns: c.dns, placement: c.policy.placement, settings };

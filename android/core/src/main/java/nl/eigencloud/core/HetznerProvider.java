@@ -6,8 +6,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/** Hetzner Cloud (Germany, Finland). Config: token, image?, sshKey?. */
+/** Hetzner Cloud (Germany, Finland): servers and DNS (adapters/hetzner.ts). Config: token, image?, sshKey?. */
 public final class HetznerProvider implements Provider {
+    /** The registry entry (servers, storage, DNS with a Caddy module). */
+    static final Adapters.Adapter ADAPTER = new Adapters.Adapter("hetzner",
+            new Adapters.Servers(HetznerProvider::new, HetznerProvider::fetchSizes), true,
+            new Adapters.Dns(HetznerProvider::connect, (name, f, zone) -> new Dns(name, Adapters.field(f, "token"), zone),
+                    f -> "dns hetzner " + Adapters.fieldJs(f, "token")));
+
     private final Map<String, Object> cfg;
     private String base = Endpoints.HETZNER;
 
@@ -83,6 +89,74 @@ public final class HetznerProvider implements Provider {
         for (String ip : new String[] {server.ipv4, server.ipv6}) {
             if (ip == null || ip.isEmpty()) continue;
             ProviderApi.call("POST", base + "/servers/" + server.serverId + "/actions/change_dns_ptr", h(), Json.stringify(Json.obj("ip", ip, "dns_ptr", hostname)));
+        }
+    }
+
+    // ───────── Sizes ─────────
+
+    /** Live server types with prices in a region (x86, not deprecated), cheapest first. */
+    public static List<Catalog.SizeOption> fetchSizes(Map<String, Object> cfg, String region) throws IOException {
+        List<Catalog.SizeOption> out = new ArrayList<>();
+        Object j = Catalog.getJson(Endpoints.HETZNER + "/server_types?per_page=50", Http.headers("authorization", "Bearer " + Json.jsString(cfg.get("token"))));
+        for (Object t : Json.listAt(j, "server_types")) {
+            if (Json.truthy(Json.path(t, "deprecation")) || !"x86".equals(Json.str(t, "architecture"))) continue;
+            Object price = null;
+            for (Object p : Json.listAt(t, "prices")) if (region.equals(Json.str(p, "location"))) { price = p; break; }
+            if (price == null) continue;
+            Object mem = Json.path(t, "memory"), cores = Json.path(t, "cores");
+            out.add(new Catalog.SizeOption(Json.str(t, "name"), Json.jsString(cores) + " vCPU, " + Json.jsString(mem) + " GB", Catalog.d(mem), Catalog.d(cores), Catalog.d(Json.path(price, "price_monthly", "gross"))));
+        }
+        Catalog.sortBy(out, s -> s.monthly != null ? s.monthly : 0);
+        return out;
+    }
+
+    // ───────── DNS (Cloud API zones/rrsets) ─────────
+
+    /** Checks the token and finds the zone's assigned nameservers. */
+    public static List<String> connect(Map<String, Object> fields, String zone) throws IOException {
+        Http.Response r = Http.request("GET", Endpoints.HETZNER + "/zones?name=" + zone, Http.headers("authorization", "Bearer " + Adapters.fieldJs(fields, "token")), null, 15_000);
+        if (!r.ok()) throw new IOException("Hetzner accepteert dit token niet (of DNS staat nog in de oude DNS-console)");
+        Object j = Json.parse(r.text());
+        List<Object> zones = Json.listAt(j, "zones");
+        if (zones.isEmpty()) throw new IOException("Maak eerst de zone " + zone + " aan in de Hetzner Console → DNS");
+        List<Object> assigned = Json.asList(Json.path(zones.get(0), "authoritative_nameservers", "assigned"));
+        List<String> ns = new ArrayList<>();
+        if (assigned == null) {
+            ns.add("hydrogen.ns.hetzner.com");
+            ns.add("oxygen.ns.hetzner.com");
+            ns.add("helium.ns.hetzner.de");
+        } else for (Object a : assigned) ns.add(Json.jsString(a));
+        return ns;
+    }
+
+    /** Hetzner DNS via the Cloud API (zones/rrsets). The zone must be in the new Hetzner Console. */
+    public static final class Dns implements DnsProvider {
+        private final String name, token, zone;
+        private final String base = Endpoints.HETZNER;
+
+        public Dns(String name, String token, String zone) {
+            this.name = name;
+            this.token = token;
+            this.zone = zone;
+        }
+
+        @Override public String name() { return name; }
+
+        @Override
+        public void setRecords(String sub, String type, List<String> values, int ttl) throws IOException {
+            String rr = base + "/zones/" + zone + "/rrsets";
+            Map<String, String> h = Http.headers("authorization", "Bearer " + token, "content-type", "application/json");
+            String n = sub == null || sub.isEmpty() ? "@" : sub;
+            if (values.isEmpty()) {
+                Http.Response r = Http.request("DELETE", rr + "/" + n + "/" + type, h, null, ProviderApi.TIMEOUT_MS);
+                if (!r.ok() && r.status != 404) throw new IOException("Hetzner DNS delete " + n + "/" + type + ": " + r.status);
+                return;
+            }
+            List<Object> records = new ArrayList<>();
+            for (String v : values) records.add(Json.obj("value", v));
+            Http.Response r = Http.request("POST", rr + "/" + n + "/" + type + "/actions/set_records", h, Bytes.utf8(Json.stringify(Json.obj("records", records))), ProviderApi.TIMEOUT_MS);
+            if (r.status == 404) r = Http.request("POST", rr, h, Bytes.utf8(Json.stringify(Json.obj("name", n, "type", type, "ttl", (long) ttl, "records", records))), ProviderApi.TIMEOUT_MS);
+            if (!r.ok()) throw new IOException("Hetzner DNS " + n + "/" + type + ": " + r.status + " " + Bytes.head(r.text(), 200));
         }
     }
 }

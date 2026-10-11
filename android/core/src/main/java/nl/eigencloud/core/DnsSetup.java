@@ -7,10 +7,11 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * The DNS step of the console (POST /api/dns and GET /api/dns/check in src/console/server.ts): checks the
- * deSEC / Hetzner token, creates the deSEC domain when needed, finds the nameservers, and checks whether the
- * domain is delegated to them. There is no NS lookup in plain Java/Android, so the delegation check uses
- * DNS-over-HTTPS JSON ({@link Endpoints#DOH}).
+ * The DNS step of the console (configureDns in src/console/server.ts, POST /api/dns and GET /api/dns/check): any
+ * provider with DNS in the registry ({@link Adapters}, field definitions from catalog.json) or manual. Checks the key
+ * and the zone through the adapter's connect, stores the link, and checks whether the domain is delegated to the
+ * nameservers. There is no NS lookup in plain Java/Android, so the delegation check uses DNS-over-HTTPS JSON
+ * ({@link Endpoints#DOH}).
  */
 public final class DnsSetup {
     private DnsSetup() {}
@@ -32,12 +33,19 @@ public final class DnsSetup {
         }
     }
 
+    /** {@link #configure(Map, Catalog, String, String, Map)} without separate fields (only a token). */
+    public static Result configure(Map<String, Object> c, Catalog catalog, String mode, String token) throws IOException {
+        return configure(c, catalog, mode, token, null);
+    }
+
     /**
-     * Configures DNS on an admin config (mutates {@code c}: dns, console.dnsMode, console.nameservers); the
-     * caller saves the vault afterwards. {@code mode}: "desec", "hetzner" or "manual". A null token or one
-     * starting with "••" (masked) reuses the stored token. Throws {@link IOException} with a Dutch message.
+     * Configures DNS on an admin config (mutates {@code c}: dns, console.dnsMode, console.nameservers); the caller
+     * saves the vault afterwards. {@code mode}: the id of a DNS adapter ("desec", "hetzner", "scaleway", "exoscale",
+     * "ovh", …) or "manual". Credentials: the key of the same provider under Servers, over that what was linked for
+     * DNS before, over that what the user fills in now ({@code fieldsIn}, and {@code token}); masked values ("••…")
+     * and empty values do not count. Throws {@link IOException} / IllegalArgumentException with a Dutch message.
      */
-    public static Result configure(Map<String, Object> c, String mode, String token) throws IOException {
+    public static Result configure(Map<String, Object> c, Catalog catalog, String mode, String token, Map<String, Object> fieldsIn) throws IOException {
         String d = Json.jsString(c.get("domain"));
         Map<String, Object> console = Json.map(c, "console");
         if (console == null) { console = Json.obj(); c.put("console", console); }
@@ -46,51 +54,44 @@ public final class DnsSetup {
             console.put("dnsMode", "manual");
             return new Result(null, null);
         }
-        if (!"desec".equals(mode) && !"hetzner".equals(mode)) throw new IllegalArgumentException("Onbekende DNS-keuze");
-        String tok = token != null && !token.startsWith("••") ? token.trim() : null;
-        if (tok == null) {
-            for (Object x : Json.listAt(c, "dns")) if (mode.equals(Json.str(x, "type"))) { tok = Json.str(x, "token"); break; }
+        Adapters.Adapter a = mode == null ? null : Adapters.get(mode);
+        Map<String, Object> offer = mode == null ? null : catalog.dnsOffer(mode);
+        if (a == null || a.dns == null || offer == null) throw new IllegalArgumentException("Kies een DNS-aanbieder");
+        List<Catalog.Field> want = Catalog.fields(offer);
+        Map<String, Object> prev = null;
+        for (Object x : Json.listAt(c, "dns")) if (mode.equals(Json.str(x, "type"))) { prev = Json.asMap(x); break; }
+        Map<String, Object> fields = Json.obj();
+        Map<String, Object> linked = Json.map(c, "providers", mode);
+        if (linked != null) for (Catalog.Field f : want) if (Json.truthy(linked.get(f.key))) fields.put(f.key, linked.get(f.key));
+        if (prev != null) for (Map.Entry<String, Object> e : Adapters.dnsFields(prev).entrySet()) if (!"api".equals(e.getKey())) fields.put(e.getKey(), e.getValue());
+        Map<String, Object> given = Json.obj();
+        if (fieldsIn != null) given.putAll(fieldsIn);
+        if (token != null && !token.isEmpty()) given.put("token", token);
+        for (Map.Entry<String, Object> e : given.entrySet()) {
+            if (!(e.getValue() instanceof String)) continue;
+            String v = (String) e.getValue();
+            if (v.trim().isEmpty() || v.startsWith("••")) continue;
+            for (Catalog.Field f : want) if (f.key.equals(e.getKey())) { fields.put(e.getKey(), v.trim()); break; }
         }
-        if (tok == null || tok.isEmpty()) throw new IOException("Vul je API-token in");
-        List<String> ns = "desec".equals(mode) ? desec(d, tok) : hetzner(d, tok);
-        c.put("dns", Json.list(Json.obj("type", mode, "name", mode, "token", tok, "zone", d)));
+        List<Catalog.Field> missing = new ArrayList<>();
+        for (Catalog.Field f : want) if (!f.optional && !Json.truthy(fields.get(f.key))) missing.add(f);
+        if (!missing.isEmpty()) {
+            if (missing.size() == 1 && "token".equals(missing.get(0).key)) throw new IOException("Vul je API-token in");
+            StringBuilder b = new StringBuilder();
+            for (Catalog.Field f : missing) b.append(b.length() == 0 ? "" : ", ").append(f.label);
+            throw new IOException("Vul in: " + b);
+        }
+        List<String> ns = a.dns.connect.connect(fields, d);
+        Object tok = fields.remove("token");
+        Map<String, Object> link = Json.obj("type", mode, "name", mode);
+        if (Json.truthy(tok)) link.put("token", tok);
+        link.put("zone", d);
+        if (!fields.isEmpty()) link.put("fields", fields);
+        c.put("dns", Json.list(link));
         console.put("dnsMode", mode);
         console.put("nameservers", new ArrayList<Object>(ns));
         // dedyn.io-namen staan meteen goed: deSEC beheert dedyn.io zelf.
         return new Result(ns, d.endsWith(".dedyn.io") || delegated(d, ns));
-    }
-
-    /** deSEC: checks the token and adds the domain when it does not exist yet. */
-    public static List<String> desec(String domain, String token) throws IOException {
-        Map<String, String> h = Http.headers("authorization", "Token " + token, "content-type", "application/json");
-        Http.Response r = Http.request("GET", Endpoints.DESEC + "/domains/" + domain + "/", h, null, 15_000);
-        if (r.status == 401 || r.status == 403) throw new IOException("deSEC accepteert dit token niet");
-        if (r.status == 404) {
-            if (domain.endsWith(".dedyn.io")) throw new IOException(domain + " bestaat (nog) niet bij deSEC. Maak het account opnieuw aan met een andere naam.");
-            Http.Response cr = Http.request("POST", Endpoints.DESEC + "/domains/", h, Bytes.utf8(Json.stringify(Json.obj("name", domain))), 15_000);
-            if (!cr.ok()) throw new IOException("Domein toevoegen bij deSEC mislukt: " + Bytes.head(cr.text(), 200));
-        }
-        List<String> ns = new ArrayList<>();
-        ns.add("ns1.desec.io");
-        ns.add("ns2.desec.org");
-        return ns;
-    }
-
-    /** Hetzner (Cloud API DNS): looks up the zone and its assigned nameservers. */
-    public static List<String> hetzner(String domain, String token) throws IOException {
-        Http.Response r = Http.request("GET", Endpoints.HETZNER + "/zones?name=" + domain, Http.headers("authorization", "Bearer " + token), null, 15_000);
-        if (!r.ok()) throw new IOException("Hetzner accepteert dit token niet (of DNS staat nog in de oude DNS-console)");
-        Object j = Json.parse(r.text());
-        List<Object> zones = Json.listAt(j, "zones");
-        if (zones.isEmpty()) throw new IOException("Maak eerst de zone " + domain + " aan in de Hetzner Console → DNS");
-        List<Object> assigned = Json.asList(Json.path(zones.get(0), "authoritative_nameservers", "assigned"));
-        List<String> ns = new ArrayList<>();
-        if (assigned == null) {
-            ns.add("hydrogen.ns.hetzner.com");
-            ns.add("oxygen.ns.hetzner.com");
-            ns.add("helium.ns.hetzner.de");
-        } else for (Object a : assigned) ns.add(Json.jsString(a));
-        return ns;
     }
 
     /** True when every expected nameserver is among the domain's current NS records (case-insensitive). */

@@ -92,18 +92,26 @@ jrun FormatsGoldenTest
 jrun CatalogApiTest
 jrun ProvidersTest
 jrun DnsTest
+jrun AdaptersTest
 jrun VaultTest
 jrun SmtpTest SMTP_INFO="$BUILD/smtp-info.json"
 jrun S3MotoTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
 jrun ConsoleApiTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
 if wait_for 60 test -s "$BUILD/dienst-info.json"; then
   jrun ConsoleExtrasTest MOTO_URL="http://127.0.0.1:$MOTO_PORT" DIENST_INFO="$BUILD/dienst-info.json"
+  DIENST_OK=1
 else
-  echo "   dienst niet gestart:"; tail -30 "$BUILD/dienst.log"; RESULTS+=("FAIL ConsoleExtrasTest"); FAILED=1
+  echo "   dienst niet gestart:"; tail -30 "$BUILD/dienst.log"; RESULTS+=("FAIL ConsoleExtrasTest"); FAILED=1; DIENST_OK=0
 fi
 jrun QuickSetupTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
 jrun AanbiederTest MOTO_URL="http://127.0.0.1:$MOTO_PORT" SMTP_INFO="$BUILD/smtp-info.json"
 run golden-verify.ts npx tsx scripts/golden-verify.ts "$BUILD"
+# Na golden-verify: die controleert berichten met een geldigheid van een paar minuten (sinds CryptoGoldenTest).
+if [ "$DIENST_OK" -eq 1 ]; then
+  jrun OverstapTest MOTO_URL="http://127.0.0.1:$MOTO_PORT" DIENST_INFO="$BUILD/dienst-info.json"
+else
+  RESULTS+=("FAIL OverstapTest"); FAILED=1
+fi
 
 echo "== Wachten op de cluster-node (leider)"
 if wait_for 180 test -s "$BUILD/cluster-info.json"; then

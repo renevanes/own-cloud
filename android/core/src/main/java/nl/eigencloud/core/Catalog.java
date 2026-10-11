@@ -13,36 +13,110 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * Port of src/console/catalog.ts. The offer data itself (STORE_OFFERS / SERVER_OFFERS) is not duplicated:
- * it is exported by scripts/export-catalog.ts to catalog.json ({stores, servers}) and loaded here.
+ * Port of src/console/catalog.ts. The offer data itself is not duplicated: scripts/export-catalog.ts derives it from
+ * the TypeScript registry (src/cluster/adapters.ts) into catalog.json, loaded here. Version 2:
+ * <pre>
+ *   stores   [{id, name, owner, home, regions:[{id,label,country,endpoint}], customEndpoint?, help, signupUrl}]
+ *   servers  [{id, name, owner, home, regions:[{id,label,country,city}], fields:[Field], signupUrl, keyHelp}]
+ *   dns      [{id, name, owner, home, fields:[Field], keyHelp, signupUrl, sharesKeyWith?}]
+ *   adapters [{id, name, owner, home, signupUrl, keyHelp, fields, capabilities:{servers,storage,dns,quick}, quick?}]
+ *   Field =  {key, label, secret?, help?, optional?, placeholder?}
+ * </pre>
+ * Version 1 files ({stores, servers}) still load; they have no DNS offers. The code part of each provider is in
+ * {@link Adapters}.
  */
 public final class Catalog {
     private final List<Map<String, Object>> stores = new ArrayList<>();
     private final List<Map<String, Object>> servers = new ArrayList<>();
+    private final List<Map<String, Object>> dns = new ArrayList<>();
+    private final List<Map<String, Object>> adapters = new ArrayList<>();
+    private final int version;
 
-    /** Parses catalog.json text ({stores: StoreOffer[], servers: ServerOffer[]}). */
+    /** Parses catalog.json text. */
     public Catalog(String json) {
         Map<String, Object> root = Json.parseObject(json);
+        Number v = Json.num(root, "version");
+        version = v == null ? 1 : v.intValue();
         for (Object o : Json.listAt(root, "stores")) stores.add(Json.asMap(o));
         for (Object o : Json.listAt(root, "servers")) servers.add(Json.asMap(o));
+        for (Object o : Json.listAt(root, "dns")) dns.add(Json.asMap(o));
+        for (Object o : Json.listAt(root, "adapters")) adapters.add(Json.asMap(o));
     }
 
     /** Loads catalog.json from a stream (e.g. Android assets). */
     public static Catalog load(InputStream in) throws IOException { return new Catalog(Bytes.utf8(Bytes.readAll(in))); }
 
-    /** StoreOffer objects: {id, name, owner, regions:[{id,label,country,endpoint}], customEndpoint?, help, signupUrl}. */
+    /** Format version of catalog.json (1 when the file has none). */
+    public int version() { return version; }
+
+    /** StoreOffer objects: {id, name, owner, home, regions:[{id,label,country,endpoint}], customEndpoint?, help, signupUrl}. */
     public List<Map<String, Object>> storeOffers() { return stores; }
 
-    /** ServerOffer objects: {id, name, owner, home, regions:[{id,label,country,city}], fields:[{key,label,secret?,help?}], signupUrl}. */
+    /** ServerOffer objects: {id, name, owner, home, regions:[{id,label,country,city}], fields:[Field], signupUrl, keyHelp}. */
     public List<Map<String, Object>> serverOffers() { return servers; }
+
+    /**
+     * DnsOffer objects: {id, name, owner, home, fields:[Field], keyHelp, signupUrl, sharesKeyWith?}. Manual DNS is not
+     * an offer; the console adds that itself.
+     */
+    public List<Map<String, Object>> dnsOffers() { return dns; }
+
+    /** Adapter descriptions: {id, name, owner, home, signupUrl, keyHelp, fields, capabilities, quick?}. */
+    public List<Map<String, Object>> adapters() { return adapters; }
 
     public Map<String, Object> storeOffer(String id) { return find(stores, id); }
 
     public Map<String, Object> serverOffer(String id) { return find(servers, id); }
 
+    public Map<String, Object> dnsOffer(String id) { return find(dns, id); }
+
+    public Map<String, Object> adapter(String id) { return find(adapters, id); }
+
     private static Map<String, Object> find(List<Map<String, Object>> l, String id) {
         for (Map<String, Object> m : l) if (id.equals(m.get("id"))) return m;
         return null;
+    }
+
+    /** The fields of an offer or adapter description as typed objects. */
+    public static List<Field> fields(Map<String, Object> offer) {
+        List<Field> out = new ArrayList<>();
+        if (offer != null) for (Object f : Json.listAt(offer, "fields")) out.add(Field.fromJson(Json.asMap(f)));
+        return out;
+    }
+
+    private static final Pattern SECRET = Pattern.compile("token|secret|password|consumer", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Whether a credential field of a provider is secret (masked in the console) — isSecretField in
+     * src/cluster/adapters.ts: the adapter's field definition (servers or DNS) decides; unknown fields by name.
+     */
+    public boolean isSecretField(String adapterId, String key) {
+        List<Map<String, Object>> defs = new ArrayList<>();
+        Map<String, Object> a = adapter(adapterId);
+        if (a != null) defs.add(a);
+        Map<String, Object> d = dnsOffer(adapterId);
+        if (d != null) defs.add(d);
+        for (Map<String, Object> def : defs) for (Field f : fields(def)) if (f.key.equals(key)) return f.secret;
+        return SECRET.matcher(key).find();
+    }
+
+    /** A credential field: {key, label, secret?, help?, optional?, placeholder?}. */
+    public static final class Field {
+        public final String key, label, help, placeholder;
+        public final boolean secret, optional;
+
+        public Field(String key, String label, boolean secret, String help, boolean optional, String placeholder) {
+            this.key = key;
+            this.label = label;
+            this.secret = secret;
+            this.help = help;
+            this.optional = optional;
+            this.placeholder = placeholder;
+        }
+
+        public static Field fromJson(Map<String, Object> m) {
+            return new Field(Json.str(m, "key"), Json.str(m, "label"), Json.truthy(m.get("secret")), Json.str(m, "help"), Json.truthy(m.get("optional")), Json.str(m, "placeholder"));
+        }
     }
 
     /** Regions of a server offer as typed objects. */
@@ -140,87 +214,51 @@ public final class Catalog {
 
     // ───────── Live sizes ─────────
 
-    private static Object get(String url, Map<String, String> headers) throws IOException {
+    /** GET for sizes and prices (getJson in adapters/http.ts): 15 s, error text "<status> <text>". */
+    static Object getJson(String url, Map<String, String> headers) throws IOException {
         Http.Response r = Http.request("GET", url, headers, null, 15_000);
         if (!r.ok()) throw new HttpException(r.status + " " + Bytes.head(r.text(), 200), r.status, r.text());
         return Json.parse(r.text());
     }
 
-    private static final Pattern SCW_TYPES = Pattern.compile("^(DEV1|PLAY2|PRO2|GP1|STARDUST|POP2)", Pattern.CASE_INSENSITIVE);
-    private static final Pattern UPC_PLAN = Pattern.compile("^\\d+xCPU-\\d+GB$");
-
-    private static double d(Object v) {
+    /** JS Number(v) for JSON values (strings like "4.5100" included). */
+    static double d(Object v) {
         if (v instanceof Number) return ((Number) v).doubleValue();
         if (v == null) return Double.NaN;
         String s = v.toString().trim();
         return s.isEmpty() ? 0 : Double.parseDouble(s);
     }
 
-    private static double jsRound(double x) { return Math.floor(x + 0.5); }
+    /** JS Math.round. */
+    static double jsRound(double x) { return Math.floor(x + 0.5); }
 
-    /** Live sizes and prices from the provider API (base URLs from {@link Endpoints}). */
+    /**
+     * Live sizes and prices from the provider (the adapter's servers.fetchSizes; base URLs from {@link Endpoints}).
+     * Empty for a provider without servers; the desktop test provider "local" gives its one fixed size.
+     */
     public static List<SizeOption> fetchSizes(String provider, Map<String, Object> cfg, String region) throws IOException {
+        Adapters.Adapter a = Adapters.get(provider);
+        if (a != null && a.servers != null) return a.servers.fetchSizes.fetch(cfg, region);
         List<SizeOption> out = new ArrayList<>();
-        if ("hetzner".equals(provider)) {
-            Object j = get(Endpoints.HETZNER + "/server_types?per_page=50", Http.headers("authorization", "Bearer " + Json.jsString(cfg.get("token"))));
-            for (Object t : Json.listAt(j, "server_types")) {
-                if (Json.truthy(Json.path(t, "deprecation")) || !"x86".equals(Json.str(t, "architecture"))) continue;
-                Object price = null;
-                for (Object p : Json.listAt(t, "prices")) if (region.equals(Json.str(p, "location"))) { price = p; break; }
-                if (price == null) continue;
-                Object mem = Json.path(t, "memory"), cores = Json.path(t, "cores");
-                out.add(new SizeOption(Json.str(t, "name"), Json.jsString(cores) + " vCPU, " + Json.jsString(mem) + " GB", d(mem), d(cores), d(Json.path(price, "price_monthly", "gross"))));
-            }
-            sortBy(out, s -> s.monthly != null ? s.monthly : 0);
-            return out;
-        }
-        if ("scaleway".equals(provider)) {
-            Object j = get(Endpoints.SCALEWAY + "/instance/v1/zones/" + region + "/products/servers?per_page=100", Http.headers("x-auth-token", Json.jsString(cfg.get("secretKey"))));
-            Map<String, Object> srv = Json.map(j, "servers");
-            if (srv == null) throw new IOException("Scaleway: onverwacht antwoord");
-            for (Map.Entry<String, Object> e : srv.entrySet()) {
-                Object s = e.getValue();
-                if (!SCW_TYPES.matcher(e.getKey()).find() || !"x86_64".equals(Json.str(s, "arch"))) continue;
-                double ram = jsRound(d(Json.path(s, "ram")) / Math.pow(1024, 3));
-                Object ncpus = Json.path(s, "ncpus");
-                Object mp = Json.path(s, "monthly_price");
-                Double monthly;
-                if (mp != null) monthly = d(mp);
-                else {
-                    Object hp = Json.path(s, "hourly_price");
-                    monthly = Json.truthy(hp) ? jsRound(d(hp) * 730 * 100) / 100 : null;
-                }
-                out.add(new SizeOption(e.getKey(), Json.jsString(ncpus) + " vCPU, " + Json.numberToString(ram) + " GB", ram, d(ncpus), monthly));
-            }
-            sortBy(out, s -> s.monthly != null ? s.monthly : 999);
-            return out;
-        }
-        if ("upcloud".equals(provider)) {
-            Object j = get(Endpoints.UPCLOUD + "/plan", Http.headers("authorization", "Bearer " + Json.jsString(cfg.get("token"))));
-            for (Object p : Json.listAt(j, "plans", "plan")) {
-                String name = Json.str(p, "name");
-                if (name == null || !UPC_PLAN.matcher(name).find()) continue;
-                double ram = d(Json.path(p, "memory_amount")) / 1024;
-                Object cores = Json.path(p, "core_number");
-                out.add(new SizeOption(name, Json.jsString(cores) + " vCPU, " + Json.numberToString(ram) + " GB", ram, d(cores), null));
-            }
-            Collections.sort(out, new Comparator<SizeOption>() {
-                @Override public int compare(SizeOption a, SizeOption b) {
-                    int c = Double.compare(a.ramGb, b.ramGb);
-                    return c != 0 ? c : Double.compare(a.cpus, b.cpus);
-                }
-            });
-            return out;
-        }
         if ("local".equals(provider)) out.add(new SizeOption("s", "proces op deze computer", 4, 1, 0.0));
         return out;
     }
 
-    private interface Key { double of(SizeOption s); }
+    interface Key { double of(SizeOption s); }
 
-    private static void sortBy(List<SizeOption> l, final Key k) {
+    static void sortBy(List<SizeOption> l, final Key k) {
         Collections.sort(l, new Comparator<SizeOption>() {
             @Override public int compare(SizeOption a, SizeOption b) { return Double.compare(k.of(a), k.of(b)); }
+        });
+    }
+
+    /** Sort by memory, then CPUs (UpCloud, Exoscale). */
+    static void sortByRamCpus(List<SizeOption> l) {
+        Collections.sort(l, new Comparator<SizeOption>() {
+            @Override public int compare(SizeOption a, SizeOption b) {
+                int c = Double.compare(a.ramGb, b.ramGb);
+                return c != 0 ? c : Double.compare(a.cpus, b.cpus);
+            }
         });
     }
 

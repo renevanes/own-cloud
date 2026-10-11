@@ -19,18 +19,27 @@ public class CatalogApiTest {
                 api.json("^GET /hz/server_types\\?per_page=50$", 200, responses.get("hetzner"))
                         .json("^GET /scw/instance/v1/zones/[a-z0-9-]+/products/servers\\?per_page=100$", 200, responses.get("scaleway"))
                         .json("^GET /upc/plan$", 200, responses.get("upcloud"))
+                        .json("^GET /exo/[a-z0-9-]+/v2/instance-type$", 200, responses.get("exoscale"))
+                        .json("^GET /ovh/auth/time$", 200, responses.get("ovhTime"))
+                        .json("^GET /ovh/cloud/project/p/flavor\\?region=[A-Z0-9]+$", 200, responses.get("ovhFlavors"))
+                        .json("^GET /ovh/order/catalog/public/cloud\\?ovhSubsidiary=FR$", 200, responses.get("ovhCatalog"))
                         .on("^GET /hz/servers\\?", c -> deny[0] ? new FakeApi.Reply(401, "{\"error\":\"unauthorized\"}", "application/json")
                                 : new FakeApi.Reply(200, "{\"servers\":[],\"meta\":{\"pagination\":{\"next_page\":null}}}", "application/json"));
                 Endpoints.HETZNER = api.base() + "/hz";
                 Endpoints.SCALEWAY = api.base() + "/scw";
                 Endpoints.UPCLOUD = api.base() + "/upc";
+                Endpoints.EXOSCALE = api.base() + "/exo/{zone}/v2";
+                Endpoints.OVH = api.base() + "/ovh";
+                Map<String, Object> sizeCfg = Json.obj("token", "t", "secretKey", "s", "apiKey", "EXOk", "apiSecret", "geheim", "appKey", "ak", "appSecret", "as", "consumerKey", "ck", "projectId", "p");
                 for (Object o : Json.listAt(g, "fetchSizes")) {
                     List<Object> got = new ArrayList<>();
-                    for (Catalog.SizeOption s : Catalog.fetchSizes(Json.str(o, "provider"), Json.obj("token", "t", "secretKey", "s"), Json.str(o, "region"))) got.add(s.toJson());
+                    for (Catalog.SizeOption s : Catalog.fetchSizes(Json.str(o, "provider"), sizeCfg, Json.str(o, "region"))) got.add(s.toJson());
                     T.eq(Json.stringify(Json.path(o, "result")), Json.stringify(got), "fetchSizes " + Json.str(o, "provider") + "/" + Json.str(o, "region"));
                 }
                 T.eq("Bearer t", api.find("server_types").headers.get("authorization"), "Hetzner sizes auth");
                 T.eq("s", api.find("products/servers").headers.get("x-auth-token"), "Scaleway sizes auth");
+                T.check(api.find("instance-type").headers.get("authorization").startsWith("EXO2-HMAC-SHA256 credential=EXOk,expires="), "Exoscale sizes signed");
+                T.check(api.find("/ovh/cloud/project/p/flavor").headers.get("x-ovh-signature").startsWith("$1$"), "OVH sizes signed");
 
                 api.json("^GET /upc/fout", 401, Json.obj());
                 Endpoints.UPCLOUD = api.base() + "/upc/fout";

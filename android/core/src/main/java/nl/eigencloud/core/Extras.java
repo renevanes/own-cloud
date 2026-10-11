@@ -146,6 +146,11 @@ public final class Extras {
         return b.replaceFirst("/$", "");
     }
 
+    /** Verzoek aan een Dienst (aanbieder), ook met een andere basis en sessie (overstappen). */
+    public static Object dienstCall(String base, String method, String path, Object body, String token) throws IOException {
+        return dienst(base, method, path, body, token);
+    }
+
     private static Object dienst(String base, String method, String path, Object body, String token) throws IOException {
         if (base == null || base.isEmpty()) throw new IOException("Kies eerst een aanbieder");
         Map<String, String> h = Http.headers("accept", "application/json");
@@ -342,18 +347,31 @@ public final class Extras {
         Map<String, Object> kit = Json.asMap(dienst(base, "GET", "/v1/orders/" + Json.str(d, "orderId") + "/kit", null, Json.str(d, "token")));
         if (kit == null) throw new IOException("Leeg pakket van de dienst");
         if (!Json.jsString(kit.get("domain")).equals(Json.jsString(c.get("domain")))) throw new IOException("Het pakket is voor " + kit.get("domain") + ", niet voor " + c.get("domain"));
+        List<Object> names = applyKit(c, kit, catalog);
+        d.put("applied", true);
+        // De overdrachtscode van een gratis adres (adressendienst) hoort bij de klant: nodig om over te stappen.
+        String code = Json.str(kit, "dns", "transferCode");
+        if (code != null) d.put("transferCode", code);
+        return Json.obj("ok", true, "stores", names, "nameservers", kit.get("nameservers"), "delegated", kit.get("delegated"));
+    }
+
+    /**
+     * Het pakket in een configuratie zetten (applyKit in extras.ts): aanbieder, opslag (buckets aanmaken en
+     * instellen), plekken, DNS via de dienst, mail-relay en het aantal gebruikers. Ook voor overstappen (op een kopie).
+     */
+    public static List<Object> applyKit(Map<String, Object> c, Map<String, Object> kit, Catalog catalog) throws IOException {
         Map<String, Object> providers = Json.map(c, "providers");
         if (providers == null) { providers = Json.obj(); c.put("providers", providers); }
         providers.put(Json.str(kit, "provider", "id"), Json.copy(Json.map(kit, "provider", "fields")));
         List<Object> names = new ArrayList<>();
         for (Object st : Json.listAt(kit, "storage")) {
             Console.StoreSetup r = Console.addStore(c, catalog, Json.str(st, "offer"), Json.str(st, "region"), null, Json.str(st, "accessKey"), Json.str(st, "secretKey"), null, Json.str(st, "purpose"));
+            names.add(r.name);
             if (!r.ok) {
                 StringBuilder why = new StringBuilder();
                 for (Admin.StepResult s : r.steps) if (!s.ok) why.append(s.label).append(s.detail != null ? " (" + s.detail + ")" : "").append(", ");
                 throw new IOException("Opslag " + r.name + " klaarzetten lukte niet: " + why.toString().replaceAll(", $", ""));
             }
-            names.add(r.name);
         }
         Map<String, Object> pol = Json.map(c, "policy");
         if (pol == null) { pol = ClusterConfig.defaultPolicy(); c.put("policy", pol); }
@@ -375,8 +393,7 @@ public final class Extras {
             con.put("mailRelay", SmtpCheck.relayUrl(new SmtpCheck.Relay(Json.str(m, "host"), port == null ? 587 : port.intValue(), Json.str(m, "user"), Json.str(m, "password"), Json.truthy(m.get("secure")))));
         }
         con.put("spfExtra", Json.str(kit, "spfExtra") == null ? "" : Json.str(kit, "spfExtra"));
-        d.put("applied", true);
-        return Json.obj("ok", true, "stores", names, "nameservers", kit.get("nameservers"), "delegated", kit.get("delegated"));
+        return names;
     }
 
     // ───────── Eén sleutel bij Scaleway: de console regelt de rest ─────────

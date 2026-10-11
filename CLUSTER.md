@@ -75,8 +75,8 @@ npm run eigen -- init eigen jouwdomein.nl     # maakt eigen.json + hoofdsleutel 
 Vul in `eigen.json` in:
 
 - **stores**: maak buckets aan bij minstens 2 aanbieders in 2 landen (S3-compatibel: Hetzner Object Storage, Scaleway, UpCloud, OVH, Exoscale). Zet bij de back-up-bucket **versiebeheer + object-lock** aan.
-- **providers**: API-tokens (Hetzner Cloud, Scaleway, UpCloud). Test ze met `npm run eigen -- provider-test hetzner`.
-- **dns**: deSEC-token (gratis, Berlijn). Zet bij je registrar de NS-records van deSEC (en eventueel een tweede aanbieder).
+- **providers**: inloggegevens per aanbieder (Hetzner, Scaleway, UpCloud, Exoscale, OVHcloud; velden per aanbieder in [PROVIDERS.md](PROVIDERS.md)). Test ze met `npm run eigen -- provider-test hetzner`.
+- **dns**: deSEC-token (gratis, Berlijn), of DNS bij Hetzner, Scaleway, Exoscale of OVHcloud (`type` = id van de aanbieder; overige sleutels in `fields`). Zet bij je registrar de NS-records van die aanbieder (en eventueel een tweede).
 - **policy.placement**: waar nodes mogen komen, op volgorde van voorkeur. Het voorbeeld spreidt over NL (Scaleway Amsterdam), DE (Hetzner) en FI (UpCloud/Hetzner Helsinki).
 - **appEnv**: `SMTP_RELAY` (aanbevolen, zie hieronder).
 
@@ -195,9 +195,9 @@ weggehaald als geen enkele rij het meer gebruikt.
 
 ## Eerlijk over de grenzen
 
-- **Live API's niet getest.** De adapters voor Hetzner, Scaleway en UpCloud volgen de API-documentatie en zijn getest tegen nagebootste API's, niet tegen echte accounts. Begin met `provider-test` en één handmatige `spawn` per aanbieder. De S3-client is getest tegen de officiële AWS-testvector en een S3-server (moto).
+- **Live API's niet getest.** De adapters voor Hetzner, Scaleway, UpCloud, Exoscale en OVHcloud (zie [PROVIDERS.md](PROVIDERS.md)) volgen de API-documentatie en zijn getest tegen nagebootste API's, niet tegen echte accounts. Begin met `provider-test` en één handmatige `spawn` per aanbieder. De S3-client is getest tegen de officiële AWS-testvector en een S3-server (moto).
 - **Mailreputatie.** Elke nieuwe server heeft een nieuw IP-adres. Bij Hetzner moet je poort 25 laten openzetten, en ook andere aanbieders blokkeren die vaak standaard. Gebruik daarom `SMTP_RELAY` (bijv. Scaleway TEM, Frans) voor uitgaande mail: dan maakt verhuizen niets uit voor je bezorging.
-- **DNS-01-certificaten** vereisen het Caddy-image uit `Dockerfile.caddy` (modules `caddy-dns/desec`, `caddy-dns/hetzner` en, voor de Eigen Cloud Dienst, `caddy-dns/acmedns`). Controleer of je Hetzner-zone al naar de Cloud-API is gemigreerd.
+- **DNS-01-certificaten** vereisen het Caddy-image uit `Dockerfile.caddy` (modules `caddy-dns/desec`, `caddy-dns/hetzner` en, voor de Eigen Cloud Dienst, `caddy-dns/acmedns`). Met DNS bij Scaleway, Exoscale of OVHcloud gebruikt Caddy HTTP-01 (zie PROVIDERS.md). Controleer of je Hetzner-zone al naar de Cloud-API is gemigreerd.
 - **deSEC** hanteert standaard een minimale TTL van 1 uur. Dat is geen probleem voor failover (die hangt niet van DNS af), alleen voor het toevoegen van nieuwe IP-adressen.
 - **Witness**: elke node die stemt maar geen data heeft volstaat, dus ook een Raspberry Pi thuis in Rotterdam (`kind: "witness"`, handmatig).
 - **De aanbieder van een draaiende server** kan in theorie altijd bij het geheugen. Versleuteling beschermt je opslag, je back-ups en de perioden waarin alles slaapt.

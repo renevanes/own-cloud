@@ -25,7 +25,7 @@ Techniek: Node.js 22 + TypeScript, Fastify, SQLite (één bestand, makkelijk te 
 
 **Wat je nodig hebt**
 - Een eigen domeinnaam (bijvoorbeeld bij een Nederlandse registrar).
-- Een account bij één of meer Europese aanbieders: [Scaleway](https://console.scaleway.com) (Amsterdam), [Hetzner](https://console.hetzner.com) (Duitsland/Finland) of [UpCloud](https://hub.upcloud.com). Bij dezelfde aanbieders koop je ook de opslag voor back-ups.
+- Een account bij één of meer Europese aanbieders: [Scaleway](https://console.scaleway.com) (Amsterdam), [Hetzner](https://console.hetzner.com) (Duitsland/Finland), [UpCloud](https://hub.upcloud.com), [Exoscale](https://portal.exoscale.com) (Zwitserland, Duitsland, Oostenrijk) of [OVHcloud](https://www.ovhcloud.com/nl/public-cloud/) (Frankrijk, Duitsland, Polen). Bij dezelfde aanbieders koop je ook de opslag voor back-ups. Welke aanbieder wat kan, en hoe je er zelf een toevoegt: [PROVIDERS.md](PROVIDERS.md).
 - Een gratis account bij [deSEC](https://desec.io) voor DNS (aanbevolen).
 - Optioneel: een mail-relay (Scaleway TEM of Brevo), en een e-mailadres buiten je nieuwe domein voor meldingen.
 
@@ -51,6 +51,17 @@ Techniek: Node.js 22 + TypeScript, Fastify, SQLite (één bestand, makkelijk te 
 Bewaar het bestand `~/.eigen-cloud/kluis.json` gerust in je back-up of synchronisatiemap: het is versleuteld met je wachtwoordzin. Op een andere computer of telefoon kies je in de console **Ik heb al een Eigen Cloud** en vul je je herstelsleutel en de gegevens van één opslag in (de bucketnaam mag je leeg laten; de console zoekt hem zelf). Heb je een abonnement bij de Eigen Cloud Dienst, dan is het nog eenvoudiger: **Herstellen via de Eigen Cloud Dienst** vraagt alleen je e-mailadres, de code uit de mail en je herstelsleutel.
 
 **Abonnement beheren** doe je in de console zelf (paneel *Abonnement* op het overzicht): facturen bekijken en afdrukken, een andere bundel kiezen (je cloud krijgt meteen de nieuwe aantallen servers), je betaalmethode wijzigen, een mislukte incasso alsnog betalen, opzeggen of het opzeggen terugdraaien, en de verhuiscode van je domein opvragen. In de app opent de betaalpagina van Mollie in de app zelf en springt je bank-app vanzelf open.
+
+**Overstappen naar een andere aanbieder** (of naar zelf beheren) doe je ook in het paneel *Abonnement*: kies
+**Overstappen**, dan een aanbieder van de lijst of *Zelf beheren* (je eigen Scaleway-sleutel en een deSEC-token). De
+console laat eerst zien wat er gebeurt en hoe lang je cloud ongeveer offline is. Bij een nieuwe aanbieder log je daar in,
+kies je een bundel en betaal je; met **Nu overzetten** gaat je cloud slapen, gaan je gegevens versleuteld naar de nieuwe
+opslag, wordt hij daar wakker en zegt de console je oude abonnement op. Je adres gaat mee: een gratis adres van de
+adressendienst met de overdrachtscode, een eigen domein doordat je oude aanbieder de DNS vrijgeeft (gebruik je DNSSEC,
+zet dan daarna de nieuwe DS-records bij je registrar), een domein dat via je oude aanbieder geregistreerd is met de
+verhuiscode. Gaat er iets mis vóór je cloud bij de nieuwe plek draait, dan zet **Terug naar …** alles terug; de opslag
+van je oude aanbieder blijft tot het einde onaangeroerd. Het overstappen gaat na een herstart van de console of de app
+verder waar het was. Een gratis adres dat alleen bij je oude aanbieder hoort (`BROKER_FREE_ZONE`) kan niet mee.
 
 **Zelf aanbieder worden?** Op het overzicht van de console staat **Aanbieder worden**: vul je bedrijfsgegevens in,
 koppel je accounts (Scaleway, Mollie, deSEC, mail) en de console zet je eigen Eigen Cloud Dienst op een server bij
@@ -174,7 +185,7 @@ Zie **[CLUSTER.md](CLUSTER.md)**: Eigen Cloud als cluster over meerdere Europese
 ## Nog niet ingebouwd (logische volgende stappen)
 
 - **Spamfilter** — nu komt alles in de inbox. Volgende stap: SPF/DKIM-controle bij ontvangst en/of Rspamd ervoor zetten.
-- **Live-test bij de aanbieders** — de koppelingen met Hetzner, Scaleway en UpCloud volgen hun API-documentatie maar zijn nog niet tegen echte accounts gedraaid. De console test inloggen en prijzen ophalen meteen bij het koppelen.
+- **Live-test bij de aanbieders** — de koppelingen met Hetzner, Scaleway, UpCloud, Exoscale en OVHcloud volgen hun API-documentatie maar zijn nog niet tegen echte accounts gedraaid (zie [PROVIDERS.md](PROVIDERS.md) wat per aanbieder nog onzeker is). De console test inloggen en prijzen ophalen meteen bij het koppelen.
 - **IMAP/CalDAV** — nodig als je ook bestaande mail-/agenda-apps wilt gebruiken in plaats van de eigen webapp of app.
 - **Directe push-meldingen** — de app kijkt nu elk kwartier zelf (zonder Google-diensten). Sneller kan met een eigen push-dienst zoals UnifiedPush/ntfy.
 - **Agenda op de telefoon bewerken** — de telefoonagenda volgt de cloud nu alleen (lezen); wijzigen doe je in de app.

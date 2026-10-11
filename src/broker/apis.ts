@@ -100,6 +100,15 @@ export class Openprovider {
   }
 
   /**
+   * DNSSEC bij het register aan of uit (overstappen: de zone gaat naar een ander deSEC-account met andere sleutels;
+   * zonder DS-records blijft het domein bereikbaar tot de nieuwe sleutels er staan). Volgens de documentatie:
+   * PUT /domains/{id} met is_dnssec_enabled en dnssec_keys. Nog niet getest met een echt account.
+   */
+  async setDnssec(domainId: number | string, keys: { flags: number; protocol: number; alg: number; pub_key: string }[] | null) {
+    return this.req("PUT", `/domains/${encodeURIComponent(String(domainId))}`, keys && keys.length ? { is_dnssec_enabled: true, dnssec_keys: keys } : { is_dnssec_enabled: false, dnssec_keys: [] });
+  }
+
+  /**
    * Verhuiscode (auth code) van een domein. Volgens de documentatie: GET /domains/{id}/authcode → data.auth_code;
    * lukt dat niet (of is hij leeg), dan één keer POST /domains/{id}/authcode/reset. Nog niet getest met een echt account.
    */
@@ -130,6 +139,11 @@ export class Desec {
     catch (e) { if (e instanceof ApiError && e.status === 404) return null; throw e; }
   }
   async createZone(name: string) { return (await call("deSEC", `${this.c.url}/domains/`, { method: "POST", headers: this.h(), body: { name } })).json; }
+  /** Zone weghalen (met alle records). true = weggehaald, false = bestond niet (meer) in dit account. */
+  async deleteZone(name: string) {
+    try { await call("deSEC", `${this.c.url}/domains/${name}/`, { method: "DELETE", headers: this.h() }); return true; }
+    catch (e) { if (e instanceof ApiError && e.status === 404) return false; throw e; }
+  }
   async getRrset(zone: string, sub: string, type: string) {
     try { return (await call("deSEC", `${this.c.url}/domains/${zone}/rrsets/${sub || "@"}/${type}/`, { headers: this.h() })).json; }
     catch (e) { if (e instanceof ApiError && e.status === 404) return null; throw e; }

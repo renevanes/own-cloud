@@ -13,14 +13,17 @@ export interface ConsoleState {
   step: string;
   done: boolean;
   keyConfirmed: boolean;
-  dnsMode?: "desec" | "hetzner" | "manual" | "dienst";
+  /** "manual", "dienst" of de id van een DNS-adapter (desec, hetzner, scaleway, exoscale, ovh, …). */
+  dnsMode?: string;
   /** Hoe je aan je domein komt: eigen domein, gratis naam.dedyn.io, nieuw via de dienst, of een gratis adres van de dienst (sub). */
   domainMode?: "own" | "free" | "buy" | "sub";
   /** Account bij deSEC dat de console zelf heeft aangemaakt. */
   desec?: { email: string; password: string; at: number };
   /** Eigen Cloud Dienst (centrale betaalde dienst). */
   /** url = de gekozen aanbieder (zijn Eigen Cloud Dienst); invite = uitnodigingscode van die aanbieder. */
-  dienst?: { url?: string; invite?: string; email?: string; token?: string; orderId?: string; bundle?: string; applied?: boolean };
+  dienst?: { url?: string; invite?: string; email?: string; token?: string; orderId?: string; bundle?: string; applied?: boolean; transferCode?: string };
+  /** Overstappen naar een andere aanbieder of naar zelf beheren (zie overstap.ts). */
+  overstap?: import("./overstap.js").OverstapState;
   /** Aantal gebruikers in de cloud volgens het abonnement (0 = onbeperkt). */
   maxUsers?: number;
   preset?: string;
