@@ -34,6 +34,10 @@ export interface OrderRow {
   paid_at: number | null;
   cancelled_at: number | null;
   ends_at: string | null;
+  /** Extra gebruikers bovenop de bundel (gekocht door de klant). */
+  extra_users: number;
+  /** Uitnodigingscode waarmee besteld is. */
+  invite_code: string | null;
 }
 
 /** Soort betaling: eerste betaling, maandelijkse incasso, betaalmethode wijzigen (€ 0,01) of achterstand betalen. */
@@ -97,6 +101,51 @@ export function openDb(dataDir: string) {
   const fresh = !cols.has("kind");
   for (const [name, type] of add) if (!cols.has(name)) db.exec(`ALTER TABLE payments ADD COLUMN ${name} ${type}`);
   if (fresh) db.exec("UPDATE payments SET kind = CASE WHEN subscription_id IS NOT NULL THEN 'recurring' ELSE 'first' END, created_at = COALESCE(created_at, updated_at) WHERE kind IS NULL");
+  const orderCols = new Set((db.prepare("PRAGMA table_info(orders)").all() as { name: string }[]).map((c) => c.name));
+  if (!orderCols.has("extra_users")) db.exec("ALTER TABLE orders ADD COLUMN extra_users INTEGER NOT NULL DEFAULT 0");
+  if (!orderCols.has("invite_code")) db.exec("ALTER TABLE orders ADD COLUMN invite_code TEXT");
+  // Aanbieder: medewerkers, instellingen, uitnodigingen, hulpvragen, berichten, gezondheid, terugbetalingen.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS staff (
+      id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT, role TEXT NOT NULL,
+      totp_enc BLOB, totp_pending_enc BLOB, totp_last_step INTEGER NOT NULL DEFAULT 0,
+      invited_by TEXT, created_at INTEGER NOT NULL, last_login_at INTEGER);
+    CREATE TABLE IF NOT EXISTS staff_keys (
+      id TEXT PRIMARY KEY, staff_id TEXT NOT NULL REFERENCES staff(id) ON DELETE CASCADE, public_key TEXT NOT NULL,
+      label TEXT, created_at INTEGER NOT NULL, last_used_at INTEGER);
+    CREATE TABLE IF NOT EXISTS staff_sessions (
+      token_hash TEXT PRIMARY KEY, staff_id TEXT NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS staff_pending (
+      token_hash TEXT PRIMARY KEY, staff_id TEXT NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+      challenge TEXT, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, staff_id TEXT, staff_email TEXT,
+      action TEXT NOT NULL, target TEXT, detail TEXT);
+    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS files (key TEXT PRIMARY KEY, type TEXT NOT NULL, data BLOB NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS invites (
+      code TEXT PRIMARY KEY, label TEXT, bundle TEXT, max_uses INTEGER, uses INTEGER NOT NULL DEFAULT 0,
+      expires_at INTEGER, created_by TEXT, created_at INTEGER NOT NULL, revoked_at INTEGER);
+    CREATE TABLE IF NOT EXISTS tickets (
+      id TEXT PRIMARY KEY, customer_id TEXT NOT NULL REFERENCES customers(id), order_id TEXT, subject TEXT NOT NULL,
+      status TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS tickets_customer ON tickets(customer_id);
+    CREATE TABLE IF NOT EXISTS ticket_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id TEXT NOT NULL REFERENCES tickets(id), author TEXT NOT NULL,
+      staff_id TEXT, body TEXT NOT NULL, at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS announcements (
+      id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, severity TEXT NOT NULL,
+      starts_at INTEGER, ends_at INTEGER, order_ids TEXT, auto INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT, created_at INTEGER NOT NULL, ended_at INTEGER);
+    CREATE TABLE IF NOT EXISTS health (
+      order_id TEXT PRIMARY KEY REFERENCES orders(id), reported_at INTEGER NOT NULL, version TEXT, healthy INTEGER NOT NULL,
+      problems TEXT NOT NULL, storage_used_bytes INTEGER, users INTEGER, nodes TEXT NOT NULL,
+      unhealthy_since INTEGER, flagged_at INTEGER, flag_reason TEXT, announcement_id TEXT);
+    CREATE TABLE IF NOT EXISTS refunds (
+      id TEXT PRIMARY KEY, payment_id TEXT NOT NULL, order_id TEXT NOT NULL, amount TEXT NOT NULL, status TEXT,
+      description TEXT, staff_id TEXT, created_at INTEGER NOT NULL);
+  `);
   return db;
 }
 
@@ -109,6 +158,16 @@ export class Secrets {
   seal(obj: unknown, aad: string): Buffer { return seal(this.key, JSON.stringify(obj), aad); }
   open<T>(buf: Buffer | null, aad: string): T | null { return buf ? JSON.parse(open(this.key, buf, aad).toString("utf8")) : null; }
   hmac(s: string) { return crypto.createHmac("sha256", this.key).update(s).digest("hex"); }
+}
+
+/** Instelling (JSON) uit de database, of null. */
+export function getSetting<T>(db: Db, key: string): T | null {
+  const r = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
+  return r ? (JSON.parse(r.value) as T) : null;
+}
+export function setSetting(db: Db, key: string, value: unknown) {
+  db.prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+    .run(key, JSON.stringify(value), Date.now());
 }
 
 export function event(db: Db, orderId: string | null, kind: string, detail?: unknown) {

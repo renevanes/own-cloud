@@ -21,15 +21,15 @@ export function newProgress(): ImportProgress {
   return { phase: "uitpakken", mail: { done: 0, added: 0, skipped: 0, failed: 0 }, calendar: { calendars: 0, added: 0, updated: 0 }, photos: { done: 0, added: 0, duplicates: 0, failed: 0 }, log: [] };
 }
 
-export function importCalendarText(name: string, text: string) {
+export function importCalendarText(name: string, text: string, userId = 1) {
   const clean = name.replace(/\.ics$/i, "").replace(/@.*$/, "") || "Geïmporteerd";
-  let cal = db.prepare("SELECT id FROM calendars WHERE name = ?").get(clean) as { id: number } | undefined;
+  let cal = db.prepare("SELECT id FROM calendars WHERE name = ? AND user_id = ?").get(clean, userId) as { id: number } | undefined;
   if (!cal) {
     const colors = ["#3f6f4a", "#2f6f8f", "#8a5a9e", "#c2810c", "#b3392f", "#4f7d7a"];
-    const color = colors[(db.prepare("SELECT COUNT(*) AS n FROM calendars").get() as { n: number }).n % colors.length];
-    cal = { id: Number(db.prepare("INSERT INTO calendars (name, color) VALUES (?, ?)").run(clean, color).lastInsertRowid) };
+    const color = colors[(db.prepare("SELECT COUNT(*) AS n FROM calendars WHERE user_id = ?").get(userId) as { n: number }).n % colors.length];
+    cal = { id: Number(db.prepare("INSERT INTO calendars (name, color, user_id) VALUES (?, ?, ?)").run(clean, color, userId).lastInsertRowid) };
   }
-  return { name: clean, ...importIcs(text, cal.id) };
+  return { name: clean, ...importIcs(text, cal.id, userId) };
 }
 
 /** Herkent Takeout-paden in alle talen die Google gebruikt voor Foto's. */
@@ -48,7 +48,7 @@ function entryStream(zip: yauzl.ZipFile, entry: yauzl.Entry): Promise<NodeJS.Rea
  * Mail en agenda worden direct geïmporteerd; foto's worden eerst uit álle zips verzameld,
  * omdat Google een foto en zijn metadata soms over verschillende zips verdeelt.
  */
-export async function processTakeout(files: { path: string; name: string }[], workDir: string, p: ImportProgress, onUpdate: () => void) {
+export async function processTakeout(files: { path: string; name: string }[], workDir: string, p: ImportProgress, onUpdate: () => void, userId = 1) {
   const staging = path.join(workDir, `staging-${Date.now()}`);
   const photosDir = path.join(staging, "photos");
   fs.mkdirSync(photosDir, { recursive: true });
@@ -57,13 +57,13 @@ export async function processTakeout(files: { path: string; name: string }[], wo
   const importMbox = async (file: string, label: string) => {
     p.phase = "mail"; p.file = label; onUpdate();
     const before = { ...p.mail };
-    const s = await importGmailMbox(file, (x) => { Object.assign(p.mail, { done: before.done + x.done, added: before.added + x.added, skipped: before.skipped + x.skipped, failed: before.failed + x.failed }); onUpdate(); });
+    const s = await importGmailMbox(file, (x) => { Object.assign(p.mail, { done: before.done + x.done, added: before.added + x.added, skipped: before.skipped + x.skipped, failed: before.failed + x.failed }); onUpdate(); }, userId);
     Object.assign(p.mail, { done: before.done + s.done, added: before.added + s.added, skipped: before.skipped + s.skipped, failed: before.failed + s.failed });
     log(`Mail uit ${label}: ${s.added} nieuw, ${s.skipped} stonden er al`);
   };
   const importIcsText = (name: string, text: string) => {
     p.phase = "agenda"; p.file = name;
-    const r = importCalendarText(path.basename(name), text);
+    const r = importCalendarText(path.basename(name), text, userId);
     p.calendar.calendars++;
     p.calendar.added += r.added;
     p.calendar.updated += r.updated;
@@ -121,7 +121,7 @@ export async function processTakeout(files: { path: string; name: string }[], wo
 
     if (fs.readdirSync(photosDir).length) {
       p.phase = "foto's"; p.file = undefined; onUpdate();
-      const s = await importTakeoutPhotos(photosDir, (x) => { Object.assign(p.photos, x); onUpdate(); });
+      const s = await importTakeoutPhotos(photosDir, (x) => { Object.assign(p.photos, x); onUpdate(); }, userId);
       Object.assign(p.photos, s);
       log(`Foto's: ${s.added} nieuw, ${s.duplicates} stonden er al${s.failed ? `, ${s.failed} mislukt` : ""}`);
     }

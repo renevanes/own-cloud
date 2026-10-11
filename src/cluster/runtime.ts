@@ -13,4 +13,9 @@ export const runtime = {
   spool: (_raw: Buffer): void => { throw new Error("Geen cluster"); },
   /** Cluster slaapt: inkomende mail tijdelijk weigeren (afzenders proberen het later opnieuw). */
   sleeping: (): boolean => false,
+  /**
+   * Extra gebruikers pas toestaan als álle dataservers deze versie draaien (tijdens een rollende update kan een oudere
+   * server de tabel users en de kolom user_id nog niet kennen). Geeft de reden terug, of null als het kan.
+   */
+  usersBlocked: (): string | null => null,
 };

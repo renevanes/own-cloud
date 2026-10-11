@@ -36,7 +36,7 @@ switch (kind) {
       : [target];
     for (const file of files) {
       const name = path.basename(file, ".ics").replace(/@.*$/, "");
-      let cal = db.prepare("SELECT id FROM calendars WHERE name = ?").get(name) as { id: number } | undefined;
+      let cal = db.prepare("SELECT id FROM calendars WHERE name = ? AND user_id = 1").get(name) as { id: number } | undefined;
       if (!cal) cal = { id: Number(db.prepare("INSERT INTO calendars (name, color) VALUES (?, ?)").run(name, "#" + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, "0")).lastInsertRowid) };
       const r = importIcs(fs.readFileSync(file, "utf8"), cal.id);
       console.log(`📅 ${name}: ${r.added} nieuw, ${r.updated} bijgewerkt, ${r.skipped} overgeslagen`);

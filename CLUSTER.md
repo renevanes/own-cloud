@@ -144,6 +144,55 @@ Let op bij het ontwikkelen: een update laat oude en nieuwe versies even naast el
 databasestructuur moeten dus met oude volgers kunnen leven (nieuwe kolommen of tabellen pas gebruiken als alle
 servers zijn bijgewerkt).
 
+## Meerdere gebruikers: schema en rollende updates
+
+Een cloud kan meerdere gebruikers hebben (gezin, extra gebruikers), elk met eigen mail, agenda's en foto's. De
+eigenaar is gebruiker 1 en staat **niet** in een tabel: zijn wachtwoord en adres blijven in `settings`
+(`password_hash`, `mail_from`), zoals altijd. Extra gebruikers staan in de nieuwe tabel `users` (id 2, 3, …; een
+verwijderde gebruiker blijft als lege rij staan zodat een id nooit opnieuw wordt uitgedeeld).
+
+**Schemawijziging (src/userSchema.ts), alleen DDL, op elke server lokaal bij het starten:**
+
+- `messages`, `calendars`: kolom `user_id INTEGER NOT NULL DEFAULT 1` via `ALTER TABLE … ADD COLUMN`. Bestaande rijen
+  horen daarmee zonder één schrijfactie bij de eigenaar.
+- `events`, `photos`, `albums`: tabel opnieuw opgebouwd (SQLite-procedure: zonder foreign keys, kopie, oude weg,
+  hernoemen) met `user_id DEFAULT 1` en de unieke sleutel per gebruiker (`UNIQUE(user_id, uid)`, `(user_id, sha256)`,
+  `(user_id, name)`), zodat twee mensen dezelfde uitnodiging, foto of albumnaam kunnen hebben. Rij-id's blijven gelijk.
+  De kopie gaat buiten de triggers om, dus er komt niets in `_changelog`; elke server doet het zelf en komt op
+  dezelfde inhoud uit.
+- `messages`: unieke Message-ID per gebruiker (`messages_user_msgid`) in plaats van over de hele cloud.
+- Nieuwe tabel `users`. Wordt vanzelf gerepliceerd (alle tabellen zonder `_` ervoor), maar pas beschreven als de
+  eigenaar iemand toevoegt.
+
+De migratie schrijft nooit rijen. Daardoor werkt ze ook op een volger (waar schrijven geblokkeerd is), en ze draait
+ook bij **herstel uit de back-up** vóórdat de wijzigingen na de snapshot worden toegepast (`backup.ts`): een snapshot
+van een oudere versie plus nieuwere wijzigingen geeft zo de juiste eigenaar per rij.
+
+**Waarom dit veilig is tijdens een rollende update (oude en nieuwe servers naast elkaar):**
+
+- Toepassen (`applyOne` in changelog.ts) gebruikt alleen kolommen die de ontvangende database kent. Een oude volger
+  die een wijziging mét `user_id` krijgt, slaat die kolom over zonder fout; een nieuwe volger die een wijziging
+  zonder `user_id` krijgt (van een oude leider), vult de standaard 1 in. Zolang er alleen een eigenaar is, is dat
+  in beide richtingen precies goed.
+- Een **onbekende tabel** laat het toepassen wel mislukken (de hele portie wordt teruggedraaid, niets half; de volger
+  loopt achter tot hij is bijgewerkt). En een oude server zou `user_id` van een extra gebruiker negeren. Daarom:
+  **gebruikers toevoegen kan pas als elke dataserver de nieuwe versie draait.** Elke server meldt in `nodeInfo` welke
+  mogelijkheden hij heeft (`features: ["users"]`, oudere servers melden niets); de leider houdt die bij in
+  `node_info` en weigert tot dan het toevoegen met een uitleg (`runtime.usersBlocked`, `updates.usersBlocked`).
+  Vóór de eerste extra gebruiker is er niets dat een oude server verkeerd kan doen.
+- Bestaande sessies blijven geldig: een token zonder gebruiker (`<verloopt>.<handtekening>`) is de eigenaar. Een
+  extra gebruiker krijgt `<verloopt>.<id>-<generatie>.<handtekening>`; de generatie gaat omhoog bij een nieuw
+  wachtwoord, uitschakelen of verwijderen, zodat oude sessies vervallen. Het eerste deel blijft de verlooptijd (de
+  Android-app leest die).
+- Mail die een volger als secundaire MX aanneemt, krijgt de ontvangers uit de SMTP-envelop mee als eerste regel
+  (`X-Eigen-Envelope-To`), zodat de leider hem in de juiste mailbox(en) zet. Een oude leider ziet daar een extra
+  kopregel in en zet het bericht bij de eigenaar: goed zolang er nog geen extra gebruikers zijn.
+- Teruggaan naar een oudere versie nádat er extra gebruikers zijn, wordt niet ondersteund (die kent `users` niet).
+
+Bestanden (mail, bijlagen, foto's) blijven op inhoud geadresseerd en versleuteld in de opslag zoals voorheen; van wie
+iets is, staat alleen in de database. Twee gebruikers met dezelfde foto delen het bestand; een bestand wordt pas lokaal
+weggehaald als geen enkele rij het meer gebruikt.
+
 ## Eerlijk over de grenzen
 
 - **Live API's niet getest.** De adapters voor Hetzner, Scaleway en UpCloud volgen de API-documentatie en zijn getest tegen nagebootste API's, niet tegen echte accounts. Begin met `provider-test` en één handmatige `spawn` per aanbieder. De S3-client is getest tegen de officiële AWS-testvector en een S3-server (moto).

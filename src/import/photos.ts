@@ -55,7 +55,7 @@ export function findSidecar(media: string, jsonsInDir: string[]): string | undef
 
 type PhotoImportStats = { done: number; added: number; duplicates: number; failed: number; withMetadata: number };
 
-export async function importTakeoutPhotos(root: string, onProgress?: (s: PhotoImportStats) => void) {
+export async function importTakeoutPhotos(root: string, onProgress?: (s: PhotoImportStats) => void, userId = 1) {
   const stats: PhotoImportStats = { done: 0, added: 0, duplicates: 0, failed: 0, withMetadata: 0 };
   const jsonCache = new Map<string, string[]>();
 
@@ -83,7 +83,7 @@ export async function importTakeoutPhotos(root: string, onProgress?: (s: PhotoIm
     if (!YEAR_FOLDER.test(folder) && folder !== path.basename(root) && !/^(google (photos|foto's)|takeout)$/i.test(folder)) meta.albums = [folder];
 
     try {
-      const r = await addPhotoFromFile(file, meta);
+      const r = await addPhotoFromFile(file, meta, { userId });
       r.duplicate ? stats.duplicates++ : stats.added++;
     } catch {
       stats.failed++;

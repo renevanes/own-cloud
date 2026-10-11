@@ -16,7 +16,13 @@ import { rpc } from "./transport.js";
 import type { ClusterService, NodeRow } from "./service.js";
 
 export interface Release { version: string; image: string; caddyImage?: string | null; checked?: number }
-export interface NodeInfo { version: string; updater: boolean; result: UpdateResult | null }
+export interface NodeInfo { version: string; updater: boolean; result: UpdateResult | null; features?: string[] }
+
+/**
+ * Wat deze versie kan, voor de andere servers. "users" = kent de tabel users en de kolom user_id (meerdere gebruikers).
+ * Oudere servers melden geen features.
+ */
+export const FEATURES = ["users"];
 export interface UpdateResult { id: string; version: string; ok: boolean; rolledBack: boolean; saved?: boolean; error: string | null; at: number }
 export type UpdateMode = "auto" | "melden" | "uit";
 
@@ -27,7 +33,7 @@ const file = (name: string) => path.join(config.dataDir, name);
 export function localNodeInfo(): NodeInfo {
   let result: UpdateResult | null = null;
   try { result = JSON.parse(fs.readFileSync(file("update-result.json"), "utf8")); } catch { /* nog geen update gehad */ }
-  return { version: VERSION(), updater: fs.existsSync(file("updater.json")), result };
+  return { version: VERSION(), updater: fs.existsSync(file("updater.json")), result, features: FEATURES };
 }
 
 /** Verzoek voor de updater op deze server (zie updaterScript in cloudinit.ts). */
@@ -149,6 +155,18 @@ function setSetting(svc: ClusterService, key: string, value: unknown) {
     .run(key, value == null ? "" : typeof value === "string" ? value : JSON.stringify(value));
 }
 
+/**
+ * Mogen er extra gebruikers bij? Pas als elke dataserver deze versie (of nieuwer) draait: een oudere server kent de tabel
+ * users niet (toepassen zou daar mislukken) en zou de kolom user_id negeren. Zie CLUSTER.md, "Meerdere gebruikers".
+ */
+export function usersBlocked(svc: ClusterService): string | null {
+  const infos = nodeInfos(svc);
+  const behind = svc.nodes("kind = 'data' AND status IN ('syncing','ready')")
+    .filter((n) => n.id !== svc.self.id && !(infos[n.id]?.features ?? []).includes("users"));
+  if (!behind.length) return null;
+  return "Je servers worden nog bijgewerkt. Gebruikers toevoegen kan zodra alle servers de nieuwste versie draaien.";
+}
+
 /** Versie per server ophalen (leider). Schrijft alleen bij een verandering, om de replicatie rustig te houden. */
 export async function pollNodeInfo(svc: ClusterService) {
   const cur = nodeInfos(svc);
@@ -157,7 +175,7 @@ export async function pollNodeInfo(svc: ClusterService) {
     const info = n.id === svc.self.id ? localNodeInfo() : await fetchNodeInfo(svc, n).catch(() => null);
     next[n.id] = info ? { ...info, at: Date.now() } : cur[n.id] ?? { version: "?", updater: false, result: null, at: 0 };
   }
-  const strip = (o: Record<string, { version: string; updater: boolean; result: unknown }>) => JSON.stringify(Object.fromEntries(Object.entries(o).map(([k, v]) => [k, [v.version, v.updater, v.result]])));
+  const strip = (o: Record<string, { version: string; updater: boolean; result: unknown; features?: string[] }>) => JSON.stringify(Object.fromEntries(Object.entries(o).map(([k, v]) => [k, [v.version, v.updater, v.result, v.features ?? []]])));
   if (strip(next) !== strip(cur)) setSetting(svc, "node_info", next);
   return next;
 }

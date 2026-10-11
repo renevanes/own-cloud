@@ -13,6 +13,8 @@ export interface StoreOptions {
   labels?: string[];
   isRead?: boolean;
   isStarred?: boolean;
+  /** Van wie is dit bericht (standaard de eigenaar). */
+  userId?: number;
 }
 
 interface Addr { name: string; address: string }
@@ -27,12 +29,12 @@ function normSubject(s: string | undefined) {
   return (s ?? "").replace(/^\s*((re|fw|fwd|aw|wg|antw|doorst)\s*:\s*)+/i, "").trim().toLowerCase();
 }
 
-function threadKey(m: ParsedMail): string {
+function threadKey(m: ParsedMail, userId: number): string {
   const refs = Array.isArray(m.references) ? m.references : m.references ? [m.references] : [];
   const root = refs[0] ?? m.inReplyTo ?? m.messageId;
   if (root) {
     // Hergebruik de thread van een bekend bericht als dat er al is.
-    const known = db.prepare("SELECT thread_key FROM messages WHERE message_id = ?").get(root) as { thread_key: string } | undefined;
+    const known = db.prepare("SELECT thread_key FROM messages WHERE message_id = ? AND user_id = ?").get(root, userId) as { thread_key: string } | undefined;
     if (known) return known.thread_key;
     if (refs.length || m.inReplyTo) return root;
   }
@@ -46,9 +48,10 @@ function snippetOf(text: string | undefined) {
 /** Bewaart een ruw RFC 822-bericht. Geeft het nieuwe id terug, of null als het al bestond. */
 export async function storeRawMessage(raw: Buffer, opts: StoreOptions = {}): Promise<number | null> {
   const m = await simpleParser(raw, { skipImageLinks: true });
+  const userId = opts.userId ?? 1;
 
   if (m.messageId) {
-    const exists = db.prepare("SELECT id FROM messages WHERE message_id = ?").get(m.messageId);
+    const exists = db.prepare("SELECT id FROM messages WHERE message_id = ? AND user_id = ?").get(m.messageId, userId);
     if (exists) return null;
   }
 
@@ -71,12 +74,12 @@ export async function storeRawMessage(raw: Buffer, opts: StoreOptions = {}): Pro
 
   const insert = db.prepare(`
     INSERT INTO messages (message_id, thread_key, folder, labels, from_addr, from_name, to_addrs, cc_addrs,
-                          subject, snippet, body_text, body_html, date, is_read, is_starred, raw_path, size)
+                          subject, snippet, body_text, body_html, date, is_read, is_starred, raw_path, size, user_id)
     VALUES (@message_id, @thread_key, @folder, @labels, @from_addr, @from_name, @to_addrs, @cc_addrs,
-            @subject, @snippet, @body_text, @body_html, @date, @is_read, @is_starred, @raw_path, @size)`);
+            @subject, @snippet, @body_text, @body_html, @date, @is_read, @is_starred, @raw_path, @size, @user_id)`);
   const addAtt = db.prepare("INSERT INTO attachments (message_id, filename, mime, size, path) VALUES (?, ?, ?, ?, ?)");
   const rawRel = relData(rawPath);
-  const tk = threadKey(m);
+  const tk = threadKey(m, userId);
 
   return db.transaction(() => {
     const id = Number(
@@ -98,6 +101,7 @@ export async function storeRawMessage(raw: Buffer, opts: StoreOptions = {}): Pro
         is_starred: opts.isStarred ? 1 : 0,
         raw_path: rawRel,
         size: raw.length,
+        user_id: userId,
       }).lastInsertRowid,
     );
     blobWritten(rawRel);

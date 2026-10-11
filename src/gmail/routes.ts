@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { requireAuth } from "../auth.js";
+import { requireOwner } from "../auth.js";
 import { db, setSetting } from "../db.js";
 import {
   cleanPassword, enableSendViaGmail, friendlyError, gmailConfig, gmailHooks, isRunning, kickGmail, maskCalendarUrl,
@@ -33,7 +33,8 @@ function view() {
 }
 
 export function gmailRoutes(app: FastifyInstance) {
-  app.addHook("preHandler", requireAuth);
+  // De Gmail-koppeling hoort bij de eigenaar (zijn adres, MX van het domein, versturen via Gmail).
+  app.addHook("preHandler", requireOwner);
 
   app.get("/api/gmail", async () => view());
 

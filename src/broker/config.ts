@@ -15,10 +15,16 @@ export interface Bundle {
   title: string;
   description: string;
   monthly: Money;
-  includes: { dataServers: number; witnesses: number; storageGb: number; mail: boolean; domain: boolean };
+  /** users: aantal gebruikers (gezinsleden) in de cloud dat bij de bundel hoort. */
+  includes: { dataServers: number; witnesses: number; storageGb: number; mail: boolean; domain: boolean; users: number };
+  /** Prijs per extra gebruiker per maand (incl. btw); null = geen extra gebruikers te koop. */
+  extraUserMonthly: Money | null;
   placement: BundlePlacement[];
   storage: { region: "nl-ams" | "fr-par"; purpose: "replica" | "backup" }[];
 }
+
+/** Geschatte kosten bij Scaleway per maand (excl. btw), om naast de prijs van de klant te zetten. */
+export interface CostTable { servers: Record<string, string>; storageGbMonthly: string }
 
 export interface BrokerConfig {
   dataDir: string;
@@ -48,6 +54,13 @@ export interface BrokerConfig {
   vatPercent: number;
   /** Jouw bedrijfsgegevens op de facturen. Zonder naam: facturen tonen een duidelijke waarschuwing. */
   company: { name: string | null; address: string[]; kvk: string | null; vat: string | null };
+  /** Eerste eigenaar (BROKER_OWNER_EMAIL): wordt bij het starten als medewerker met rol eigenaar aangemaakt. */
+  ownerEmail: string | null;
+  /** Standaardnaam van de aanbieder (BROKER_BRAND_NAME); in het beheer aan te passen. */
+  brandName: string;
+  costs: CostTable;
+  /** Gezondheid van clouds: na hoeveel ms ongezond / zonder melding komt er automatisch een bericht. */
+  health: { unhealthyMs: number; silentMs: number };
 }
 
 export const NAMESERVERS = ["ns1.desec.io", "ns2.desec.org"];
@@ -62,7 +75,8 @@ export const DEFAULT_BUNDLES: Bundle[] = [
     title: "Compleet",
     description: "Twee servers met al je gegevens en een kleine witness, 100 GB opslag, je eigen domein, DNS en verzending van mail.",
     monthly: { currency: "EUR", value: "24.95" },
-    includes: { dataServers: 2, witnesses: 1, storageGb: 100, mail: true, domain: true },
+    includes: { dataServers: 2, witnesses: 1, storageGb: 100, mail: true, domain: true, users: 2 },
+    extraUserMonthly: { currency: "EUR", value: "2.50" },
     placement: [
       { provider: "scaleway", region: "nl-ams-1", size: "DEV1-M", country: "NL", kind: "data" },
       { provider: "scaleway", region: "nl-ams-2", size: "PLAY2-MICRO", country: "NL", kind: "data" },
@@ -75,7 +89,8 @@ export const DEFAULT_BUNDLES: Bundle[] = [
     title: "Ruim",
     description: "Drie servers met al je gegevens verspreid over twee landen, een witness in een derde land en 500 GB opslag. Plus domein, DNS en mail.",
     monthly: { currency: "EUR", value: "39.95" },
-    includes: { dataServers: 3, witnesses: 1, storageGb: 500, mail: true, domain: true },
+    includes: { dataServers: 3, witnesses: 1, storageGb: 500, mail: true, domain: true, users: 5 },
+    extraUserMonthly: { currency: "EUR", value: "2.00" },
     placement: [
       { provider: "scaleway", region: "nl-ams-1", size: "DEV1-M", country: "NL", kind: "data" },
       { provider: "scaleway", region: "nl-ams-2", size: "PLAY2-MICRO", country: "NL", kind: "data" },
@@ -86,18 +101,71 @@ export const DEFAULT_BUNDLES: Bundle[] = [
   },
 ];
 
-function loadBundles(dataDir: string): Bundle[] {
-  const f = path.join(dataDir, "bundles.json");
-  if (!fs.existsSync(f)) return DEFAULT_BUNDLES;
-  const raw = JSON.parse(fs.readFileSync(f, "utf8"));
-  const list: Bundle[] = Array.isArray(raw) ? raw : raw.bundles;
-  if (!Array.isArray(list) || !list.length) throw new Error(`${f}: verwacht een lijst met bundels`);
-  for (const b of list) {
-    if (!b.id || !b.title || !b.monthly?.value || !/^\d+\.\d{2}$/.test(b.monthly.value)) throw new Error(`${f}: bundel ${b.id ?? "?"} mist id, titel of prijs (bijv. "24.95")`);
-    if (!b.placement?.length || !b.storage?.length) throw new Error(`${f}: bundel ${b.id} mist placement of storage`);
-    b.monthly.currency = "EUR";
+const MONEY = /^\d+\.\d{2}$/;
+
+/** Controleert en vult een bundel aan (ook voor bundels uit het beheer). Gooit een Error met een leesbare melding. */
+export function normalizeBundle(b: any, where = "bundel"): Bundle {
+  if (!b || typeof b !== "object") throw new Error(`${where}: verwacht een bundel`);
+  if (!b.id || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(String(b.id)) || !b.title || !b.monthly?.value || !MONEY.test(String(b.monthly.value)))
+    throw new Error(`${where}: bundel ${b.id ?? "?"} mist id (kleine letters, cijfers, streepjes), titel of prijs (bijv. "24.95")`);
+  if (!Array.isArray(b.placement) || !b.placement.length || !Array.isArray(b.storage) || !b.storage.length) throw new Error(`${where}: bundel ${b.id} mist placement of storage`);
+  const inc = b.includes ?? {};
+  const int = (v: unknown, d: number) => (v === undefined || v === null ? d : Number.isInteger(Number(v)) && Number(v) >= 0 ? Number(v) : NaN);
+  const includes = {
+    dataServers: int(inc.dataServers, b.placement.filter((p: any) => p.kind === "data").length),
+    witnesses: int(inc.witnesses, b.placement.filter((p: any) => p.kind === "witness").length),
+    storageGb: int(inc.storageGb, 0), mail: inc.mail !== false, domain: inc.domain !== false,
+    users: int(inc.users, 1),
+  };
+  if (Object.values(includes).some((v) => typeof v === "number" && Number.isNaN(v))) throw new Error(`${where}: bundel ${b.id}: aantallen moeten hele getallen zijn`);
+  if (includes.users < 1) throw new Error(`${where}: bundel ${b.id}: minstens 1 gebruiker`);
+  const extra = b.extraUserMonthly?.value ?? (typeof b.extraUserMonthly === "string" ? b.extraUserMonthly : null);
+  if (extra !== null && extra !== undefined && !MONEY.test(String(extra))) throw new Error(`${where}: bundel ${b.id}: prijs per extra gebruiker als "2.50"`);
+  for (const p of b.placement) {
+    if (!p?.region || !p?.size || !["data", "witness"].includes(p.kind)) throw new Error(`${where}: bundel ${b.id}: elke server heeft region, size en kind (data of witness)`);
   }
-  return list;
+  return {
+    id: String(b.id), title: String(b.title), description: String(b.description ?? ""),
+    monthly: { currency: "EUR", value: String(b.monthly.value) },
+    includes,
+    extraUserMonthly: extra ? { currency: "EUR", value: String(extra) } : null,
+    placement: b.placement.map((p: any) => ({ provider: "scaleway", region: String(p.region), size: String(p.size), country: String(p.country ?? ""), kind: p.kind })),
+    storage: b.storage.map((x: any) => ({ region: x.region, purpose: x.purpose })),
+  };
+}
+
+/** Voorbeeldprijzen bij Scaleway (excl. btw, per maand). Plaatshouders: stel ze zelf in via bundles.json ("costs"). */
+export const DEFAULT_COSTS: CostTable = {
+  servers: { "DEV1-S": "4.50", "DEV1-M": "8.50", "DEV1-L": "17.00", "PLAY2-PICO": "4.00", "PLAY2-NANO": "6.00", "PLAY2-MICRO": "5.50", "GP1-XS": "55.00" },
+  storageGbMonthly: "0.015",
+};
+
+function readBundlesFile(dataDir: string): any {
+  const f = path.join(dataDir, "bundles.json");
+  return fs.existsSync(f) ? { f, raw: JSON.parse(fs.readFileSync(f, "utf8")) } : null;
+}
+
+function loadBundles(dataDir: string): Bundle[] {
+  const file = readBundlesFile(dataDir);
+  if (!file) return DEFAULT_BUNDLES.map((b) => structuredClone(b));
+  const { f, raw } = file;
+  const list: any[] = Array.isArray(raw) ? raw : raw.bundles;
+  if (!Array.isArray(list) || !list.length) throw new Error(`${f}: verwacht een lijst met bundels`);
+  return list.map((b) => normalizeBundle(b, f));
+}
+
+function loadCosts(dataDir: string): CostTable {
+  const file = readBundlesFile(dataDir);
+  const c = file && !Array.isArray(file.raw) ? file.raw.costs : null;
+  if (!c) return structuredClone(DEFAULT_COSTS);
+  const servers = { ...DEFAULT_COSTS.servers };
+  for (const [k, v] of Object.entries(c.servers ?? {})) {
+    if (!MONEY.test(String(v))) throw new Error(`${file.f}: costs.servers.${k} als "4.50"`);
+    servers[k] = String(v);
+  }
+  const gb = c.storageGbMonthly === undefined ? DEFAULT_COSTS.storageGbMonthly : String(c.storageGbMonthly);
+  if (!/^\d+(\.\d+)?$/.test(gb)) throw new Error(`${file.f}: costs.storageGbMonthly als "0.015"`);
+  return { servers, storageGbMonthly: gb };
 }
 
 /** Leest BROKER_SECRET, of maakt eenmalig een sleutel in de datamap (alleen leesbaar voor de eigenaar). */
@@ -150,6 +218,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BrokerConfig {
       address: (env.BROKER_COMPANY_ADDRESS ?? "").replace(/\\n/g, "\n").split("\n").map((l) => l.trim()).filter(Boolean),
       kvk: env.BROKER_COMPANY_KVK?.trim() || null,
       vat: env.BROKER_COMPANY_VAT?.trim() || null,
+    },
+    ownerEmail: env.BROKER_OWNER_EMAIL?.trim().toLowerCase() || null,
+    brandName: env.BROKER_BRAND_NAME?.trim() || "Eigen Cloud Dienst",
+    costs: loadCosts(dataDir),
+    health: {
+      unhealthyMs: Number(env.BROKER_HEALTH_UNHEALTHY_MS || 15 * 60_000),
+      silentMs: Number(env.BROKER_HEALTH_SILENT_MS || 6 * 3600_000),
     },
   };
 }

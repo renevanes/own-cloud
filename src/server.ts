@@ -18,6 +18,7 @@ import { importRoutes } from "./import/routes.js";
 import { timeMachineRoutes } from "./cluster/timemachine.js";
 import { gmailRoutes } from "./gmail/routes.js";
 import { appDistRoutes } from "./appDist.js";
+import { usersRoutes } from "./usersRoutes.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -62,6 +63,7 @@ export async function buildApp() {
   await app.register(async (s) => timeMachineRoutes(s));
   await app.register(async (s) => gmailRoutes(s));
   await app.register(async (s) => appDistRoutes(s));
+  await app.register(async (s) => usersRoutes(s));
   app.get("/healthz", async () => ({ ok: true }));
   return app;
 }

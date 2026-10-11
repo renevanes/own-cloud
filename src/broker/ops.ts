@@ -26,12 +26,12 @@ export async function cancelOrder(ctx: Ctx, orderId: string) {
   });
 }
 
-async function projectServers(ctx: Ctx, o: OrderRow) {
+export async function projectServers(ctx: Ctx, o: OrderRow) {
   const st = orderState(o);
   const b = bundleOf(ctx, o.bundle);
   const zones = [...new Set([...(b?.placement.map((p) => p.region) ?? []), "nl-ams-1", "nl-ams-2", "nl-ams-3", "fr-par-1", "fr-par-2", "pl-waw-1"])];
-  const out: { zone: string; id: string; state: string; name: string }[] = [];
-  for (const zone of zones) for (const s of await ctx.apis.scaleway.servers(zone, st.projectId)) out.push({ zone, id: s.id, state: s.state, name: s.name });
+  const out: { zone: string; id: string; state: string; name: string; type: string | null; created: string | null }[] = [];
+  for (const zone of zones) for (const s of await ctx.apis.scaleway.servers(zone, st.projectId)) out.push({ zone, id: s.id, state: s.state, name: s.name, type: s.commercial_type ?? null, created: s.creation_date ?? null });
   return out;
 }
 

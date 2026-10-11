@@ -122,3 +122,90 @@ test("back-up: snapshot + segmenten, herstel naar tijdstip, verweesde entries va
   // Niets in de opslag is leesbaar zonder sleutel
   for (const f of await store.list("")) assert.ok(!fs.readFileSync(path.join(tmp, "store", f.key)).includes("snapshot"), f.key);
 });
+
+// ───────── Meerdere gebruikers: gemengde versies tijdens een rollende update ─────────
+
+const { migrateUserSchema } = await import("../src/userSchema.js");
+const OLD_SCHEMA = fs.readFileSync(path.join(import.meta.dirname, "helpers/schema-1.6.sql"), "utf8");
+function cloudDb(name: string, version: "oud" | "nieuw") {
+  const db = new Database(path.join(tmp, name + ".sqlite"));
+  db.pragma("journal_mode = WAL");
+  db.exec(OLD_SCHEMA);
+  if (version === "nieuw") migrateUserSchema(db);
+  installReplication(db);
+  return db;
+}
+const msg = (id: number, extra = "") =>
+  `INSERT INTO messages (id, message_id, thread_key, folder, subject, date${extra ? ", user_id" : ""}) VALUES (${id}, '<m${id}@x>', 't', 'inbox', 'bericht ${id}', 1${extra ? ", " + extra : ""})`;
+
+test("rollende update: wijzigingen tussen oude en nieuwe versie (kolom user_id) gaan beide kanten op goed", () => {
+  // Nieuwe leider, oude volger: de onbekende kolom user_id wordt genegeerd, niets loopt vast.
+  const nieuw = cloudDb("mu-nieuw", "nieuw"), oud = cloudDb("mu-oud", "oud");
+  leaderOf(nieuw, 1);
+  nieuw.prepare(msg(1)).run();
+  nieuw.prepare("INSERT INTO calendars (id, name) VALUES (1, 'Persoonlijk')").run();
+  nieuw.prepare("INSERT INTO events (id, uid, calendar_id, title, start, end, updated) VALUES (1, 'u1', 1, 'Tandarts', 1, 2, 1)").run();
+  nieuw.prepare("INSERT INTO photos (id, sha256, filename, taken_at, path, added) VALUES (1, 'aa', 'a.jpg', 1, 'p/a.jpg', 1)").run();
+  const e = entriesAfter(nieuw, 0);
+  assert.ok(JSON.parse(e[0].data).user_id === 1, "nieuwe versie stuurt user_id mee");
+  assert.equal(applyEntries(oud, 0, 0, e), e.length);
+  assert.equal(oud.prepare("SELECT subject FROM messages WHERE id = 1").pluck().get(), "bericht 1");
+  assert.equal(oud.prepare("SELECT title FROM events WHERE id = 1").pluck().get(), "Tandarts");
+
+  // Oude leider (na leiderwissel terug), nieuwe volger: zonder user_id → standaard 1 (de eigenaar).
+  leaderOf(oud, 2);
+  oud.prepare(msg(2)).run();
+  oud.prepare("INSERT INTO photos (id, sha256, filename, taken_at, path, added) VALUES (2, 'bb', 'b.jpg', 1, 'p/b.jpg', 1)").run();
+  setLease(nieuw, 0);
+  assert.equal(applyEntries(nieuw, e.length, 1, entriesAfter(oud, e.length)), e.length + 2);
+  assert.deepEqual(nieuw.prepare("SELECT id, user_id FROM messages ORDER BY id").all(), [{ id: 1, user_id: 1 }, { id: 2, user_id: 1 }]);
+  assert.equal(nieuw.prepare("SELECT user_id FROM photos WHERE id = 2").pluck().get(), 1);
+});
+
+test("rollende update: een oude server weigert de onbekende tabel users zonder iets half toe te passen (daarom wacht toevoegen)", () => {
+  const nieuw = cloudDb("mu2-nieuw", "nieuw"), oud = cloudDb("mu2-oud", "oud");
+  leaderOf(nieuw, 1);
+  nieuw.prepare(msg(1)).run();
+  nieuw.prepare("INSERT INTO users (id, localpart, name, status, created, updated) VALUES (2, 'anna', 'Anna', 'active', 1, 1)").run();
+  nieuw.prepare(msg(2, "2")).run();
+  const e = entriesAfter(nieuw, 0);
+  assert.throws(() => applyEntries(oud, 0, 0, e), /Onbekende tabel users/);
+  assert.equal(lastSeqTerm(oud).seq, 0, "niets toegepast: de transactie is teruggedraaid");
+  assert.equal(oud.prepare("SELECT COUNT(*) FROM messages").pluck().get(), 0);
+  // Na het bijwerken (schema migreren) lukt hetzelfde wel, met de juiste eigenaar per bericht
+  migrateUserSchema(oud);
+  installReplication(oud);
+  assert.equal(applyEntries(oud, 0, 0, e), e.length);
+  assert.deepEqual(oud.prepare("SELECT id, user_id FROM messages ORDER BY id").all(), [{ id: 1, user_id: 1 }, { id: 2, user_id: 2 }]);
+  assert.equal(oud.prepare("SELECT localpart FROM users WHERE id = 2").pluck().get(), "anna");
+});
+
+test("herstel: snapshot van de oude versie + nieuwere wijzigingen met gebruikers", async () => {
+  const store = new FsStore({ name: "mu", type: "fs", purpose: "replica", dir: path.join(tmp, "store-mu") });
+  const oud = cloudDb("mu3-oud", "oud");
+  leaderOf(oud, 1);
+  oud.prepare(msg(1)).run();
+  oud.prepare("INSERT INTO calendars (id, name) VALUES (1, 'Persoonlijk')").run();
+  oud.prepare("INSERT INTO events (id, uid, calendar_id, title, start, end, updated) VALUES (1, 'gedeeld', 1, 'Van de eigenaar', 1, 2, 1)").run();
+  const snap = await makeSnapshot(oud, key, tmp);
+  await store.put(snap.key, snap.open(), snap.size);
+  snap.cleanup();
+  // Daarna bijgewerkt naar de nieuwe versie (zelfde database), gebruiker erbij met eigen gegevens
+  migrateUserSchema(oud);
+  installReplication(oud);
+  leaderOf(oud, 2);
+  oud.prepare("INSERT INTO users (id, localpart, name, status, created, updated) VALUES (2, 'anna', 'Anna', 'active', 1, 1)").run();
+  oud.prepare(msg(2, "2")).run();
+  oud.prepare("INSERT INTO events (id, uid, calendar_id, title, start, end, updated, user_id) VALUES (2, 'gedeeld', 1, 'Van Anna', 1, 2, 1, 2)").run();
+  oud.prepare("INSERT INTO messages (id, message_id, thread_key, folder, subject, date, user_id) VALUES (3, '<m1@x>', 't', 'inbox', 'zelfde bericht bij Anna', 1, 2)").run();
+  await uploadSegment([store], key, entriesAfter(oud, snap.seq));
+
+  const out = path.join(tmp, "mu-restored.sqlite");
+  const r = await restoreFromStore(store, key, out);
+  assert.ok(r);
+  const rdb = new Database(out, { readonly: true });
+  assert.deepEqual(rdb.prepare("SELECT id, user_id FROM messages ORDER BY id").all(), [{ id: 1, user_id: 1 }, { id: 2, user_id: 2 }, { id: 3, user_id: 2 }]);
+  assert.deepEqual(rdb.prepare("SELECT title, user_id FROM events ORDER BY id").all(), [{ title: "Van de eigenaar", user_id: 1 }, { title: "Van Anna", user_id: 2 }]);
+  assert.equal(rdb.prepare("SELECT name FROM users WHERE id = 2").pluck().get(), "Anna");
+  rdb.close();
+});

@@ -123,6 +123,37 @@ test("de slak: vermenigvuldigen, repliceren, failover, zelfherstel, fencing, bac
     await waitFor("mail bij leider", () => readDb(path.join(h.first.dir, "data"), (db) => db.prepare("SELECT 1 FROM messages WHERE subject = 'Via MX2'").get()), 20_000);
   });
 
+  let annaToken = "";
+  await t.test("5b. meerdere gebruikers: toevoegen zodra alle servers het kennen, inloggen via volger, mail via MX2, alles gerepliceerd", async () => {
+    // De leider weet pas na een versieronde dat elke server de tabel users kent.
+    await waitFor("gebruikers toevoegen mogelijk", async () => (await api(leaderApi, "/api/users", { token })).json?.canAdd === true, 30_000);
+    const r = await api(leaderApi, "/api/users", { method: "POST", token, body: { name: "Anna", localpart: "anna", password: "anna-slak-wachtwoord" } });
+    assert.equal(r.status, 200, r.text);
+    const annaId = r.json.user.id;
+    const login = await waitFor("Anna logt in via de volger", async () => {
+      const x = await api(follower.api_url, "/api/login", { method: "POST", body: { user: "anna@test.nl", password: "anna-slak-wachtwoord" } });
+      return x.status === 200 && x;
+    });
+    annaToken = login.json.token;
+    const ev = await api(follower.api_url, "/api/events", { method: "POST", token: annaToken, body: { title: "Zwemles Anna", start, end: start + 3600e3 } });
+    assert.equal(ev.status, 200, ev.text);
+    const followerSmtp = Number(/SMTP luistert op poort (\d+)/.exec(fs.readFileSync(path.join(path.dirname(nodeDirs(h)[follower.id]), "node.log"), "utf8"))![1]);
+    const tr = nodemailer.createTransport({ host: "127.0.0.1", port: followerSmtp, secure: false, ignoreTLS: true });
+    await tr.sendMail({ from: "oma@elders.nl", to: "anna@test.nl", subject: "Voor Anna via MX2", text: "hoi" });
+    const check = (dir: string) => readDb(dir, (db) =>
+      db.prepare("SELECT user_id FROM messages WHERE subject = 'Voor Anna via MX2'").pluck().get() === annaId &&
+      db.prepare("SELECT user_id FROM events WHERE title = 'Zwemles Anna'").pluck().get() === annaId &&
+      db.prepare("SELECT localpart FROM users WHERE id = ?").pluck().get(annaId) === "anna");
+    await waitFor("bij Anna op de leider", () => check(path.join(h.first.dir, "data")), 20_000);
+    await waitFor("en gerepliceerd naar de volger", () => check(nodeDirs(h)[follower.id]), 20_000);
+    // Afgeschermd: de eigenaar ziet Anna's afspraak niet, Anna niet die van de eigenaar
+    const own = (await api(follower.api_url, `/api/events?from=${start - 864e5}&to=${start + 864e5}`, { token })).json;
+    assert.deepEqual(own.map((e: { title: string }) => e.title), ["Tandarts"]);
+    const hers = (await api(follower.api_url, `/api/events?from=${start - 864e5}&to=${start + 864e5}`, { token: annaToken })).json;
+    assert.deepEqual(hers.map((e: { title: string }) => e.title), ["Zwemles Anna"]);
+    assert.equal((await api(follower.api_url, "/api/cluster/status", { token: annaToken })).status, 403, "servers beheren is voor de eigenaar");
+  });
+
   let newLeader!: NodeRow;
   await t.test("6. failover: leider valt weg → volger wordt leider dankzij witness, schrijven werkt", async () => {
     process.kill(-h.first.pid, "SIGKILL");
@@ -289,6 +320,11 @@ test("de slak: vermenigvuldigen, repliceren, failover, zelfherstel, fencing, bac
     const photo = (await api(apiUrl, "/api/photos", { token: tk })).json[0];
     const orig = await fetch(`${apiUrl}/api/photos/${photo.id}/original`, { headers: { authorization: `Bearer ${tk}` } });
     assert.equal(orig.status, 200, "foto wordt uit de opslag teruggehaald");
+    const anna = await api(apiUrl, "/api/login", { method: "POST", body: { user: "anna", password: "anna-slak-wachtwoord" } });
+    assert.equal(anna.status, 200, "extra gebruiker kan na het wekken nog inloggen");
+    const annaMail = (await api(apiUrl, "/api/mail/messages?folder=inbox", { token: anna.json.token })).json;
+    assert.deepEqual(annaMail.map((m: { subject: string }) => m.subject), ["Voor Anna via MX2"]);
+    void annaToken;
     await waitFor("weer 2 data-nodes + witness", async () => {
       const s = await api(apiUrl, "/api/cluster/status", { token: tk });
       const ready = (s.json?.nodes ?? []).filter((n: { status: string }) => n.status === "ready");

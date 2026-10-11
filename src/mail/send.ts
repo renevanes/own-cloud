@@ -5,6 +5,7 @@ import nodemailer from "nodemailer";
 import { config } from "../config.js";
 import { storeRawMessage } from "./store.js";
 import { getSetting } from "../db.js";
+import { OWNER_ID, getUser } from "../users.js";
 
 export interface OutgoingMail {
   to: string[];
@@ -34,8 +35,30 @@ export function ownAddress(): string {
   return getSetting("gmail_own_from") || mailSettings().from;
 }
 
-function dkimOptions() {
-  const domainName = mailSettings().from.split("@")[1];
+/**
+ * Afzender en relay per gebruiker. De eigenaar gebruikt de instellingen van de cloud (ook "versturen via Gmail").
+ * Een extra gebruiker verstuurt altijd vanaf zijn eigen adres, en nooit via de Gmail-koppeling van de eigenaar:
+ * dan via de relay van vóór die koppeling.
+ */
+export function senderFor(userId: number): { from: string; relay: string } {
+  const s = mailSettings();
+  if (userId === OWNER_ID) return s;
+  const u = getUser(userId);
+  if (!u?.address) throw new Error("Onbekende gebruiker");
+  let relay = s.relay;
+  const prev = getSetting("gmail_prev_send");
+  if (prev !== undefined) { try { relay = (JSON.parse(prev) as { relay?: string | null }).relay ?? config.smtpRelay; } catch { relay = config.smtpRelay; } }
+  const display = u.name ? `"${u.name.replace(/["\\\r\n]/g, "")}" <${u.address}>` : u.address;
+  return { from: display, relay };
+}
+
+function envelopeFrom(from: string) {
+  const m = /<([^>]+)>/.exec(from);
+  return m ? m[1] : from;
+}
+
+function dkimOptions(from = mailSettings().from) {
+  const domainName = envelopeFrom(from).split("@")[1];
   // Alleen ondertekenen voor je eigen domein (niet als je via Gmail met je Gmail-adres verstuurt).
   if (domainName?.toLowerCase() !== ownAddress().split("@")[1]?.toLowerCase()) return undefined;
   const fromDb = getSetting("dkim_private");
@@ -45,10 +68,10 @@ function dkimOptions() {
 }
 
 /** Stelt het bericht samen (met DKIM-handtekening als er een sleutel is). */
-async function compose(mail: OutgoingMail): Promise<Buffer> {
+async function compose(mail: OutgoingMail, from: string): Promise<Buffer> {
   const builder = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: "windows" });
   const info = await builder.sendMail({
-    from: mailSettings().from,
+    from,
     to: mail.to,
     cc: mail.cc,
     bcc: mail.bcc,
@@ -59,13 +82,13 @@ async function compose(mail: OutgoingMail): Promise<Buffer> {
     references: mail.references,
     attachments: mail.attachments,
     messageId: `<${crypto.randomUUID()}@${config.hostname}>`,
-    dkim: dkimOptions(),
+    dkim: dkimOptions(from),
   });
   return info.message as Buffer;
 }
 
 /** Aflevering rechtstreeks bij de MX-server van elk ontvangend domein. */
-async function deliverDirect(raw: Buffer, recipients: string[]) {
+async function deliverDirect(raw: Buffer, recipients: string[], from = mailSettings().from) {
   const byDomain = new Map<string, string[]>();
   for (const r of recipients) {
     const d = r.split("@")[1].toLowerCase();
@@ -79,7 +102,7 @@ async function deliverDirect(raw: Buffer, recipients: string[]) {
     for (const host of mxs) {
       try {
         const t = nodemailer.createTransport({ host, port: 25, name: config.hostname, secure: false, tls: { rejectUnauthorized: false }, connectionTimeout: 20000 });
-        await t.sendMail({ envelope: { from: mailSettings().from, to: rcpts }, raw });
+        await t.sendMail({ envelope: { from: envelopeFrom(from), to: rcpts }, raw });
         ok = true;
         break;
       } catch (e) {
@@ -90,18 +113,18 @@ async function deliverDirect(raw: Buffer, recipients: string[]) {
   }
 }
 
-export async function sendMail(mail: OutgoingMail): Promise<number | null> {
-  const raw = await compose(mail);
+export async function sendMail(mail: OutgoingMail, userId = OWNER_ID): Promise<number | null> {
+  const { from, relay: relayUrl } = senderFor(userId);
+  const raw = await compose(mail, from);
   const recipients = [...mail.to, ...(mail.cc ?? []), ...(mail.bcc ?? [])];
   if (!recipients.length) throw new Error("Geen ontvangers");
 
-  const { relay: relayUrl, from } = mailSettings();
   if (relayUrl) {
-    await nodemailer.createTransport(relayUrl).sendMail({ envelope: { from, to: recipients }, raw });
+    await nodemailer.createTransport(relayUrl).sendMail({ envelope: { from: envelopeFrom(from), to: recipients }, raw });
   } else {
-    await deliverDirect(raw, recipients);
+    await deliverDirect(raw, recipients, from);
   }
-  return storeRawMessage(raw, { folder: "sent", isRead: true });
+  return storeRawMessage(raw, { folder: "sent", isRead: true, userId });
 }
 
 /** Systeemmelding (bijv. gezondheidsalarm) naar een extern adres. Wordt niet in 'Verzonden' bewaard. */

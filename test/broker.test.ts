@@ -375,6 +375,7 @@ test("Eigen Cloud Dienst: van inloggen tot opruimen", { timeout: 60_000 }, async
         { id: "compleet", title: "Compleet", monthly: { currency: "EUR", value: "24.95" }, current: true },
         { id: "ruim", title: "Ruim", monthly: { currency: "EUR", value: "39.95" }, current: false },
       ],
+      users: { included: 2, extra: 0, extraUserMonthly: { currency: "EUR", value: "2.50" } },
       canResume: false,
       domainTransferable: true,
     });

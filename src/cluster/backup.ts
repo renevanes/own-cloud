@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import Database from "better-sqlite3";
 import { DecryptStream, EncryptStream, decryptBuffer, encryptBuffer } from "./crypto.js";
 import { applyEntries, lastSeqTerm, type Entry } from "./changelog.js";
+import { migrateUserSchema } from "../userSchema.js";
 import type { ObjectStore } from "./stores.js";
 
 const gzip = promisify(zlib.gzip);
@@ -145,6 +146,9 @@ export async function restoreFromStore(store: ObjectStore, dbKey: Buffer, dest: 
     try {
       db.pragma("journal_mode = WAL");
       db.pragma("recursive_triggers = ON");
+      // Snapshot van een oudere versie: eerst het schema bijwerken, anders gaan nieuwere wijzigingen
+      // (kolom user_id, tabel users) verloren of mislukt het toepassen. Alleen DDL, zie userSchema.ts.
+      migrateUserSchema(db);
       let seq = snap.seq;
       if (valid.length) {
         const r = applyEntries(db, snap.seq, snap.term, valid);

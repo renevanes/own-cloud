@@ -27,21 +27,70 @@ const fmtFull = (ms) => new Date(ms).toLocaleString("nl-NL", { dateStyle: "full"
 const fmtTime = (ms) => new Date(ms).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" });
 
 // ───────────── Login ─────────────
-function showLogin() { $("#app").hidden = true; $("#login").hidden = false; $("#password").focus(); }
+/** Wie is er ingelogd: { id, name, address, owner }. Alleen de eigenaar beheert servers, domein en gebruikers. */
+let me = null;
+const isOwner = () => !!me?.owner;
+
+async function showLogin() {
+  $("#app").hidden = true; $("#invite").hidden = true; $("#login").hidden = false;
+  // Meer dan één gebruiker in deze cloud: ook om het adres vragen. Anders zoals altijd alleen het wachtwoord.
+  const info = await fetch("/api/login/info").then((r) => r.json()).catch(() => ({ multiUser: false }));
+  $("#loginUser").hidden = !info.multiUser;
+  $("#loginUser").required = info.multiUser;
+  (info.multiUser && !$("#loginUser").value ? $("#loginUser") : $("#password")).focus();
+}
+let booted = false;
 async function boot() {
-  try { await api("/api/me"); } catch { return showLogin(); }
-  $("#login").hidden = true; $("#app").hidden = false;
-  api("/api/cluster/status").then((c) => { if (c.enabled) $('[data-tab="nodes"]').hidden = false; }).catch(() => {});
+  try { me = (await api("/api/me")).user; } catch { return showLogin(); }
+  $("#login").hidden = true; $("#invite").hidden = true; $("#app").hidden = false;
+  document.documentElement.classList.toggle("not-owner", !isOwner());
+  $$("[data-owner]").forEach((el) => (el.hidden = !isOwner()));
+  $("#logout").title = `Uitloggen (${me.address})`;
+  if (booted) { location.reload(); return; } // andere gebruiker: alles opnieuw laden
+  booted = true;
+  if (isOwner()) api("/api/cluster/status").then((c) => { if (c.enabled) $('[data-tab="nodes"]').hidden = false; }).catch(() => {});
   switchTab(location.hash.slice(1) || "mail");
-  refreshHealthBanner();
-  setInterval(refreshHealthBanner, 5 * 60_000);
+  if (isOwner()) {
+    refreshHealthBanner();
+    setInterval(refreshHealthBanner, 5 * 60_000);
+  }
 }
 $("#loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
-  try { await api("/api/login", { method: "POST", body: { password: $("#password").value } }); $("#password").value = ""; boot(); }
+  const body = { password: $("#password").value };
+  if (!$("#loginUser").hidden && $("#loginUser").value.trim()) body.user = $("#loginUser").value.trim();
+  try { await api("/api/login", { method: "POST", body }); $("#password").value = ""; $("#loginError").textContent = ""; boot(); }
   catch (err) { $("#loginError").textContent = err.message; }
 });
-$("#logout").onclick = async () => { await api("/api/logout", { method: "POST" }); showLogin(); };
+$("#logout").onclick = async () => { await api("/api/logout", { method: "POST" }); booted && location.reload(); showLogin(); };
+
+// ───────────── Uitnodiging (eenmalige link: zelf een wachtwoord kiezen) ─────────────
+async function showInvite(code) {
+  $("#app").hidden = true; $("#login").hidden = true; $("#invite").hidden = false;
+  const f = $("#inviteForm");
+  let who;
+  try { who = await api("/api/invite/" + encodeURIComponent(code)); }
+  catch (err) {
+    $("#inviteWho").textContent = err.message;
+    [...f.elements].forEach((el) => { if (el.tagName !== "BUTTON") el.hidden = true; });
+    f.querySelector("small").hidden = true;
+    f.querySelector("button").textContent = "Naar inloggen";
+    f.onsubmit = (e) => { e.preventDefault(); history.replaceState(null, "", "/"); showLogin(); };
+    return;
+  }
+  $("#inviteWho").innerHTML = `Hallo ${esc(who.name)}. Je mailadres is <b>${esc(who.address)}</b>. Kies een wachtwoord om in te loggen.`;
+  $("#inviteAddress").value = who.address;
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    if (f.elements.password.value !== f.elements.again.value) { $("#inviteError").textContent = "De twee wachtwoorden zijn niet gelijk"; return; }
+    try {
+      await api("/api/invite/" + encodeURIComponent(code), { method: "POST", body: { password: f.elements.password.value } });
+      history.replaceState(null, "", "/");
+      boot();
+    } catch (err) { $("#inviteError").textContent = err.message; }
+  };
+  f.elements.password.focus();
+}
 
 // ───────────── Tabs ─────────────
 const loaded = {};
@@ -52,7 +101,7 @@ function switchTab(target) {
   $$(".tab").forEach((t) => (t.hidden = t.id !== "tab-" + tab));
   history.replaceState(null, "", "#" + tab + (sub ? "/" + sub : ""));
   if (!loaded[tab]) { loaded[tab] = true; ({ mail: initMail, agenda: initAgenda, fotos: initPhotos, nodes: initNodes, instellingen: initSettings })[tab](); }
-  if (tab === "instellingen") showSettings(sub || "gezondheid");
+  if (tab === "instellingen") showSettings(sub || (isOwner() ? "gezondheid" : "account"));
 }
 window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (h.startsWith("instellingen")) switchTab(h); });
 $$(".tabs button").forEach((b) => (b.onclick = () => switchTab(b.dataset.tab)));
@@ -401,7 +450,8 @@ async function initPhotos() {
   loadPhotos(true);
 }
 
-boot();
+const inviteCode = new URLSearchParams(location.search).get("uitnodiging");
+if (inviteCode) showInvite(inviteCode); else boot();
 
 // ═════════════ WAAR DRAAI IK (cluster) ═════════════
 const FLAGS = { NL: "🇳🇱", DE: "🇩🇪", FI: "🇫🇮", FR: "🇫🇷", PL: "🇵🇱", SE: "🇸🇪", ES: "🇪🇸", AT: "🇦🇹", CH: "🇨🇭", BE: "🇧🇪", DK: "🇩🇰", NO: "🇳🇴", IT: "🇮🇹" };
@@ -584,6 +634,8 @@ const RELAYS = {
 };
 
 function showSettings(sec) {
+  // Beheer van de cloud (gezondheid, mail-instellingen, Gmail, gebruikers) is alleen voor de eigenaar.
+  if (!isOwner() && $(`#settingsNav a[data-sec="${sec}"]`)?.hasAttribute("data-owner")) sec = "account";
   $$("#settingsNav a").forEach((a) => a.classList.toggle("active", a.dataset.sec === sec));
   $$(".settings-sec").forEach((s) => (s.hidden = s.dataset.sec !== sec));
   if (sec === "gezondheid") healthData ? renderHealth() : refreshHealthBanner();
@@ -591,12 +643,29 @@ function showSettings(sec) {
   if (sec === "importeren") loadUploads();
   if (sec === "gmail") loadGmail();
   if (sec === "telefoon") renderPhone();
+  if (sec === "gebruikers") loadUsers();
+  if (sec === "account") loadAccount();
 }
 
 function msg(el, text, ok) { el.textContent = text; el.className = "form-msg " + (ok ? "ok" : "err"); }
 
 async function initSettings() {
   settings = await api("/api/settings");
+  initAccount();
+  if (isOwner()) initUsers();
+  if (settings.owner) initMailSettings();
+  if (settings.icalUrl) {
+    $("#icalUrl").value = settings.icalUrl;
+    $("#icalQr").innerHTML = await (await fetch("/api/settings/ical-qr")).text();
+  } else $("#icalUrl").value = "Niet beschikbaar (geen agenda-token ingesteld)";
+  document.addEventListener("click", (e) => {
+    const id = e.target.closest("[data-copy]")?.dataset.copy;
+    if (id) { navigator.clipboard?.writeText($("#" + id).value); e.target.textContent = "Gekopieerd"; }
+  });
+  initImport();
+}
+
+function initMailSettings() {
   const f = $("#mailForm");
   f.elements.mailFrom.value = settings.mailFrom;
   f.elements.alertEmail.value = settings.alertEmail;
@@ -633,17 +702,6 @@ async function initSettings() {
     catch (err) { msg($("#mailMsg"), err.message, false); }
   };
 
-  $("#pwForm").onsubmit = async (e) => {
-    e.preventDefault();
-    try { await api("/api/settings/password", { method: "POST", body: { current: e.target.elements.current.value, next: e.target.elements.next.value } }); e.target.reset(); msg($("#pwMsg"), "Wachtwoord gewijzigd.", true); }
-    catch (err) { msg($("#pwMsg"), err.message, false); }
-  };
-
-  if (settings.icalUrl) {
-    $("#icalUrl").value = settings.icalUrl;
-    $("#icalQr").innerHTML = await (await fetch("/api/settings/ical-qr")).text();
-  } else $("#icalUrl").value = "Niet beschikbaar (geen agenda-token ingesteld)";
-
   $("#healthRefresh").onclick = async () => { $("#healthRefresh").disabled = true; await refreshHealthBanner(true); $("#healthRefresh").disabled = false; };
   $("#healthList").onclick = async (e) => {
     const fix = e.target.closest("[data-fix]")?.dataset.fix;
@@ -654,11 +712,128 @@ async function initSettings() {
     try { const r = await api("/api/health/fix", { method: "POST", body: { action: fix } }); e.target.textContent = "✓"; $("#healthSummary").textContent = r.message; setTimeout(() => refreshHealthBanner(true), 1500); }
     catch (err) { e.target.textContent = "Opnieuw"; e.target.disabled = false; alert(err.message); }
   };
-  document.addEventListener("click", (e) => {
-    const id = e.target.closest("[data-copy]")?.dataset.copy;
-    if (id) { navigator.clipboard?.writeText($("#" + id).value); e.target.textContent = "Gekopieerd"; }
-  });
-  initImport();
+}
+
+// ═════════════ ACCOUNT (iedereen) ═════════════
+const fmtBytes = (n) => n >= 1e9 ? `${(n / 1e9).toLocaleString("nl-NL", { maximumFractionDigits: 1 })} GB` : n >= 1e6 ? `${Math.round(n / 1e6)} MB` : n > 0 ? `${Math.max(1, Math.round(n / 1e3))} kB` : "niets";
+
+function initAccount() {
+  $("#pwForm").onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api("/api/settings/password", { method: "POST", body: { current: e.target.elements.current.value, next: e.target.elements.next.value } }); e.target.reset(); msg($("#pwMsg"), "Wachtwoord gewijzigd.", true); }
+    catch (err) { msg($("#pwMsg"), err.message, false); }
+  };
+  $("#nameForm").onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api("/api/account", { method: "PUT", body: { name: e.target.elements.name.value } }); msg($("#nameMsg"), "Opgeslagen.", true); loadAccount(); }
+    catch (err) { msg($("#nameMsg"), err.message, false); }
+  };
+}
+
+async function loadAccount() {
+  const a = await api("/api/account").catch(() => null);
+  if (!a) return;
+  $("#accountWho").textContent = `${a.address}${a.owner ? " · eigenaar van deze cloud" : ""} · in gebruik: ${fmtBytes(a.storage.total)}`;
+  if (document.activeElement !== $("#nameForm").elements.name) $("#nameForm").elements.name.value = a.name;
+}
+
+// ═════════════ GEBRUIKERS (eigenaar) ═════════════
+const USER_STATUS = { invited: "uitgenodigd", disabled: "uitgeschakeld" };
+let usersData = null;
+
+function initUsers() {
+  const f = $("#userForm");
+  const how = () => f.elements.how.value;
+  const applyHow = () => {
+    $$("[data-how]", f).forEach((el) => (el.hidden = el.dataset.how !== how()));
+    f.elements.password.required = how() === "password";
+  };
+  $("#userHow").onchange = applyHow;
+  applyHow();
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const body = { name: f.elements.name.value.trim(), localpart: f.elements.localpart.value.trim().toLowerCase() };
+    if (how() === "password") body.password = f.elements.password.value; else body.invite = true;
+    try {
+      const r = await api("/api/users", { method: "POST", body });
+      f.reset(); applyHow();
+      msg($("#userMsg"), `${r.user.name} is toegevoegd: ${r.user.address}.`, true);
+      showInviteLink(r.user, r.inviteUrl);
+      loadUsers();
+    } catch (err) { msg($("#userMsg"), err.message, false); }
+  };
+  $("#userList").onclick = async (e) => {
+    const b = e.target.closest("[data-act]");
+    if (!b) return;
+    const u = usersData.users.find((x) => x.id === Number(b.dataset.id));
+    if (!u) return;
+    try {
+      if (b.dataset.act === "invite") {
+        if (u.status === "active" && !confirm(`Nieuwe uitnodigingslink voor ${u.name}?\n\nHet huidige wachtwoord werkt dan niet meer en ${u.name} wordt overal uitgelogd. Met de link kiest ${u.name} een nieuw wachtwoord.`)) return;
+        const r = await api(`/api/users/${u.id}/reset`, { method: "POST", body: {} });
+        showInviteLink(u, r.inviteUrl);
+      } else if (b.dataset.act === "password") {
+        const pw = prompt(`Nieuw wachtwoord voor ${u.name} (minstens 10 tekens).\n\n${u.name} wordt overal uitgelogd en logt daarna in met dit wachtwoord.`);
+        if (!pw) return;
+        await api(`/api/users/${u.id}/reset`, { method: "POST", body: { password: pw } });
+        alert(`Het wachtwoord van ${u.name} is gewijzigd. Geef het persoonlijk door.`);
+      } else if (b.dataset.act === "disable") {
+        if (!confirm(`${u.name} uitschakelen?\n\n${u.name} kan niet meer inloggen en mail naar ${u.address} wordt geweigerd. Alle gegevens blijven bewaard; je kunt dit later weer aanzetten.`)) return;
+        await api(`/api/users/${u.id}`, { method: "PATCH", body: { disabled: true } });
+      } else if (b.dataset.act === "enable") {
+        await api(`/api/users/${u.id}`, { method: "PATCH", body: { disabled: false } });
+      } else if (b.dataset.act === "remove") return removeUser(u);
+      loadUsers();
+    } catch (err) { alert(err.message); }
+  };
+}
+
+function showInviteLink(u, url) {
+  $("#inviteBox").hidden = !url;
+  if (!url) return;
+  $("#inviteFor").textContent = `Uitnodiging voor ${u.name}.`;
+  $("#inviteLink").value = url;
+  $("#inviteBox").scrollIntoView({ block: "nearest" });
+}
+
+function removeUser(u) {
+  const dlg = $("#removeUserDlg"), f = $("#removeUserForm");
+  $("#removeWho").textContent = u.name;
+  $("#removeAddr").textContent = u.address;
+  $("#removeError").textContent = "";
+  f.reset();
+  f.onsubmit = async (e) => {
+    if (e.submitter?.value !== "ok") return;
+    e.preventDefault();
+    try {
+      await api(`/api/users/${u.id}`, { method: "DELETE", body: { confirm: f.elements.confirm.value } });
+      dlg.close();
+      loadUsers();
+    } catch (err) { $("#removeError").textContent = err.message; }
+  };
+  dlg.showModal();
+}
+
+async function loadUsers() {
+  usersData = await api("/api/users").catch((err) => { $("#usersLimit").textContent = err.message; return null; });
+  if (!usersData) return;
+  const d = usersData;
+  $("#userDomain").textContent = "@" + d.domain;
+  $("#usersLimit").textContent = d.max ? `${d.count} van ${d.max} gebruikers in je abonnement.` : `${d.count} ${d.count === 1 ? "gebruiker" : "gebruikers"}.`;
+  $("#userBlocked").hidden = !d.reason;
+  $("#userBlocked").textContent = d.reason ?? "";
+  $("#userAdd").disabled = !d.canAdd;
+  $("#userList").innerHTML = d.users.map((u) => `
+    <li class="${u.status === "disabled" ? "off" : ""}">
+      <span class="who"><b>${esc(u.name)}</b>${u.owner ? `<span class="pill">eigenaar</span>` : ""}${USER_STATUS[u.status] ? `<span class="pill warn">${USER_STATUS[u.status]}</span>` : ""}<small>${esc(u.address)}</small></span>
+      <span class="acts">${u.owner ? "" : `
+        ${u.status === "disabled" ? `<button class="ghost" data-act="enable" data-id="${u.id}">Weer aanzetten</button>` : `
+          <button class="ghost" data-act="invite" data-id="${u.id}">${u.status === "invited" ? "Nieuwe link" : "Uitnodigingslink"}</button>
+          <button class="ghost" data-act="password" data-id="${u.id}">Wachtwoord instellen</button>
+          <button class="ghost" data-act="disable" data-id="${u.id}">Uitschakelen</button>`}
+        <button class="ghost danger" data-act="remove" data-id="${u.id}">Verwijderen</button>`}</span>
+      <span class="meta"><span>In gebruik: ${fmtBytes(u.storage.total)}</span><span>mail ${fmtBytes(u.storage.mail)}</span><span>foto's ${fmtBytes(u.storage.photos)}</span>${u.status === "invited" && u.inviteExpires ? `<span>link geldig tot ${new Date(u.inviteExpires).toLocaleDateString("nl-NL", { day: "numeric", month: "long" })}</span>` : ""}</span>
+    </li>`).join("");
 }
 
 // ═════════════ GMAIL ═════════════

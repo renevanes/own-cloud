@@ -15,6 +15,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
 COPY web ./web
+COPY web-dienst ./web-dienst
 # Android-app voor de eerste installatie vanaf je eigen cloud (door de CI gevuld; leeg = geen download)
 COPY app-dist ./app-dist
 # Versie (de CI geeft "<package.json-versie>.<bouwnummer>" mee); servers vergelijken hiermee voor updates.

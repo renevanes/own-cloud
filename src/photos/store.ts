@@ -74,15 +74,16 @@ export interface PhotoMeta {
 }
 
 /** Voegt een foto/video toe vanaf een bestand. Geeft {id, duplicate} terug. */
-export async function addPhotoFromFile(src: string, meta: PhotoMeta = {}, opts: { move?: boolean } = {}) {
+export async function addPhotoFromFile(src: string, meta: PhotoMeta = {}, opts: { move?: boolean; userId?: number } = {}) {
+  const userId = opts.userId ?? 1;
   const filename = meta.filename ?? path.basename(src);
   const ext = path.extname(filename).toLowerCase();
   const isVideo = VIDEO_EXT.has(ext);
   const sha = await sha256File(src);
 
-  const existing = db.prepare("SELECT id FROM photos WHERE sha256 = ?").get(sha) as { id: number } | undefined;
+  const existing = db.prepare("SELECT id FROM photos WHERE sha256 = ? AND user_id = ?").get(sha, userId) as { id: number } | undefined;
   if (existing) {
-    addToAlbums(existing.id, meta.albums);
+    addToAlbums(existing.id, meta.albums, userId);
     if (opts.move) fs.rmSync(src, { force: true });
     return { id: existing.id, duplicate: true };
   }
@@ -96,34 +97,41 @@ export async function addPhotoFromFile(src: string, meta: PhotoMeta = {}, opts: 
   const rel = path.join(String(d.getUTCFullYear()), String(d.getUTCMonth() + 1).padStart(2, "0"), sha + ext);
   const dest = path.join(paths.photoOriginals, rel);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  if (opts.move) {
+  // Zelfde inhoud bij een andere gebruiker: het bestand (op inhoud geadresseerd) is er al, alleen de gegevens zijn per gebruiker.
+  const other = fs.existsSync(dest)
+    ? (db.prepare("SELECT thumb_path, width, height FROM photos WHERE path = ? LIMIT 1").get(relData(dest)) as { thumb_path: string | null; width: number | null; height: number | null } | undefined)
+    : undefined;
+  if (other) { if (opts.move) fs.rmSync(src, { force: true }); }
+  else if (opts.move) {
     try { fs.renameSync(src, dest); } catch { fs.copyFileSync(src, dest); fs.rmSync(src, { force: true }); }
   } else fs.copyFileSync(src, dest);
 
   const thumbPath = path.join(paths.photoThumbs, sha.slice(0, 2), sha + ".webp");
-  const thumb = await makeThumb(dest, thumbPath, isVideo);
+  const thumb = other?.thumb_path && fs.existsSync(thumbPath)
+    ? { ok: true, width: other.width ?? undefined, height: other.height ?? undefined }
+    : await makeThumb(dest, thumbPath, isVideo);
 
   const camera = [exif?.Make, exif?.Model].filter(Boolean).join(" ") || null;
   const destRel = relData(dest);
   const thumbRel = thumb.ok ? relData(thumbPath) : null;
   const id = db.transaction(() => {
-    const r = db.prepare(`INSERT INTO photos (sha256, filename, mime, size, width, height, taken_at, lat, lon, camera, description, is_video, is_favorite, path, thumb_path, added)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    const r = db.prepare(`INSERT INTO photos (sha256, filename, mime, size, width, height, taken_at, lat, lon, camera, description, is_video, is_favorite, path, thumb_path, added, user_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       sha, filename, MIME[ext] ?? "application/octet-stream", fs.statSync(dest).size, thumb.width ?? null, thumb.height ?? null, Math.round(takenAt),
       meta.lat ?? (exif?.latitude as number | undefined) ?? null, meta.lon ?? (exif?.longitude as number | undefined) ?? null,
-      camera, meta.description ?? null, isVideo ? 1 : 0, meta.favorite ? 1 : 0, destRel, thumbRel, Date.now());
+      camera, meta.description ?? null, isVideo ? 1 : 0, meta.favorite ? 1 : 0, destRel, thumbRel, Date.now(), userId);
     blobWritten(destRel);
     if (thumbRel) blobWritten(thumbRel);
     return Number(r.lastInsertRowid);
   })();
-  addToAlbums(id, meta.albums);
+  addToAlbums(id, meta.albums, userId);
   return { id, duplicate: false };
 }
 
-function addToAlbums(photoId: number, albums?: string[]) {
+function addToAlbums(photoId: number, albums: string[] | undefined, userId: number) {
   for (const name of albums ?? []) {
-    db.prepare("INSERT OR IGNORE INTO albums (name) VALUES (?)").run(name);
-    const a = db.prepare("SELECT id FROM albums WHERE name = ?").get(name) as { id: number };
+    db.prepare("INSERT OR IGNORE INTO albums (name, user_id) VALUES (?, ?)").run(name, userId);
+    const a = db.prepare("SELECT id FROM albums WHERE name = ? AND user_id = ?").get(name, userId) as { id: number };
     db.prepare("INSERT OR IGNORE INTO album_photos (album_id, photo_id) VALUES (?, ?)").run(a.id, photoId);
   }
 }

@@ -1,5 +1,14 @@
 [
   {
+    "version": "1.7",
+    "date": "2026-10-11",
+    "changes": [
+      "Gezin: in je cloud kun je nu meer mensen toevoegen, elk met eigen mail, agenda en foto's (Instellingen → Gebruikers)",
+      "Voor aanbieders: de Eigen Cloud Dienst heeft een beheerscherm (/beheer) met medewerkers en rollen, inloggen met code en vingerafdruk of authenticator-app, klanten, geld, servers en kosten, aanbod en prijzen, huisstijl, uitnodigingscodes, hulpvragen, berichten en de gezondheid van alle clouds",
+      "Klanten van een aanbieder kunnen extra gebruikers bijkopen"
+    ]
+  },
+  {
     "version": "1.6",
     "date": "2026-10-11",
     "changes": [

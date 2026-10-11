@@ -153,6 +153,15 @@ staat in [changelog.json](changelog.json); de app toont het na een update. Elke 
 [release](https://github.com/renevanes/own-cloud/releases) met de APK. Werkwijze: `scripts/bump.sh "wat er veranderd is"`
 en daarna `scripts/publish.sh` (zie [android/README.md](android/README.md#versies)).
 
+## Gezin en extra gebruikers
+
+Iedereen in je cloud heeft een eigen mailadres (`naam@jouwdomein`), wachtwoord, agenda's en foto's; niemand kan bij
+die van een ander. De eerste gebruiker is de eigenaar: die voegt onder **Instellingen → Gebruikers** mensen toe (met
+een eerste wachtwoord of een uitnodigingslink), zet wachtwoorden opnieuw, schakelt iemand uit of verwijdert iemand
+met al zijn gegevens. Servers, domein, mailinstellingen en Gmail-koppeling blijven bij de eigenaar. Het maximum komt
+uit de instelling `max_users` (leeg of 0 = onbeperkt). Mail naar onbekende adressen op je domein komt zoals altijd
+bij de eigenaar binnen. Hoe dit met het cluster samengaat staat in [CLUSTER.md](CLUSTER.md#meerdere-gebruikers-schema-en-rollende-updates).
+
 ## Meerdere servers, verhuizen en slapen
 
 Zie **[CLUSTER.md](CLUSTER.md)**: Eigen Cloud als cluster over meerdere Europese aanbieders, met failover, zelfherstel, versleutelde back-ups (ook naar een tijdstip), verhuizen, en slapen/wekken.

@@ -14,7 +14,9 @@ function timeToMs(t: ICALTime): number {
 export interface ImportResult { added: number; updated: number; skipped: number }
 
 /** Importeert een .ics-bestand (bijv. Google Agenda-export uit Takeout) in een agenda. */
-export function importIcs(text: string, calendarId: number): ImportResult {
+export function importIcs(text: string, calendarId: number, userId = 1): ImportResult {
+  const cal = db.prepare("SELECT 1 FROM calendars WHERE id = ? AND user_id = ?").get(calendarId, userId);
+  if (!cal) throw Object.assign(new Error("Onbekende agenda"), { statusCode: 400 });
   const root = new ICAL.Component(ICAL.parse(text));
   for (const vtz of root.getAllSubcomponents("vtimezone")) {
     try { ICAL.TimezoneService.register(vtz); } catch { /* al geregistreerd */ }
@@ -24,9 +26,9 @@ export function importIcs(text: string, calendarId: number): ImportResult {
   const overrides: { masterUid: string; recurrenceMs: number }[] = [];
 
   const upsert = db.prepare(`
-    INSERT INTO events (uid, calendar_id, title, description, location, start, end, all_day, tz, rrule, exdates, reminder_min, updated)
-    VALUES (@uid, @calendar_id, @title, @description, @location, @start, @end, @all_day, @tz, @rrule, @exdates, @reminder_min, @updated)
-    ON CONFLICT(uid) DO UPDATE SET title=excluded.title, description=excluded.description, location=excluded.location,
+    INSERT INTO events (uid, calendar_id, title, description, location, start, end, all_day, tz, rrule, exdates, reminder_min, updated, user_id)
+    VALUES (@uid, @calendar_id, @title, @description, @location, @start, @end, @all_day, @tz, @rrule, @exdates, @reminder_min, @updated, @user_id)
+    ON CONFLICT(user_id, uid) DO UPDATE SET title=excluded.title, description=excluded.description, location=excluded.location,
       start=excluded.start, end=excluded.end, all_day=excluded.all_day, tz=excluded.tz, rrule=excluded.rrule,
       exdates=excluded.exdates, reminder_min=excluded.reminder_min, updated=excluded.updated`);
 
@@ -59,11 +61,11 @@ export function importIcs(text: string, calendarId: number): ImportResult {
           if (v.getFirstPropertyValue("status") === "CANCELLED") { result.skipped++; continue; }
         }
 
-        const existed = db.prepare("SELECT 1 FROM events WHERE uid = ?").get(uid);
+        const existed = db.prepare("SELECT 1 FROM events WHERE uid = ? AND user_id = ?").get(uid, userId);
         upsert.run({
           uid, calendar_id: calendarId, title: ev.summary || "(zonder titel)", description: ev.description || null, location: ev.location || null,
           start, end, all_day: allDay ? 1 : 0, tz: tzid, rrule: recur && !ev.recurrenceId ? recur.toString() : null,
-          exdates: JSON.stringify(exdates), reminder_min: reminder, updated: Date.now(),
+          exdates: JSON.stringify(exdates), reminder_min: reminder, updated: Date.now(), user_id: userId,
         });
         existed ? result.updated++ : result.added++;
       } catch (e) {
@@ -72,7 +74,7 @@ export function importIcs(text: string, calendarId: number): ImportResult {
     }
     // Gewijzigde/geannuleerde losse herhalingen uitsluiten bij de hoofdreeks.
     for (const o of overrides) {
-      const m = db.prepare("SELECT id, exdates FROM events WHERE uid = ?").get(o.masterUid) as { id: number; exdates: string } | undefined;
+      const m = db.prepare("SELECT id, exdates FROM events WHERE uid = ? AND user_id = ?").get(o.masterUid, userId) as { id: number; exdates: string } | undefined;
       if (!m) continue;
       const ex = new Set(JSON.parse(m.exdates) as number[]);
       ex.add(o.recurrenceMs);

@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { requireAuth } from "../auth.js";
+import { requireOwner } from "../auth.js";
 import { lastSeq } from "./changelog.js";
 import { choosePlacement, createJob, type JobType } from "./jobs.js";
 import type { ClusterService } from "./service.js";
@@ -15,7 +15,8 @@ const ALLOWED: JobType[] = ["spawn", "move", "remove", "sleep", "drill", "snapsh
 
 export function clusterRoutes(app: FastifyInstance) {
   app.addHook("preHandler", async (req, reply) => {
-    if (req.url.startsWith("/api/cluster")) return requireAuth(req, reply);
+    // Servers en back-ups beheren: alleen de eigenaar.
+    if (req.url.startsWith("/api/cluster")) return requireOwner(req, reply);
   });
 
   /** Status van déze node (wordt niet doorgestuurd naar de leider). */

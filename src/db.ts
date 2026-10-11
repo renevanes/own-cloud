@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { paths } from "./config.js";
+import { migrateUserSchema } from "./userSchema.js";
 
 export const db = new Database(paths.db);
 db.pragma("journal_mode = WAL");
@@ -32,7 +33,6 @@ CREATE TABLE IF NOT EXISTS messages (
   raw_path      TEXT,                 -- origineel .eml op schijf
   size          INTEGER
 );
-CREATE UNIQUE INDEX IF NOT EXISTS messages_msgid ON messages(message_id) WHERE message_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS messages_folder_date ON messages(folder, date DESC);
 CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread_key);
 
@@ -125,6 +125,8 @@ CREATE TABLE IF NOT EXISTS album_photos (
 // Migratie oudere databases
 const photoCols = (db.prepare("PRAGMA table_info(photos)").all() as { name: string }[]).map((c) => c.name);
 if (!photoCols.includes("deleted_at")) db.exec("ALTER TABLE photos ADD COLUMN deleted_at INTEGER");
+// Meerdere gebruikers: alleen schemawijzigingen (zie userSchema.ts en CLUSTER.md).
+migrateUserSchema(db);
 
 // ───────────── Cluster-register (gerepliceerd) ─────────────
 db.exec(`
@@ -170,7 +172,7 @@ CREATE TABLE IF NOT EXISTS cluster_events (
 );
 `);
 
-if (!db.prepare("SELECT 1 FROM calendars LIMIT 1").get() && process.env.EIGEN_ROLE !== "replica") {
+if (!db.prepare("SELECT 1 FROM calendars WHERE user_id = 1 LIMIT 1").get() && process.env.EIGEN_ROLE !== "replica") {
   try { db.prepare("INSERT INTO calendars (name, color) VALUES (?, ?)").run("Persoonlijk", "#3f6f4a"); } catch { /* replica: komt via replicatie */ }
 }
 

@@ -318,3 +318,19 @@ button.link { padding: 0; text-decoration: underline; text-underline-offset: 3px
 @media (prefers-reduced-motion: reduce) { .switch input, .switch input::after { transition: none; } }
 .phone-sub .switch b { font-weight: 400; }
 .update-box p { margin: 0 0 8px; } #updateForm .seg { margin-bottom: 4px; }
+
+/* Gebruikers */
+.user-list { list-style: none; padding: 0; margin: 12px 0 20px; display: grid; gap: 8px; max-width: 760px; }
+.user-list li { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; padding: 12px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.user-list .who b { font-weight: 700; }
+.user-list .who small { display: block; color: var(--muted); }
+.user-list .acts { display: flex; flex-wrap: wrap; gap: 4px; justify-content: end; }
+.user-list .meta { grid-column: 1 / -1; color: var(--muted); font-size: var(--fs-small); display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.user-list li.off { opacity: .7; }
+.user-list .pill { font-size: 12px; padding: 2px 8px; margin-left: 6px; vertical-align: 1px; }
+.addr-input { display: flex; align-items: center; gap: 6px; }
+.addr-input input { flex: 1; }
+.invite-box { max-width: 620px; margin-top: 16px; padding: 14px 16px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--accent-soft); display: grid; gap: 10px; }
+.invite-box p { margin: 0; }
+.danger-bg { background: var(--danger); color: #fff; }
+@media (max-width: 600px) { .user-list li { grid-template-columns: 1fr; } .user-list .acts { justify-content: start; } }

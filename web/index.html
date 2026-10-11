@@ -14,9 +14,23 @@
     <form id="loginForm" class="card">
       <h1>Eigen Cloud</h1>
       <p class="muted">Mail · Agenda · Foto's</p>
+      <input type="text" id="loginUser" placeholder="E-mailadres" autocomplete="username" autocapitalize="none" spellcheck="false" hidden>
       <input type="password" id="password" placeholder="Wachtwoord" autocomplete="current-password" required>
       <button class="primary">Inloggen</button>
       <p id="loginError" class="error"></p>
+    </form>
+  </section>
+
+  <section id="invite" class="login" hidden>
+    <form id="inviteForm" class="card">
+      <h1>Welkom</h1>
+      <p id="inviteWho" class="muted"></p>
+      <input type="text" id="inviteAddress" autocomplete="username" readonly hidden>
+      <input type="password" name="password" placeholder="Kies een wachtwoord" autocomplete="new-password" minlength="10" required>
+      <input type="password" name="again" placeholder="Nog een keer" autocomplete="new-password" minlength="10" required>
+      <small class="muted">Minstens 10 tekens.</small>
+      <button class="primary">Wachtwoord instellen</button>
+      <p id="inviteError" class="error"></p>
     </form>
   </section>
 
@@ -132,12 +146,13 @@
     <!-- INSTELLINGEN -->
     <main id="tab-instellingen" class="tab settings" hidden>
       <nav class="settings-nav" id="settingsNav">
-        <a href="#instellingen/gezondheid" data-sec="gezondheid">Gezondheid</a>
-        <a href="#instellingen/mail" data-sec="mail">Mail</a>
-        <a href="#instellingen/gmail" data-sec="gmail">Gmail</a>
+        <a href="#instellingen/gezondheid" data-sec="gezondheid" data-owner>Gezondheid</a>
+        <a href="#instellingen/mail" data-sec="mail" data-owner>Mail</a>
+        <a href="#instellingen/gmail" data-sec="gmail" data-owner>Gmail</a>
         <a href="#instellingen/importeren" data-sec="importeren">Importeren uit Google</a>
         <a href="#instellingen/tijdmachine" data-sec="tijdmachine">Tijdmachine</a>
         <a href="#instellingen/telefoon" data-sec="telefoon">Telefoon</a>
+        <a href="#instellingen/gebruikers" data-sec="gebruikers" data-owner>Gebruikers</a>
         <a href="#instellingen/account" data-sec="account">Account</a>
       </nav>
 
@@ -282,8 +297,40 @@
         </div>
       </section>
 
+      <section class="settings-sec" data-sec="gebruikers" hidden>
+        <header class="sec-head"><h2>Gebruikers</h2><p class="muted">Iedereen in je cloud heeft een eigen mailadres, agenda en foto's. Niemand kan bij die van een ander, ook jij niet.</p></header>
+        <p id="usersLimit" class="muted"></p>
+        <ul id="userList" class="user-list"></ul>
+        <form id="userForm" class="form">
+          <fieldset>
+            <legend>Gebruiker toevoegen</legend>
+            <p class="note" id="userBlocked" hidden></p>
+            <label>Naam<input name="name" autocomplete="off" required maxlength="60"></label>
+            <label>Mailadres<span class="addr-input"><input name="localpart" autocomplete="off" autocapitalize="none" spellcheck="false" required pattern="[A-Za-z0-9._\-]+"><span id="userDomain" class="muted"></span></span></label>
+            <div class="seg" id="userHow">
+              <label><input type="radio" name="how" value="invite" checked> Uitnodigingslink sturen</label>
+              <label><input type="radio" name="how" value="password"> Zelf een eerste wachtwoord kiezen</label>
+            </div>
+            <label data-how="password" hidden>Eerste wachtwoord<input name="password" type="text" autocomplete="off" minlength="10" spellcheck="false"><small>Minstens 10 tekens. Geef het persoonlijk door; de gebruiker kan het daarna zelf wijzigen.</small></label>
+            <small data-how="invite">Je krijgt een link die een week geldig is. Wie hem opent, kiest zelf een wachtwoord.</small>
+            <p class="form-msg" id="userMsg" role="status"></p>
+            <div class="row-actions"><button class="primary" id="userAdd">Toevoegen</button></div>
+          </fieldset>
+        </form>
+        <div id="inviteBox" class="invite-box" hidden>
+          <p><b id="inviteFor"></b> Stuur deze link door, bijvoorbeeld via een berichtje. Hij werkt één keer en is een week geldig.</p>
+          <div class="copyline"><input id="inviteLink" readonly><button class="ghost" data-copy="inviteLink">Kopiëren</button></div>
+        </div>
+      </section>
+
       <section class="settings-sec" data-sec="account" hidden>
-        <header class="sec-head"><h2>Account</h2></header>
+        <header class="sec-head"><h2>Account</h2><p class="muted" id="accountWho"></p></header>
+        <form id="nameForm" class="form narrow-form">
+          <label>Je naam<input name="name" autocomplete="name" required maxlength="60"></label>
+          <p class="form-msg" id="nameMsg" role="status"></p>
+          <div class="row-actions"><button class="ghost">Naam opslaan</button></div>
+        </form>
+        <h3>Wachtwoord wijzigen</h3>
         <form id="pwForm" class="form narrow-form">
           <label>Huidig wachtwoord<input name="current" type="password" autocomplete="current-password" required></label>
           <label>Nieuw wachtwoord<input name="next" type="password" autocomplete="new-password" minlength="10" required><small>Minstens 10 tekens.</small></label>
@@ -293,6 +340,17 @@
       </section>
     </main>
   </div>
+
+  <dialog id="removeUserDlg" class="dlg">
+    <form id="removeUserForm" method="dialog">
+      <h3>Gebruiker verwijderen</h3>
+      <p class="note">Hiermee verdwijnen <b>alle mail, agenda's en foto's</b> van <b id="removeWho"></b>. Dat kan niet ongedaan worden gemaakt. Mail naar dit adres komt daarna bij jou binnen.</p>
+      <p class="muted">Wil je alleen dat iemand niet meer kan inloggen? Kies dan <b>Uitschakelen</b>; dan blijft alles bewaard.</p>
+      <label>Typ ter bevestiging het adres <b id="removeAddr"></b><input name="confirm" autocomplete="off" autocapitalize="none" spellcheck="false" required></label>
+      <p class="error" id="removeError"></p>
+      <div class="row"><span class="grow"></span><button value="cancel" formnovalidate class="ghost">Annuleren</button><button value="ok" class="primary danger-bg">Definitief verwijderen</button></div>
+    </form>
+  </dialog>
 
   <dialog id="placeDlg" class="dlg">
     <form id="placeForm" method="dialog">

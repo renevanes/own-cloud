@@ -80,11 +80,11 @@ export async function* readMbox(file: string): AsyncGenerator<Buffer> {
   yield* flush();
 }
 
-export async function importGmailMbox(file: string, onProgress?: (n: { done: number; added: number; skipped: number; failed: number }) => void) {
+export async function importGmailMbox(file: string, onProgress?: (n: { done: number; added: number; skipped: number; failed: number }) => void, userId = 1) {
   const stats = { done: 0, added: 0, skipped: 0, failed: 0 };
   for await (const raw of readMbox(file)) {
     try {
-      const id = await storeRawMessage(raw, gmailLabelsToOptions(raw));
+      const id = await storeRawMessage(raw, { ...gmailLabelsToOptions(raw), userId });
       id ? stats.added++ : stats.skipped++;
     } catch (e) {
       stats.failed++;

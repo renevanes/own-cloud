@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import { SMTPServer } from "smtp-server";
 import { config } from "../config.js";
-import { storeRawMessage } from "./store.js";
+import { deliverInbound, withEnvelope } from "./inbound.js";
+import { recipientUser } from "../users.js";
 import { runtime } from "../cluster/runtime.js";
 import { isNotLeader } from "../cluster/fence.js";
 
@@ -37,6 +38,11 @@ export function startSmtpServer() {
         err.responseCode = 550;
         return cb(err);
       }
+      if (recipientUser(address.address) === null) {
+        const err = new Error("Dit adres is niet actief") as Error & { responseCode: number };
+        err.responseCode = 550;
+        return cb(err);
+      }
       cb();
     },
 
@@ -51,14 +57,15 @@ export function startSmtpServer() {
         }
         try {
           const header = `Received: from ${session.clientHostname} ([${session.remoteAddress}]) by ${config.hostname}; ${new Date().toUTCString()}\r\n`;
-          const raw = Buffer.concat([Buffer.from(header), ...chunks]);
+          // De ontvangers (envelop) gaan mee, zodat elke gebruiker zijn eigen kopie krijgt; ook via de secundaire MX.
+          const raw = withEnvelope(Buffer.concat([Buffer.from(header), ...chunks]), session.envelope.rcptTo.map((r) => r.address));
           if (runtime.enabled && !runtime.isLeader()) {
             // Secundaire MX: veilig op schijf, wordt doorgegeven aan de leider.
             runtime.spool(raw);
             return cb();
           }
           try {
-            await storeRawMessage(raw, { folder: "inbox" });
+            await deliverInbound(raw);
             if (runtime.enabled) await runtime.waitDurable();
           } catch (e) {
             if (!runtime.enabled || !isNotLeader(e)) throw e;

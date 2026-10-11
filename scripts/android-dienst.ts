@@ -29,7 +29,7 @@ const broker = await createBroker(loadConfig({
   DESEC_TOKEN: "desec-dienst", DESEC_URL: `${U}/desec`,
   SCW_SECRET_KEY: "scw-org-geheim", SCW_ORGANIZATION_ID: "org-1", SCW_API_URL: `${U}/scw`,
   BROKER_SMTP_URL: `smtp://127.0.0.1:${smtp.port}`, BROKER_MAIL_FROM: "Eigen Cloud Dienst <dienst@dienst.test>",
-  BROKER_ADMIN_EMAIL: "beheer@dienst.test", BROKER_LOOP_MS: "20", BROKER_FREE_ZONE: "eigencloud.test",
+  BROKER_ADMIN_EMAIL: "beheer@dienst.test", BROKER_LOOP_MS: "20", BROKER_FREE_ZONE: "eigencloud.test", BROKER_OWNER_EMAIL: "eigenaar@dienst.test",
 }));
 await broker.app.listen({ port, host: "127.0.0.1" });
 

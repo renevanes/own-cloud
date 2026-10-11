@@ -155,7 +155,7 @@ export class Scaleway {
     try { return await this.req(method, p, body); } catch (e) { if (e instanceof ApiError && e.status === 404) return null; throw e; }
   }
   /** Draaiende en uitgezette servers van een project in één zone. */
-  async servers(zone: string, projectId: string): Promise<{ id: string; name: string; state: string; creation_date: string }[]> {
+  async servers(zone: string, projectId: string): Promise<{ id: string; name: string; state: string; creation_date: string; commercial_type?: string }[]> {
     const j = await this.req("GET", `/instance/v1/zones/${zone}/servers?project=${encodeURIComponent(projectId)}&per_page=100`);
     return (j?.servers ?? []) as never;
   }

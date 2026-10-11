@@ -8,6 +8,9 @@
  *   npm run dienst:cli -- opruimen <id> [--zeker]
  *   npm run dienst:cli -- bewaker
  *   npm run dienst:cli -- facturen [<id>]
+ *   npm run dienst:cli -- eigenaar <e-mailadres>
+ *   npm run dienst:cli -- medewerkers
+ *   npm run dienst:cli -- tweede-stap-wissen <e-mailadres>
  * Gebruikt dezelfde omgevingsvariabelen (en datamap) als de dienst zelf.
  */
 import { loadConfig } from "./config.js";
@@ -17,6 +20,7 @@ import { getSteps } from "./context.js";
 import { retryOrder, suspendOrder, resumeOrder, cleanupOrder } from "./ops.js";
 import { runGuard } from "./guard.js";
 import { type InvoiceRow, euro } from "./invoice.js";
+import { type StaffRow, ensureOwner, staffByEmail, resetSecondFactor, audit, staffView, ROLE_LABELS } from "./staff.js";
 
 const STATUS: Record<string, string> = {
   awaiting_payment: "wacht op betaling", paid: "betaald", provisioning: "wordt klaargezet", ready: "klaar",
@@ -126,6 +130,32 @@ try {
       if (rows.length) console.log(`  ${rows.length} factu${rows.length === 1 ? "ur" : "ren"}, samen ${euro(total)} (incl. ${ctx.cfg.vatPercent}% btw)`);
       break;
     }
+    case "eigenaar": {
+      if (!arg || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(arg)) { console.error("Geef het e-mailadres van de eigenaar op."); process.exit(1); }
+      const r = ensureOwner(ctx, arg, "opdrachtregel");
+      console.log(r.created
+        ? `${r.staff.email} is nu eigenaar. Inloggen: ${ctx.cfg.publicUrl}/beheer (code per mail, daarna vingerafdruk of authenticator-app instellen).`
+        : `${r.staff.email} is eigenaar.`);
+      break;
+    }
+    case "medewerkers": {
+      const list = ctx.db.prepare("SELECT * FROM staff ORDER BY created_at").all() as StaffRow[];
+      if (!list.length) console.log("Nog geen medewerkers. Maak de eerste eigenaar met: eigenaar <e-mailadres>");
+      for (const s of list) {
+        const v = staffView(ctx, s);
+        const second = [v.totp ? "authenticator-app" : "", v.devices.length ? `${v.devices.length} toestel${v.devices.length === 1 ? "" : "len"}` : ""].filter(Boolean).join(" + ") || "nog niet ingesteld";
+        console.log(`  ${s.email.padEnd(32)} ${ROLE_LABELS[s.role].padEnd(10)} tweede stap: ${second}; laatst ingelogd: ${when(s.last_login_at)}`);
+      }
+      break;
+    }
+    case "tweede-stap-wissen": {
+      const s = arg ? staffByEmail(ctx, arg) : undefined;
+      if (!s) { console.error(arg ? `${arg} is geen medewerker.` : "Geef het e-mailadres op."); process.exit(1); }
+      resetSecondFactor(ctx, s.id);
+      audit(ctx, null, "staff-reset-second-factor", s.email, { how: "opdrachtregel" });
+      console.log(`Authenticator-app en toestellen van ${s.email} gewist; bij de volgende keer inloggen stelt hij ze opnieuw in.`);
+      break;
+    }
     default:
       console.log(`Gebruik: npm run dienst:cli -- <opdracht>
 
@@ -136,7 +166,10 @@ try {
   hervatten <id>        nieuwe sleutel; de klant kan weer starten
   opruimen <id> [--zeker]  na opzegging: IAM en maildomein weghalen
   bewaker               nu controleren op te veel servers
-  facturen [<id>]       alle facturen (of die van één bestelling)`);
+  facturen [<id>]       alle facturen (of die van één bestelling)
+  eigenaar <e-mail>     eerste (of extra) eigenaar maken voor het beheer
+  medewerkers           alle medewerkers met hun rol
+  tweede-stap-wissen <e-mail>  telefoon kwijt: vingerafdruk en authenticator-app opnieuw laten instellen`);
   }
 } catch (e) {
   console.error(`Mislukt: ${(e as Error).message}`);

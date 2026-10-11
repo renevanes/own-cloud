@@ -4,6 +4,7 @@
  */
 import { type OrderRow, type PaymentRow, getOrder, getCustomer, orderState, patchState, event } from "./db.js";
 import { type Ctx, bundleOf, withLock, todayNl, paidThrough } from "./context.js";
+import type { Bundle } from "./config.js";
 import { saveKit } from "./provision.js";
 import { trySend } from "./mail.js";
 import { FAILED } from "./payments.js";
@@ -53,12 +54,12 @@ const transferable = (o: OrderRow) => (o.domain_mode === "register" || o.domain_
 const canResume = (o: OrderRow) => o.status === "cancelled" && !!o.paid_at && !!o.ends_at && o.ends_at > todayNl() && !!o.kit_enc && !orderState(o).cleanedAt;
 
 /** Mislukte incasso's die nog niet alsnog betaald zijn. */
-function unsettled(ctx: Ctx, orderId: string) {
+export function unsettled(ctx: Ctx, orderId: string) {
   return (ctx.db.prepare(`SELECT * FROM payments WHERE order_id = ? AND kind = 'recurring' AND settled_by IS NULL AND status IN (${FAILED.map(() => "?").join(",")}) ORDER BY created_at`)
     .all(orderId, ...FAILED) as PaymentRow[]);
 }
 
-function outstandingOf(ctx: Ctx, o: OrderRow) {
+export function outstandingOf(ctx: Ctx, o: OrderRow) {
   if (o.status !== "payment_problem") return null;
   const rows = unsettled(ctx, o.id);
   const cents = rows.reduce((n, r) => n + toCents(r.amount ?? o.amount), 0);
@@ -111,6 +112,7 @@ export async function billingView(ctx: Ctx, o: OrderRow) {
     })),
     outstanding: out ? { currency: "EUR", value: fromCents(out.cents) } : null,
     bundles: ctx.cfg.bundles.map((x) => ({ id: x.id, title: x.title, monthly: x.monthly, current: x.id === o.bundle })),
+    users: { included: b?.includes.users ?? 1, extra: o.extra_users, extraUserMonthly: b?.extraUserMonthly ?? null },
     canResume: canResume(o),
     domainTransferable: transferable(o),
   };
@@ -127,19 +129,61 @@ export async function changeBundle(ctx: Ctx, orderId: string, bundleId: string) 
     if (o.status !== "ready") throw new UserError(409, "Je kunt je bundel alleen wisselen als je cloud klaar is en je betalingen in orde zijn");
     const cust = getCustomer(ctx.db, o.customer_id)!;
     if (!o.mollie_subscription_id || !cust.mollie_customer_id) throw new UserError(409, "Je abonnement wordt nog aangemaakt. Probeer het zo opnieuw.");
+    // Extra gebruikers gaan mee naar de nieuwe bundel (tegen de prijs per extra gebruiker van die bundel).
+    const extra = b.extraUserMonthly ? o.extra_users : 0;
+    const amount = amountFor(b, extra);
     const sub = await ctx.apis.mollie.updateSubscription(cust.mollie_customer_id, o.mollie_subscription_id, {
-      amount: { currency: "EUR", value: b.monthly.value },
+      amount: { currency: "EUR", value: amount },
       description: subscriptionDescription(b.title, o),
     });
     const effective: string = sub?.nextPaymentDate ?? paidThrough(o.subscription_start);
     const from = o.bundle;
-    ctx.db.prepare("UPDATE orders SET bundle = ?, amount = ? WHERE id = ?").run(b.id, b.monthly.value, o.id);
+    ctx.db.prepare("UPDATE orders SET bundle = ?, amount = ?, extra_users = ? WHERE id = ?").run(b.id, amount, extra, o.id);
     // Het pakket meteen bijwerken: de console mag de extra servers direct bouwen (de bewaker kijkt naar de nieuwe bundel).
     saveKit(ctx, o.id);
     event(ctx.db, o.id, "bundle-changed", { from, to: b.id, effective });
     await trySend(ctx.mail, cust.email, `Je bundel is gewijzigd naar ${b.title}`,
-      `Hallo,\n\nJe bundel voor ${o.domain} is nu ${b.title}. Je kunt de nieuwe mogelijkheden meteen gebruiken.\n\nVanaf ${dateNl(effective)} betaal je ${euro(b.monthly.value)} per maand. Er wordt niets extra of terug verrekend voor de lopende maand.\n\nGroet,\nEigen Cloud Dienst`);
-    return { ok: true, bundle: { id: b.id, title: b.title, monthly: b.monthly }, effective };
+      `Hallo,\n\nJe bundel voor ${o.domain} is nu ${b.title}. Je kunt de nieuwe mogelijkheden meteen gebruiken.\n\nVanaf ${dateNl(effective)} betaal je ${euro(amount)} per maand. Er wordt niets extra of terug verrekend voor de lopende maand.\n\nGroet,\nEigen Cloud Dienst`);
+    return { ok: true, bundle: { id: b.id, title: b.title, monthly: b.monthly }, effective, ...(extra ? { amount: { currency: "EUR", value: amount } } : {}) };
+  });
+}
+
+// ───────── Extra gebruikers ─────────
+
+/** Maandbedrag: bundelprijs + aantal extra gebruikers × prijs per extra gebruiker. */
+export function amountFor(b: Bundle, extraUsers: number) {
+  return fromCents(toCents(b.monthly.value) + extraUsers * toCents(b.extraUserMonthly?.value ?? "0"));
+}
+
+/**
+ * Aantal extra gebruikers instellen (het totaal, niet erbij). Net als bundel wisselen: het Mollie-abonnement krijgt
+ * het nieuwe bedrag vanaf de volgende betaling, het pakket (kit.users) wordt meteen bijgewerkt.
+ */
+export async function setExtraUsers(ctx: Ctx, orderId: string, countRaw: unknown) {
+  return withLock(orderId, async () => {
+    const o = getOrder(ctx.db, orderId)!;
+    const count = Number(countRaw);
+    if (!Number.isInteger(count) || count < 0 || count > 100) throw new UserError(400, "Kies een aantal extra gebruikers van 0 tot 100");
+    const b = bundleOf(ctx, o.bundle);
+    if (!b) throw new UserError(409, "Je bundel wordt niet meer aangeboden. Kies eerst een andere bundel.");
+    if (!b.extraUserMonthly && count > 0) throw new UserError(409, "Bij deze bundel kun je geen extra gebruikers bijkopen");
+    if (count === o.extra_users) throw new UserError(400, count ? `Je hebt al ${count} extra gebruiker${count === 1 ? "" : "s"}` : "Je hebt geen extra gebruikers");
+    if (o.status !== "ready") throw new UserError(409, "Je kunt gebruikers alleen aanpassen als je cloud klaar is en je betalingen in orde zijn");
+    const cust = getCustomer(ctx.db, o.customer_id)!;
+    if (!o.mollie_subscription_id || !cust.mollie_customer_id) throw new UserError(409, "Je abonnement wordt nog aangemaakt. Probeer het zo opnieuw.");
+    const amount = amountFor(b, count);
+    const sub = await ctx.apis.mollie.updateSubscription(cust.mollie_customer_id, o.mollie_subscription_id, {
+      amount: { currency: "EUR", value: amount },
+      description: subscriptionDescription(b.title, o),
+    });
+    const effective: string = sub?.nextPaymentDate ?? paidThrough(o.subscription_start);
+    ctx.db.prepare("UPDATE orders SET extra_users = ?, amount = ? WHERE id = ?").run(count, amount, o.id);
+    if (o.kit_enc) saveKit(ctx, o.id);
+    event(ctx.db, o.id, "users-changed", { from: o.extra_users, to: count, amount, effective });
+    const users = b.includes.users + count;
+    await trySend(ctx.mail, cust.email, "Het aantal gebruikers van je cloud is gewijzigd",
+      `Hallo,\n\nIn je cloud voor ${o.domain} kunnen nu ${users} gebruikers een eigen mailbox, agenda en foto's hebben (${b.includes.users} bij je bundel${count ? ` en ${count} extra` : ""}).\n\nVanaf ${dateNl(effective)} betaal je ${euro(amount)} per maand. Er wordt niets extra of terug verrekend voor de lopende maand.\n\nGroet,\nEigen Cloud Dienst`);
+    return { ok: true, users: { included: b.includes.users, extra: count, total: users }, amount: { currency: "EUR" as const, value: amount }, effective };
   });
 }
 

@@ -191,7 +191,8 @@ async function pullMail(client: ImapFlow, status: GmailStatus, deadline: number)
 
     // Gelezen/ster-wijzigingen sinds de vorige ronde (alleen als de server CONDSTORE heeft).
     if (prevModseq && box.highestModseq && String(box.highestModseq) !== prevModseq && state.lastUid > 0) {
-      const upd = db.prepare("UPDATE messages SET is_read = ?, is_starred = ? WHERE message_id = ? AND (is_read != ? OR is_starred != ?)");
+      // Alleen de mailbox van de eigenaar: de Gmail-koppeling is van hem.
+      const upd = db.prepare("UPDATE messages SET is_read = ?, is_starred = ? WHERE message_id = ? AND user_id = 1 AND (is_read != ? OR is_starred != ?)");
       for await (const m of client.fetch(`1:${state.lastUid}`, { uid: true, flags: true, envelope: true }, { uid: true, changedSince: BigInt(prevModseq) })) {
         const id = bracket(m.envelope?.messageId);
         if (!id || !m.flags) continue;
@@ -269,7 +270,7 @@ async function pushMail(client: ImapFlow, cfg: ReturnType<typeof gmailConfig>, s
   }
   // Ontvangen mail (ook als je hem al gearchiveerd hebt), en desgewenst je verzonden mail.
   const folders = cfg.copySent ? ["inbox", "archive", "sent"] : ["inbox", "archive"];
-  const q = db.prepare(`SELECT id, message_id, raw_path, date, is_read, is_starred FROM messages WHERE id > ? AND folder IN (${folders.map(() => "?").join(",")}) ORDER BY id LIMIT 25`);
+  const q = db.prepare(`SELECT id, message_id, raw_path, date, is_read, is_starred FROM messages WHERE id > ? AND user_id = 1 AND folder IN (${folders.map(() => "?").join(",")}) ORDER BY id LIMIT 25`);
   for (;;) {
     const rows = q.all(last, ...folders) as { id: number; message_id: string | null; raw_path: string | null; date: number; is_read: number; is_starred: number }[];
     if (!rows.length) break;
@@ -333,7 +334,7 @@ async function syncCalendars(cfg: ReturnType<typeof gmailConfig>, status: GmailS
       const text = await res.text();
       if (!text.includes("BEGIN:VCALENDAR")) throw new Error("dit is geen agenda (iCal)");
       let id = ids[c.name];
-      if (!id || !db.prepare("SELECT 1 FROM calendars WHERE id = ?").get(id)) {
+      if (!id || !db.prepare("SELECT 1 FROM calendars WHERE id = ? AND user_id = 1").get(id)) {
         id = Number(db.prepare("INSERT INTO calendars (name, color) VALUES (?, ?)").run(CAL_PREFIX + c.name, "#2f6f8f").lastInsertRowid);
         ids[c.name] = id;
         setSetting("gmail_cal_ids", JSON.stringify(ids));

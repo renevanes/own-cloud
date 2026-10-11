@@ -34,6 +34,8 @@ export interface Kit {
   dns: { type: "desec"; name: string; token: string; zone: string; api: string; acme: { username: string; password: string; subdomain: string; server_url: string } };
   mailRelay: { host: string; port: number; user: string; password: string; secure: boolean } | null;
   spfExtra: string;
+  /** Hoeveel gebruikers de cloud mag hebben (bundel + extra gekocht). */
+  users: number;
 }
 
 export const readInput = (ctx: Ctx, o: OrderRow) => ctx.secrets.open<OrderInput>(o.input_enc, `input:${o.id}`) ?? {};
@@ -301,6 +303,7 @@ export function saveKit(ctx: Ctx, orderId: string): Kit {
     },
     mailRelay: b.includes.mail ? { host: "smtp.tem.scaleway.com", port: 587, user: st.projectId, password: s.apiKey.secretKey, secure: false } : null,
     spfExtra: st.spfExtra ?? "",
+    users: b.includes.users + (o.extra_users ?? 0),
   };
   ctx.db.prepare("UPDATE orders SET kit_enc = ? WHERE id = ?").run(ctx.secrets.seal(kit, `kit:${orderId}`), orderId);
   return kit;

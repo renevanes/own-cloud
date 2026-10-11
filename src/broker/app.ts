@@ -4,6 +4,10 @@
  */
 import crypto from "node:crypto";
 import dnsp from "node:dns/promises";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyRequest, type FastifyReply } from "fastify";
 import { type BrokerConfig, NAMESERVERS, RESERVED_LABELS } from "./config.js";
 import { makeApis, type Apis } from "./apis.js";
@@ -14,26 +18,21 @@ import { type Registrant, parsePhone, readKit, splitDomain, provisionDue } from 
 import { handleWebhook, ensureSubscription } from "./payments.js";
 import { cancelOrder } from "./ops.js";
 import { runGuard } from "./guard.js";
-import { UserError, billingView, changeBundle, startMandateChange, startSettle, resumeSubscription, domainAuthCode } from "./billing.js";
+import { UserError, billingView, changeBundle, startMandateChange, startSettle, resumeSubscription, domainAuthCode, setExtraUsers } from "./billing.js";
 import { type InvoiceRow, readInvoice, renderInvoiceHtml } from "./invoice.js";
+import { RateLimit, EMAIL, issueCode, checkCode } from "./codes.js";
+import { getBrand, loadOfferingFromDb, publicBundle } from "./brand.js";
+import { registerStaffAuth, ensureOwner } from "./staff.js";
+import { registerAdmin } from "./admin.js";
+import { registerCustomerSupport, checkHealth, useInvite, SupportError, getInvite, inviteState } from "./support.js";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+/** De beheerpagina's (web-dienst/) en de lettertypes (web/fonts/), vanuit src/broker of dist/broker. */
+const WEB_DIENST = path.resolve(here, "../../web-dienst");
+const WEB_FONTS = path.resolve(here, "../../web/fonts");
 
 // ───────── Kleine hulpjes ─────────
 
-class RateLimit {
-  private hits = new Map<string, number[]>();
-  constructor(private max: number, private windowMs: number) {}
-  ok(key: string) {
-    const now = Date.now();
-    const list = (this.hits.get(key) ?? []).filter((t) => now - t < this.windowMs);
-    if (list.length >= this.max) { this.hits.set(key, list); return false; }
-    list.push(now);
-    this.hits.set(key, list);
-    if (this.hits.size > 50_000) this.hits.clear();
-    return true;
-  }
-}
-
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DOMAIN = /^(?=.{4,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 export const normDomain = (s: unknown) => String(s ?? "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/[/.]+$/, "");
 
@@ -77,6 +76,12 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     cfg, db, secrets: new Secrets(cfg.secret), apis: deps.apis ?? makeApis(cfg), mail: deps.mail ?? makeMailer(cfg),
     track(p) { pending.add(p); void p.catch((e) => console.error(`[dienst] ${(e as Error).message}`)).finally(() => pending.delete(p)); },
   };
+  // Aanbod uit het beheer gaat voor bundles.json; de eerste eigenaar uit BROKER_OWNER_EMAIL.
+  loadOfferingFromDb(ctx);
+  if (cfg.ownerEmail) {
+    const r = ensureOwner(ctx, cfg.ownerEmail, "BROKER_OWNER_EMAIL");
+    if (r.created) console.log(`[dienst] eigenaar ${cfg.ownerEmail} aangemaakt; inloggen op ${cfg.publicUrl}/beheer`);
+  }
 
   // Alleen een proxy op dezelfde machine of in het eigen (Docker-)netwerk mag het IP-adres van de bezoeker doorgeven.
   const app = Fastify({ logger: false, trustProxy: cfg.trustProxy, bodyLimit: 1024 * 1024 });
@@ -135,22 +140,24 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
   };
 
   // ── Info ──
-  app.get("/v1/info", async () => ({
-    name: "Eigen Cloud Dienst",
-    bundles: cfg.bundles.map((b) => ({ id: b.id, title: b.title, description: b.description, monthly: b.monthly, includes: b.includes, placement: b.placement })),
-    termsUrl: cfg.termsUrl,
-    privacyUrl: cfg.privacyUrl,
-    freeZone: cfg.freeZone,
-  }));
+  app.get("/v1/info", async () => {
+    const brand = getBrand(ctx);
+    return {
+      name: brand.name,
+      bundles: cfg.bundles.map(publicBundle),
+      termsUrl: brand.termsUrl,
+      privacyUrl: brand.privacyUrl,
+      freeZone: cfg.freeZone,
+      brand,
+    };
+  });
 
   // ── Inloggen met een code per mail ──
   app.post<{ Body: { email?: string } }>("/v1/auth/start", async (req, reply) => {
     const email = String(req.body?.email ?? "").trim().toLowerCase();
     if (!EMAIL.test(email) || email.length > 254) return httpError(reply, 400, "Vul een geldig e-mailadres in");
     if (!limits.startIp.ok(req.ip) || !limits.startEmail.ok(email)) return httpError(reply, 429, "Je hebt al een paar codes aangevraagd. Wacht even en probeer het dan opnieuw.");
-    const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
-    db.prepare("INSERT INTO login_codes (email, code_hash, expires_at, attempts) VALUES (?, ?, ?, 0) ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash, expires_at = excluded.expires_at, attempts = 0")
-      .run(email, ctx.secrets.hmac(`${email}:${code}`), Date.now() + 15 * 60_000);
+    const code = issueCode(db, ctx.secrets, email);
     try {
       await ctx.mail.send(email, `Je inlogcode: ${code}`, `Hallo,\n\nJe inlogcode voor Eigen Cloud Dienst is:\n\n    ${code}\n\nDe code is 15 minuten geldig. Heb je niets aangevraagd? Dan kun je deze mail negeren.\n\nGroet,\nEigen Cloud Dienst`);
     } catch (e) {
@@ -162,20 +169,9 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
 
   app.post<{ Body: { email?: string; code?: string } }>("/v1/auth/verify", async (req, reply) => {
     const email = String(req.body?.email ?? "").trim().toLowerCase();
-    const code = String(req.body?.code ?? "").replace(/\s/g, "");
     if (!limits.verifyIp.ok(req.ip)) return httpError(reply, 429, "Te veel pogingen. Wacht even en probeer het dan opnieuw.");
-    const row = db.prepare("SELECT * FROM login_codes WHERE email = ?").get(email) as { code_hash: string; expires_at: number; attempts: number } | undefined;
-    if (!row || row.expires_at < Date.now()) return httpError(reply, 400, "Deze code is verlopen. Vraag een nieuwe aan.");
-    if (row.attempts >= 5) { db.prepare("DELETE FROM login_codes WHERE email = ?").run(email); return httpError(reply, 429, "Te vaak een verkeerde code. Vraag een nieuwe aan."); }
-    const want = Buffer.from(row.code_hash, "hex");
-    const got = Buffer.from(ctx.secrets.hmac(`${email}:${code}`), "hex");
-    if (!/^\d{6}$/.test(code) || !crypto.timingSafeEqual(want, got)) {
-      const attempts = row.attempts + 1;
-      if (attempts >= 5) db.prepare("DELETE FROM login_codes WHERE email = ?").run(email);
-      else db.prepare("UPDATE login_codes SET attempts = ? WHERE email = ?").run(attempts, email);
-      return httpError(reply, attempts >= 5 ? 429 : 400, attempts >= 5 ? "Te vaak een verkeerde code. Vraag een nieuwe aan." : "Die code klopt niet. Kijk nog eens goed in je mail.");
-    }
-    db.prepare("DELETE FROM login_codes WHERE email = ?").run(email);
+    const checked = checkCode(db, ctx.secrets, email, req.body?.code);
+    if (!checked.ok) return httpError(reply, checked.status, checked.error);
     let c = db.prepare("SELECT * FROM customers WHERE email = ?").get(email) as CustomerRow | undefined;
     if (!c) {
       const id = crypto.randomBytes(6).toString("hex");
@@ -249,6 +245,8 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     }
     const taken = db.prepare("SELECT 1 FROM orders WHERE domain = ? AND status NOT IN ('awaiting_payment','cancelled','failed')").get(domain);
     if (taken) return httpError(reply, 409, "Voor dit domein loopt al een abonnement");
+    const inviteRaw = typeof b.invite === "string" ? b.invite.trim() : "";
+    if (inviteRaw && !inviteState(getInvite(ctx, inviteRaw)).valid) return httpError(reply, 400, `${inviteState(getInvite(ctx, inviteRaw)).reason}. Bestel zonder code of vraag een nieuwe aan.`);
     if (!limits.ordersCustomer.ok(c.id)) return httpError(reply, 429, "Je hebt net al een paar bestellingen geplaatst. Probeer het later opnieuw.");
     if (mode === "register") {
       try {
@@ -260,9 +258,14 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
       }
     }
 
+    let inviteCode: string | null = null;
+    if (inviteRaw) {
+      try { inviteCode = useInvite(ctx, inviteRaw); }
+      catch (e) { if (e instanceof SupportError) return httpError(reply, e.status, e.message); throw e; }
+    }
     const id = crypto.randomBytes(8).toString("hex");
-    db.prepare("INSERT INTO orders (id, customer_id, bundle, domain, domain_mode, status, amount, input_enc, created_at) VALUES (?, ?, ?, ?, ?, 'awaiting_payment', ?, ?, ?)")
-      .run(id, c.id, bundle.id, domain, mode, bundle.monthly.value, ctx.secrets.seal({ registrant, authCode: authCode || undefined }, `input:${id}`), Date.now());
+    db.prepare("INSERT INTO orders (id, customer_id, bundle, domain, domain_mode, status, amount, input_enc, created_at, invite_code) VALUES (?, ?, ?, ?, ?, 'awaiting_payment', ?, ?, ?, ?)")
+      .run(id, c.id, bundle.id, domain, mode, bundle.monthly.value, ctx.secrets.seal({ registrant, authCode: authCode || undefined }, `input:${id}`), Date.now(), inviteCode);
     initSteps(db, id, mode);
     try {
       let mcid = c.mollie_customer_id;
@@ -285,12 +288,13 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
       if (!p?.id || !checkoutUrl) throw new Error("Mollie gaf geen betaallink terug");
       db.prepare("UPDATE orders SET mollie_payment_id = ? WHERE id = ?").run(p.id, id);
       setImmediateStep(id);
-      event(db, id, "order-created", { bundle: bundle.id, mode });
+      event(db, id, "order-created", { bundle: bundle.id, mode, ...(inviteCode ? { invite: inviteCode } : {}) });
       return { orderId: id, checkoutUrl };
     } catch (e) {
       console.error(`[dienst] betaling aanmaken: ${(e as Error).message}`);
       db.prepare("DELETE FROM steps WHERE order_id = ?").run(id);
       db.prepare("DELETE FROM orders WHERE id = ?").run(id);
+      if (inviteCode) db.prepare("UPDATE invites SET uses = MAX(uses - 1, 0) WHERE code = ?").run(inviteCode);
       return httpError(reply, 502, "Betalen lukt nu even niet. Probeer het zo opnieuw.");
     }
   });
@@ -358,6 +362,8 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
   app.post("/v1/orders/:id/payment-method", selfService("payment-method", "Je betaalmethode wijzigen lukt nu even niet. Probeer het zo opnieuw.", (o) => startMandateChange(ctx, o.id), limits.checkoutCustomer));
   app.post("/v1/orders/:id/settle", selfService("settle", "Betalen lukt nu even niet. Probeer het zo opnieuw.", (o) => startSettle(ctx, o.id), limits.checkoutCustomer));
   app.post("/v1/orders/:id/resume", selfService("resume", "Je abonnement voortzetten lukt nu even niet. Probeer het zo opnieuw.", (o) => resumeSubscription(ctx, o.id)));
+  app.post<{ Params: { id: string }; Body: { count?: number } }>("/v1/orders/:id/users", (req, reply) =>
+    selfService("users", "Het aantal gebruikers aanpassen lukt nu even niet. Probeer het zo opnieuw.", (o) => setExtraUsers(ctx, o.id, req.body?.count))(req, reply));
   app.get("/v1/orders/:id/authcode", selfService("authcode", "De verhuiscode opvragen lukt nu even niet. Probeer het zo opnieuw.", (o) => domainAuthCode(ctx, o.id), limits.authcodeCustomer));
 
   app.get<{ Params: { id: string } }>("/v1/invoices/:id", async (req, reply) => {
@@ -418,6 +424,27 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
   });
   app.get("/v1/desec/domains/:zone/", proxy);
 
+  // ── Aanbieder: medewerkers, beheer-API, hulpvragen, berichten, gezondheid ──
+  registerStaffAuth(app, ctx, httpError);
+  registerAdmin(app, ctx, httpError);
+  registerCustomerSupport(app, ctx, httpError, needAuth);
+
+  // ── Beheerpagina's (/beheer) ──
+  if (fs.existsSync(WEB_DIENST)) {
+    app.addHook("onSend", async (req, reply, payload) => {
+      if (req.url.startsWith("/beheer")) {
+        reply.header("content-security-policy", "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src 'self' blob: data:; frame-ancestors 'self'; base-uri 'none'; form-action 'self'");
+        reply.header("x-content-type-options", "nosniff");
+        reply.header("referrer-policy", "no-referrer");
+        reply.header("cache-control", "no-cache");
+      }
+      return payload;
+    });
+    app.get("/beheer", async (_req, reply) => reply.redirect("/beheer/"));
+    await app.register(fastifyStatic, { root: WEB_DIENST, prefix: "/beheer/", decorateReply: false });
+    if (fs.existsSync(WEB_FONTS)) await app.register(fastifyStatic, { root: WEB_FONTS, prefix: "/beheer/fonts/", decorateReply: false });
+  }
+
   // ── Achtergrond ──
   const timers: NodeJS.Timeout[] = [];
   let looping = false;
@@ -436,6 +463,7 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
       const noSub = db.prepare("SELECT id FROM orders WHERE paid_at IS NOT NULL AND mollie_subscription_id IS NULL AND status NOT IN ('cancelled','awaiting_payment')").all() as { id: string }[];
       for (const { id } of noSub) await ensureSubscription(ctx, id).catch((e) => event(db, id, "subscription-error", (e as Error).message));
       await provisionDue(ctx);
+      await checkHealth(ctx).catch((e) => console.error(`[dienst] gezondheid: ${(e as Error).message}`));
     } finally { looping = false; }
   };
 

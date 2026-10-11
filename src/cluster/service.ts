@@ -114,6 +114,7 @@ export class ClusterService {
     runtime.waitDurable = async () => (this.db ? this.raft.waitDurable(lastSeq(this.db)) : true);
     runtime.spool = (raw) => this.spool(raw);
     runtime.sleeping = () => this.getSetting("cluster_mode") === "sleeping";
+    runtime.usersBlocked = () => updates.usersBlocked(this);
     // Stand van de Gmail-koppeling veranderd: MX wel/niet publiceren.
     gmailHooks.changed = () => { this.dnsDirty = true; };
   }
@@ -504,9 +505,11 @@ export class ClusterService {
     const rows = db.prepare("SELECT id, path, thumb_path FROM photos WHERE deleted_at IS NOT NULL AND deleted_at < ?").all(cutoff) as { id: number; path: string; thumb_path: string | null }[];
     for (const r of rows) {
       db.prepare("DELETE FROM photos WHERE id = ?").run(r.id);
-      // Lokale kopie weg; in de back-upopslag blijft het bestand bewaard (bewaartermijn bij de aanbieder).
-      fs.rmSync(path.join(this.dataDir, r.path), { force: true });
-      if (r.thumb_path) fs.rmSync(path.join(this.dataDir, r.thumb_path), { force: true });
+      // Lokale kopie weg (tenzij een andere gebruiker dezelfde foto heeft); in de back-upopslag blijft het bestand
+      // bewaard (bewaartermijn bij de aanbieder).
+      const inUse = (p: string) => !!db.prepare("SELECT 1 FROM photos WHERE path = ? OR thumb_path = ? LIMIT 1").get(p, p);
+      if (!inUse(r.path)) fs.rmSync(path.join(this.dataDir, r.path), { force: true });
+      if (r.thumb_path && !inUse(r.thumb_path)) fs.rmSync(path.join(this.dataDir, r.thumb_path), { force: true });
     }
   }
 
@@ -563,8 +566,8 @@ export class ClusterService {
       }
       case "deliverMail": {
         if (!this.raft.isLeader()) return { ok: false };
-        const { storeRawMessage } = await import("../mail/store.js");
-        await storeRawMessage(Buffer.from(String(m.raw), "base64"), { folder: "inbox" });
+        const { deliverInbound } = await import("../mail/inbound.js");
+        await deliverInbound(Buffer.from(String(m.raw), "base64"));
         await runtime.waitDurable();
         return { ok: true };
       }
@@ -685,8 +688,8 @@ export class ClusterService {
     for (const f of files) {
       const raw = fs.readFileSync(path.join(dir, f));
       if (this.raft.isLeader()) {
-        const { storeRawMessage } = await import("../mail/store.js");
-        await storeRawMessage(raw, { folder: "inbox" });
+        const { deliverInbound } = await import("../mail/inbound.js");
+        await deliverInbound(raw);
         await runtime.waitDurable();
       } else {
         const leader = this.raft.leader();

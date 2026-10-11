@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#3f6f4a">
+  <meta name="referrer" content="no-referrer">
+  <title>Beheer — Eigen Cloud Dienst</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='17' cy='15' r='9' fill='none' stroke='%233f6f4a' stroke-width='3'/%3E%3Cpath d='M17 15a4 4 0 1 1 4-4' fill='none' stroke='%233f6f4a' stroke-width='3' stroke-linecap='round'/%3E%3Cpath d='M3 26h26' stroke='%233f6f4a' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preload" href="fonts/atkinson-hyperlegible-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="dienst.css">
+</head>
+<body>
+  <a class="skip" href="#root">Naar de inhoud</a>
+  <header class="bar">
+    <a class="brand" href="#/overzicht" id="brand">
+      <span class="logo" id="brandLogo" aria-hidden="true"><svg viewBox="0 0 32 32"><circle cx="17" cy="15" r="9"/><path d="M17 15a4 4 0 1 1 4-4"/><path d="M3 26h26"/></svg></span>
+      <span id="brandName">Eigen Cloud Dienst</span> <span class="sub">beheer</span>
+    </a>
+    <span class="grow"></span>
+    <a class="link" href="#/account" id="meLink" hidden></a>
+    <button class="link" id="logoutBtn" type="button" hidden>Uitloggen</button>
+  </header>
+  <div class="shell">
+    <nav class="nav" id="nav" aria-label="Onderdelen" hidden></nav>
+    <main id="root" tabindex="-1"></main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <dialog class="confirm" id="confirm">
+    <form method="dialog">
+      <h2 id="confirmTitle"></h2>
+      <p id="confirmText"></p>
+      <div class="row">
+        <button class="btn" value="no" type="submit">Annuleren</button>
+        <button class="btn primary" value="yes" type="submit" id="confirmYes">Ja</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog class="confirm" id="formDlg">
+    <form method="dialog" id="formDlgForm" class="fields">
+      <h2 id="formDlgTitle"></h2>
+      <p id="formDlgText"></p>
+      <div class="fields" id="formDlgFields"></div>
+      <div class="row">
+        <button class="btn" value="no" type="submit" formnovalidate>Annuleren</button>
+        <button class="btn primary" value="yes" type="submit" id="formDlgYes">Ja</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog class="viewer" id="viewer">
+    <iframe id="viewerFrame" title="Factuur" sandbox="allow-modals"></iframe>
+    <form method="dialog" class="row"><button class="btn" type="submit">Sluiten</button></form>
+  </dialog>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
