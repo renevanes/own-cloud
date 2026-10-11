@@ -19,7 +19,10 @@ export interface ConsoleState {
   /** Account bij deSEC dat de console zelf heeft aangemaakt. */
   desec?: { email: string; password: string; at: number };
   /** Eigen Cloud Dienst (centrale betaalde dienst). */
-  dienst?: { email?: string; token?: string; orderId?: string; bundle?: string; applied?: boolean };
+  /** url = de gekozen aanbieder (zijn Eigen Cloud Dienst); invite = uitnodigingscode van die aanbieder. */
+  dienst?: { url?: string; invite?: string; email?: string; token?: string; orderId?: string; bundle?: string; applied?: boolean };
+  /** Aantal gebruikers in de cloud volgens het abonnement (0 = onbeperkt). */
+  maxUsers?: number;
   preset?: string;
   firstLaunch?: { at: number; nodeId: string; provider: string; region: string; clusterUrl?: string; apiUrl?: string };
   appPasswordHash?: string;

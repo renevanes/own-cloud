@@ -202,16 +202,29 @@ export async function prepareStore(cfg: StoreConfig): Promise<StepResult[]> {
 }
 
 /** Stuurt gewijzigde beheerinstellingen naar het draaiende cluster (ondertekend). */
-export async function pushAdminConfig(c: ClusterConfig & { console?: { mailRelay?: string; spfExtra?: string; alertEmail?: string; extraDns?: unknown[] } }) {
+type ConsolePart = { mailRelay?: string; spfExtra?: string; alertEmail?: string; extraDns?: unknown[]; maxUsers?: number; dienst?: { url?: string; orderId?: string; applied?: boolean } };
+
+/** Instellingen die de beheerconsole aan de cloud doorgeeft (bij de start en na elke wijziging). */
+export function consoleSettings(c: ClusterConfig & { console?: ConsolePart }, defaultDienst = ""): Record<string, string> {
+  const settings: Record<string, string> = {};
+  const con = c.console;
+  if (!con) return settings;
+  settings.mail_relay = con.mailRelay ?? "";
+  settings.spf_extra = con.spfExtra ?? "";
+  settings.extra_dns = JSON.stringify(con.extraDns ?? []);
+  if (con.alertEmail) settings.alert_email = con.alertEmail;
+  // Abonnement bij een aanbieder: hoeveel gebruikers, en waar de cloud zijn technische gezondheid meldt.
+  settings.max_users = String(con.maxUsers ?? 0);
+  const token = c.dns.find((d) => d.type === "desec" && d.name === "dienst")?.token;
+  const url = (con.dienst?.url || defaultDienst).replace(/\/$/, "");
+  settings.dienst_report = con.dienst?.orderId && con.dienst.applied && token && url ? JSON.stringify({ url, orderId: con.dienst.orderId, token }) : "";
+  return settings;
+}
+
+export async function pushAdminConfig(c: ClusterConfig & { console?: ConsolePart }, defaultDienst = "") {
   const st = await clusterStatus(c);
   if (!st.leaderUrl) return false;
-  const settings: Record<string, string> = {};
-  if (c.console) {
-    settings.mail_relay = c.console.mailRelay ?? "";
-    settings.spf_extra = c.console.spfExtra ?? "";
-    settings.extra_dns = JSON.stringify(c.console.extraDns ?? []);
-    if (c.console.alertEmail) settings.alert_email = c.console.alertEmail;
-  }
+  const settings = consoleSettings(c, defaultDienst);
   const update = { stores: c.stores, providers: c.providers, dns: c.dns, placement: c.policy.placement, settings };
   const r = await rpc<{ ok: boolean }>(keysFor(c).cluster, st.leaderUrl, { type: "adminConfig", update, proof: adminProof(c.masterKey!, update) }, 8000);
   return r.ok;

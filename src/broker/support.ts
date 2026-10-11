@@ -75,7 +75,8 @@ export function inviteView(ctx: Ctx, i: InviteRow) {
   return {
     code: i.code, display: showCode(i.code), label: i.label, bundle: i.bundle, maxUses: i.max_uses, uses: i.uses,
     expiresAt: i.expires_at, createdAt: i.created_at, createdBy: by?.email ?? null, revokedAt: i.revoked_at,
-    link: `${ctx.cfg.publicUrl}/v1/invite/${i.code}`, ...inviteState(i),
+    // De link die de aanbieder deelt: een pagina met uitleg en een knop die de app opent.
+    link: `${ctx.cfg.publicUrl}/uitnodiging/${i.code}`, ...inviteState(i),
     orders: (ctx.db.prepare("SELECT COUNT(*) AS n FROM orders WHERE invite_code = ?").get(i.code) as { n: number }).n,
   };
 }
@@ -315,6 +316,28 @@ export function registerCustomerSupport(app: FastifyInstance, ctx: Ctx, httpErro
     const st = inviteState(i);
     const b = st.valid && i?.bundle ? bundleOf(ctx, i.bundle) : undefined;
     return { valid: st.valid, ...(st.valid ? { code: i!.code } : { reason: st.reason }), brand: getBrand(ctx), ...(b ? { bundle: publicBundle(b) } : {}) };
+  });
+
+  // Pagina achter de uitnodigingslink: uitleg, de app downloaden, en een knop die de app met deze aanbieder opent.
+  app.get<{ Params: { code: string } }>("/uitnodiging/:code", async (req, reply) => {
+    const i = getInvite(ctx, req.params.code);
+    const st = inviteState(i);
+    const brand = getBrand(ctx);
+    const e = (v: string) => v.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
+    const app = `eigencloud://uitnodiging?dienst=${encodeURIComponent(ctx.cfg.publicUrl)}&code=${encodeURIComponent(i?.code ?? "")}`;
+    const accent = brand.accentColor && /^#[0-9a-f]{6}$/i.test(brand.accentColor) ? brand.accentColor : "#3f6f4a";
+    reply.header("content-type", "text/html; charset=utf-8").header("referrer-policy", "no-referrer");
+    return `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Uitnodiging van ${e(brand.name)}</title>
+<style>body{font:17px/1.55 system-ui,sans-serif;margin:0;background:#f3f5f2;color:#1d2b24}main{max-width:520px;margin:8vh auto;padding:0 20px}h1{font-size:30px;line-height:1.15}.btn{display:inline-block;background:${accent};color:#fff;padding:14px 22px;border-radius:12px;text-decoration:none;font-weight:700}.muted{color:#5d6b63}ol{padding-left:22px}code{font-size:20px;letter-spacing:.06em}img{max-height:56px}</style></head>
+<body><main>${brand.logoUrl ? `<img src="${e(brand.logoUrl)}" alt="">` : ""}
+${st.valid ? `<h1>Je bent uitgenodigd door ${e(brand.name)}</h1>
+<p>Met Eigen Cloud heb je je eigen mail, agenda en foto's, op servers in Europa en versleuteld met jouw sleutel. ${e(brand.name)} regelt de techniek.</p>
+<ol><li>Installeer de app Eigen Cloud: <a href="https://github.com/renevanes/own-cloud/releases/latest/download/Eigen-Cloud.apk">downloaden voor Android</a>.</li>
+<li>Kom terug naar deze pagina en tik op de knop:</li></ol>
+<p><a class="btn" href="${e(app)}">Openen in de app</a></p>
+<p class="muted">Lukt dat niet? Kies in de app <i>Nieuwe Eigen Cloud opzetten</i> en vul bij het kiezen van een aanbieder deze code in: <code>${e(i!.code)}</code></p>`
+: `<h1>Deze uitnodiging werkt niet meer</h1><p>${e(st.reason ?? "")}. Vraag ${e(brand.name)} om een nieuwe uitnodiging${brand.contact.email ? `: <a href="mailto:${e(brand.contact.email)}">${e(brand.contact.email)}</a>` : ""}.</p>`}
+</main></body></html>`;
   });
 
   // ── Hulpvragen ──

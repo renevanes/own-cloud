@@ -14,6 +14,8 @@ public final class Endpoints {
     public static volatile String DESEC = "https://desec.io/api/v1";
     /** DNS-over-HTTPS JSON resolvers, tried in order. */
     public static volatile String[] DOH = {"https://dns.quad9.net:5053/dns-query", "https://cloudflare-dns.com/dns-query"};
+    /** Public list of providers (aanbieders.json in the repository; EIGEN_AANBIEDERS_URL on the desktop). */
+    public static volatile String AANBIEDERS = "https://raw.githubusercontent.com/renevanes/own-cloud/main/aanbieders.json";
 
     /** Restores all defaults. */
     public static void reset() {
@@ -22,5 +24,6 @@ public final class Endpoints {
         UPCLOUD = "https://api.upcloud.com/1.3";
         DESEC = "https://desec.io/api/v1";
         DOH = new String[] {"https://dns.quad9.net:5053/dns-query", "https://cloudflare-dns.com/dns-query"};
+        AANBIEDERS = "https://raw.githubusercontent.com/renevanes/own-cloud/main/aanbieders.json";
     }
 }

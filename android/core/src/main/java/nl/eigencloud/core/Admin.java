@@ -435,18 +435,46 @@ public final class Admin {
         return true;
     }
 
-    /** Sends changed admin settings to the running cluster (signed). Returns false when no leader is reachable. */
-    public static boolean pushAdminConfig(Map<String, Object> c) throws IOException {
-        Status st = clusterStatus(c);
-        if (st.leaderUrl == null) return false;
+    /** Token of the DNS entry the service manages (type "desec", name "dienst"); null without one. */
+    static String dienstDnsToken(Map<String, Object> c) {
+        for (Object d : Json.listAt(c, "dns")) {
+            if ("desec".equals(Json.path(d, "type")) && "dienst".equals(Json.path(d, "name"))) return Json.str(d, "token");
+        }
+        return null;
+    }
+
+    /**
+     * Settings the console passes to the cloud (at launch and after every change), like consoleSettings in
+     * src/cluster/admin.ts: mail_relay, spf_extra, extra_dns, alert_email (if set), max_users and dienst_report
+     * (JSON {url, orderId, token} for health reports to the provider, or "").
+     */
+    public static Map<String, Object> consoleSettings(Map<String, Object> c, String defaultDienst) {
         Map<String, Object> settings = Json.obj();
         Map<String, Object> con = Json.map(c, "console");
-        if (con != null) {
-            settings.put("mail_relay", con.get("mailRelay") != null ? con.get("mailRelay") : "");
-            settings.put("spf_extra", con.get("spfExtra") != null ? con.get("spfExtra") : "");
-            settings.put("extra_dns", Json.stringify(con.get("extraDns") != null ? con.get("extraDns") : Json.list()));
-            if (Json.truthy(con.get("alertEmail"))) settings.put("alert_email", con.get("alertEmail"));
-        }
+        if (con == null) return settings;
+        settings.put("mail_relay", con.get("mailRelay") != null ? con.get("mailRelay") : "");
+        settings.put("spf_extra", con.get("spfExtra") != null ? con.get("spfExtra") : "");
+        settings.put("extra_dns", Json.stringify(con.get("extraDns") != null ? con.get("extraDns") : Json.list()));
+        if (Json.truthy(con.get("alertEmail"))) settings.put("alert_email", con.get("alertEmail"));
+        // Abonnement bij een aanbieder: hoeveel gebruikers, en waar de cloud zijn technische gezondheid meldt.
+        settings.put("max_users", Json.jsString(con.get("maxUsers") != null ? con.get("maxUsers") : (Object) 0L));
+        String token = dienstDnsToken(c);
+        String own = Json.str(con, "dienst", "url");
+        String url = (Json.truthy(own) ? own : defaultDienst == null ? "" : defaultDienst).replaceFirst("/$", "");
+        Object orderId = Json.path(con, "dienst", "orderId");
+        settings.put("dienst_report", Json.truthy(orderId) && Json.truthy(Json.path(con, "dienst", "applied")) && Json.truthy(token) && !url.isEmpty()
+                ? Json.stringify(Json.obj("url", url, "orderId", orderId, "token", token)) : "");
+        return settings;
+    }
+
+    /** {@link #pushAdminConfig(Map, String)} without a build-default service. */
+    public static boolean pushAdminConfig(Map<String, Object> c) throws IOException { return pushAdminConfig(c, ""); }
+
+    /** Sends changed admin settings to the running cluster (signed). Returns false when no leader is reachable. */
+    public static boolean pushAdminConfig(Map<String, Object> c, String defaultDienst) throws IOException {
+        Status st = clusterStatus(c);
+        if (st.leaderUrl == null) return false;
+        Map<String, Object> settings = consoleSettings(c, defaultDienst);
         Map<String, Object> update = Json.obj();
         putDefined(update, "stores", c, "stores");
         putDefined(update, "providers", c, "providers");

@@ -24,6 +24,29 @@ public class ConsoleExtrasTest {
 
     private static String get(String url) throws Exception { return Http.request("GET", url, null, null, 10_000).text(); }
 
+    private static Object post(String url, Object body) throws Exception {
+        Http.Response r = Http.request("POST", url, Http.headers("content-type", "application/json"), Bytes.utf8(Json.stringify(body)), 10_000);
+        T.check(r.ok(), "control " + url + " → " + r.status + " " + r.text());
+        return Json.parse(r.text());
+    }
+
+    /** The newest login code mailed after the first {@code seen} mails. */
+    private static String loginCode(String control, int seen) throws Exception {
+        for (int i = 0; i < 100; i++) {
+            List<Object> ms = Json.asList(Json.parse(get(control + "/mails")));
+            String code = null;
+            for (Object m : ms.subList(Math.min(seen, ms.size()), ms.size())) {
+                java.util.regex.Matcher mm = java.util.regex.Pattern.compile("inlogcode: (\\d{6})").matcher(Json.str(m, "data"));
+                if (mm.find()) code = mm.group(1);
+            }
+            if (code != null) return code;
+            Thread.sleep(50);
+        }
+        return null;
+    }
+
+    private static int mailCount(String control) throws Exception { return Json.asList(Json.parse(get(control + "/mails"))).size(); }
+
     public static void main(String[] args) {
         T.main("ConsoleExtrasTest", () -> {
             String moto = T.env("MOTO_URL");
@@ -141,6 +164,118 @@ public class ConsoleExtrasTest {
             T.check(Json.str(call(400, "POST", "/api/dienst/settle", null), "error").contains("niets open"), "nothing to settle");
             T.eq("vanes.nl", Json.str(call(200, "GET", "/api/dienst/authcode", null), "domain"), "authcode");
 
+            // ── C2. Aanbieders: lijst, huisstijl, uitnodiging, hulpvragen, berichten, extra gebruikers, gezondheid ──
+            String control = Json.str(info, "control"), dienst = Json.str(info, "url");
+            T.eq("https://vanes.example", Extras.cleanDienstUrl(" Vanes.Example/ "), "provider url: https added, lowercased, trailing slash off");
+            T.eq("https://x.nl/pad", Extras.cleanDienstUrl("https://x.nl:443/pad//"), "provider url: default port and slashes dropped");
+            T.eq("http://10.0.2.2:8080", Extras.cleanDienstUrl("http://10.0.2.2:8080/"), "provider url: http allowed for the emulator host");
+            T.throwsWith("begint met https://", () -> Extras.cleanDienstUrl("http://evil.example"), "provider url: plain http refused");
+            T.throwsWith("begint met https://", () -> Extras.cleanDienstUrl("ftp://nee"), "provider url: ftp refused");
+            T.throwsWith("geen geldig adres", () -> Extras.cleanDienstUrl("https://u:p@x.nl"), "provider url: no userinfo");
+            T.throwsWith("geen geldig adres", () -> Extras.cleanDienstUrl("https://x.nl/?a=1"), "provider url: no query");
+            T.throwsWith("geen geldig adres", () -> Extras.cleanDienstUrl("https://x.nl/#a"), "provider url: no hash");
+            try {
+                Endpoints.AANBIEDERS = "http://127.0.0.1:1/aanbieders.json";
+                List<Object> none = Json.listAt(call(200, "GET", "/api/aanbieders", null), "aanbieders");
+                T.eq(1, none.size(), "list unreachable: only the default");
+                T.eq(dienst, Json.str(none.get(0), "url"), "list unreachable: default provider");
+                T.eq("Eigen Cloud Dienst", Json.str(none.get(0), "naam"), "default provider name");
+                Endpoints.AANBIEDERS = control + "/aanbieders.json";
+                Map<String, Object> al = call(200, "GET", "/api/aanbieders", null);
+                List<Object> urls = new java.util.ArrayList<>();
+                for (Object a : Json.listAt(al, "aanbieders")) urls.add(Json.str(a, "url"));
+                T.eq(Json.list(dienst, "https://ander.example"), urls, "invalid entries skipped, default not doubled");
+                T.eq("NL", Json.str(al, "aanbieders", 0, "land"), "extra fields kept");
+                T.eq(null, al.get("gekozen"), "nothing chosen yet");
+            } finally {
+                Endpoints.reset();
+            }
+
+            // Huisstijl (met logo) en een uitnodigingscode bij de aanbieder
+            byte[] png = {(byte) 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0};
+            post(control + "/brand", Json.obj("name", "Van Es Cloud", "accentColor", "#123abc", "contact", Json.obj("email", "hulp@vanes.test"), "logoPng", Bytes.base64(png)));
+            Map<String, Object> br = call(200, "GET", "/api/aanbieder/brand?url=" + Bytes.encodeURIComponent(dienst), null);
+            T.eq("Van Es Cloud", br.get("name"), "brand name");
+            T.eq("#123abc", br.get("accentColor"), "brand colour");
+            T.eq("hulp@vanes.test", Json.str(br, "contact", "email"), "brand contact");
+            T.eq(dienst, br.get("url"), "brand url");
+            T.check(!Json.listAt(br, "bundles").isEmpty(), "brand carries the bundles");
+            T.eq("eigencloud.test", br.get("freeZone"), "brand carries the free zone");
+            T.eq("data:image/png;base64," + Bytes.base64(png), br.get("logo"), "logo as data URL");
+            T.check(Json.str(call(400, "GET", "/api/aanbieder/brand?url=" + Bytes.encodeURIComponent("http://elders.example"), null), "error").contains("https://"), "brand: https only");
+            String invite = Json.str(post(control + "/invite", Json.obj("label", "test")), "code");
+            T.eq(true, call(200, "GET", "/api/aanbieder/invite?url=" + Bytes.encodeURIComponent(dienst) + "&code=" + invite, null).get("valid"), "invite valid");
+            T.eq(false, call(200, "GET", "/api/aanbieder/invite?url=" + Bytes.encodeURIComponent(dienst) + "&code=NEPCODE1", null).get("valid"), "unknown invite not valid");
+            T.check(Json.str(call(400, "GET", "/api/aanbieder/invite?url=" + Bytes.encodeURIComponent(dienst) + "&code=x", null), "error").contains("klopt niet"), "malformed invite code");
+            T.check(Json.str(call(400, "POST", "/api/dienst/select", Json.obj("url", "https://ander.example")), "error").contains("al een abonnement"), "no switching with a running subscription");
+            call(400, "POST", "/api/dienst/select", Json.obj("url", dienst, "invite", "NEPCODE1"));
+            T.eq(null, Json.path(call(200, "GET", "/api/config", null), "dienst", "url"), "failed select changes nothing");
+            T.eq("Van Es Cloud", call(200, "POST", "/api/dienst/select", Json.obj("url", dienst + "/", "invite", invite)).get("name"), "select returns the brand");
+            conf = call(200, "GET", "/api/config", null);
+            T.eq(dienst, Json.str(conf, "dienst", "url"), "provider kept in the vault");
+            T.eq(invite, Json.str(conf, "dienst", "invite"), "invite kept in the vault");
+            T.eq(Json.str(o, "orderId"), Json.str(conf, "dienst", "orderId"), "existing order kept");
+            T.eq(true, Json.path(conf, "dienst", "loggedIn"), "login kept");
+            Map<String, Object> st2 = call(200, "GET", "/api/state", null);
+            T.eq(dienst, st2.get("aanbieder"), "state: chosen provider");
+            T.eq(true, st2.get("dienst"), "state: service offered");
+            T.eq("Van Es Cloud", call(200, "GET", "/api/dienst/brand", null).get("name"), "brand of the chosen provider");
+
+            // Hulpvraag stellen, antwoord van de aanbieder lezen, reageren
+            Map<String, Object> tk = call(200, "POST", "/api/dienst/tickets", Json.obj("subject", "Mail komt niet aan", "message", "Sinds vanochtend geen mail."));
+            String tid = Json.str(tk, "id");
+            T.check(tid != null, "ticket id");
+            post(control + "/staff-reply", Json.obj("ticket", tid, "message", "We kijken ernaar."));
+            Map<String, Object> tv = call(200, "GET", "/api/dienst/ticket?id=" + tid, null);
+            List<Object> from = new java.util.ArrayList<>();
+            for (Object x : Json.listAt(tv, "messages")) from.add(Json.str(x, "from"));
+            T.eq(Json.list("customer", "staff"), from, "customer question and staff answer");
+            T.eq(Json.str(o, "orderId"), Json.str(tv, "orderId"), "ticket linked to the order");
+            call(200, "POST", "/api/dienst/ticket/reply", Json.obj("id", tid, "message", "Dank je!"));
+            T.eq(3, Json.listAt(call(200, "GET", "/api/dienst/ticket?id=" + tid, null), "messages").size(), "reply added");
+            T.eq(1, Json.listAt(call(200, "GET", "/api/dienst/tickets", null), "tickets").size(), "one ticket");
+            T.check(Json.str(call(400, "GET", "/api/dienst/ticket?id=x", null), "error").contains("bestaat niet"), "bad ticket id");
+
+            // Bericht van de aanbieder
+            post(control + "/announcement", Json.obj("title", "Onderhoud zondag", "body", "Even geen mail tussen 2 en 3 uur.", "severity", "onderhoud"));
+            T.eq("Onderhoud zondag", Json.str(call(200, "GET", "/api/dienst/announcements", null), "announcements", 0, "title"), "announcement");
+
+            // Extra gebruikers: het aantal voor de cloud
+            long included = Json.num(call(200, "GET", "/api/dienst/billing", null), "users", "included").longValue();
+            Map<String, Object> us = call(200, "POST", "/api/dienst/users", Json.obj("count", 2));
+            T.eq(included + 2, Json.num(us, "maxUsers").longValue(), "maxUsers after buying users");
+            T.eq(2L, Json.num(us, "users", "extra").longValue(), "service reply passed through");
+            T.eq(included + 2, Json.num(call(200, "GET", "/api/config", null), "maxUsers").longValue(), "maxUsers in the config");
+
+            // Wat de cloud meekrijgt: het aantal gebruikers en waar hij zijn gezondheid meldt
+            Map<String, Object> vc = api.vault.config();
+            Map<String, Object> cs = Admin.consoleSettings(vc, api.dienstUrl);
+            T.eq(String.valueOf(included + 2), cs.get("max_users"), "settings: max_users");
+            Map<String, Object> rep = Json.parseObject((String) cs.get("dienst_report"));
+            T.eq(Json.list("url", "orderId", "token"), new java.util.ArrayList<Object>(rep.keySet()), "dienst_report fields in TS order");
+            T.eq(dienst, rep.get("url"), "dienst_report url");
+            T.eq(Json.str(o, "orderId"), rep.get("orderId"), "dienst_report order");
+            T.eq(Json.str(vc, "dns", 0, "token"), rep.get("token"), "dienst_report token = the service DNS token");
+            T.eq(Json.obj("url", dienst, "orderId", Json.str(o, "orderId"), "token", rep.get("token")), Extras.dienstReport(vc, api.dienstUrl), "dienstReport");
+            Map<String, Object> init = Console.initialSettings(vc, api.dienstUrl);
+            T.eq(cs.get("max_users"), init.get("max_users"), "initialSettings: max_users");
+            T.eq(cs.get("dienst_report"), init.get("dienst_report"), "initialSettings: dienst_report");
+            Map<String, Object> bare = Json.copy(vc);
+            Json.map(bare, "console").remove("maxUsers");
+            Json.map(bare, "console", "dienst").put("applied", false);
+            Map<String, Object> csb = Admin.consoleSettings(bare, api.dienstUrl);
+            T.eq("0", csb.get("max_users"), "settings: max_users 0 without subscription users");
+            T.eq("", csb.get("dienst_report"), "settings: no report before the kit is applied");
+            T.check(!Console.initialSettings(bare, api.dienstUrl).containsKey("max_users") && !Console.initialSettings(bare, api.dienstUrl).containsKey("dienst_report"), "initialSettings without users/report");
+            Json.map(bare, "console", "dienst").remove("url");
+            Json.map(bare, "console", "dienst").put("applied", true);
+            T.eq("", Admin.consoleSettings(bare, "").get("dienst_report"), "settings: no report without any provider url");
+            T.check(((String) Admin.consoleSettings(bare, dienst + "/").get("dienst_report")).contains("\"url\":\"" + dienst + "\""), "settings: build default without trailing slash");
+            // ...en dat token werkt echt bij de aanbieder
+            Http.Response h = Http.request("POST", rep.get("url") + "/v1/orders/" + rep.get("orderId") + "/health", Http.headers("content-type", "application/json", "authorization", "Token " + rep.get("token")),
+                    Bytes.utf8(Json.stringify(Json.obj("version", "1.8", "healthy", true, "problems", Json.list(), "storageUsedBytes", 1234, "users", 3, "nodes", Json.list()))), 10_000);
+            T.eq(200, h.status, "health report accepted by the provider (" + h.text() + ")");
+
             // ── D. Nieuw toestel: herstellen met alleen e-mail, code en herstelsleutel ──
             String masterKey = Json.str(api.vault.config(), "masterKey");
             Map<String, Object> dienstCfg = Json.copy(api.vault.config());
@@ -169,6 +304,28 @@ public class ConsoleExtrasTest {
             T.eq("vanes.nl", Json.str(rconf, "domain"), "recovered domain");
             T.eq(Json.str(first.vault.config(), "console", "dienst", "orderId"), Json.str(rconf, "dienst", "orderId"), "recovered service order");
             T.eq("ready", Json.str(call(200, "GET", "/api/dienst/billing", null), "status"), "billing works after recovery");
+            T.eq(null, Json.path(rconf, "dienst", "url"), "recovered at the build default: no provider url stored");
+            T.eq(included + 2, Json.num(rconf, "maxUsers").longValue(), "recovered maxUsers from the kit");
+
+            // ── E. Herstellen bij een gekozen aanbieder (versie zonder standaarddienst) ──
+            api = new ConsoleApi(new File(dir, "kluis-aanbieder.json"), cat, null);
+            T.eq(false, call(200, "GET", "/api/state", null).get("dienst"), "no default and no list: no service");
+            T.check(Json.str(call(400, "POST", "/api/recover/dienst/login", Json.obj("email", "rene@elders.example")), "error").contains("Kies eerst een aanbieder"), "no provider chosen");
+            T.check(Json.str(call(400, "POST", "/api/recover/dienst/login", Json.obj("email", "rene@elders.example", "url", "http://elders.example")), "error").contains("https://"), "recover: provider url checked");
+            int seen3 = mailCount(control);
+            call(200, "POST", "/api/recover/dienst/login", Json.obj("email", "rene@elders.example", "url", dienst + "/"));
+            String code3 = loginCode(control, seen3);
+            T.check(code3 != null, "recovery code mailed (chosen provider)");
+            call(200, "POST", "/api/recover/dienst/verify", Json.obj("code", code3));
+            call(200, "POST", "/api/setup/recover-dienst", Json.obj("masterKey", masterKey, "passphrase", "vier losse woorden hier"));
+            Map<String, Object> aconf = call(200, "GET", "/api/config", null);
+            T.eq(dienst, Json.str(aconf, "dienst", "url"), "recovered: provider url stored");
+            T.eq(included + 2, Json.num(aconf, "maxUsers").longValue(), "recovered: maxUsers");
+            Map<String, Object> st3 = call(200, "GET", "/api/state", null);
+            T.eq(true, st3.get("dienst"), "state: service via the vault's provider");
+            T.eq(dienst, st3.get("aanbieder"), "state: provider");
+            T.eq("ready", Json.str(call(200, "GET", "/api/dienst/billing", null), "status"), "billing via the vault's provider");
+            T.eq("Van Es Cloud", call(200, "GET", "/api/dienst/brand", null).get("name"), "brand via the vault's provider");
         });
     }
 }

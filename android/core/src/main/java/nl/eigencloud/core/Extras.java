@@ -139,8 +139,15 @@ public final class Extras {
 
     // ───────── Eigen Cloud Dienst ─────────
 
+    /** Bij welke aanbieder (dienst) hoort deze kluis: de gekozen aanbieder, anders de standaard van deze versie. */
+    public static String baseOf(Map<String, Object> c, String defaultBase) {
+        String url = Json.str(c, "console", "dienst", "url");
+        String b = url != null && !url.isEmpty() ? url : defaultBase == null ? "" : defaultBase;
+        return b.replaceFirst("/$", "");
+    }
+
     private static Object dienst(String base, String method, String path, Object body, String token) throws IOException {
-        if (base == null || base.isEmpty()) throw new IOException("De Eigen Cloud Dienst is in deze versie niet ingesteld");
+        if (base == null || base.isEmpty()) throw new IOException("Kies eerst een aanbieder");
         Map<String, String> h = Http.headers("accept", "application/json");
         if (body != null) h.put("content-type", "application/json");
         if (token != null) h.put("authorization", "Bearer " + token);
@@ -203,6 +210,7 @@ public final class Extras {
         if (auth != null && !auth.isEmpty()) dom.put("authCode", auth);
         Map<String, Object> body = Json.obj("bundle", b.get("bundle"), "domain", dom, "acceptTerms", true);
         if (("register".equals(mode) || "transfer".equals(mode)) && b.get("registrant") != null) body.put("registrant", b.get("registrant"));
+        if (Json.truthy(d.get("invite"))) body.put("invite", d.get("invite"));
         Object r = dienst(base, "POST", "/v1/orders", body, token);
         d.put("orderId", Json.str(r, "orderId"));
         d.put("bundle", b.get("bundle"));
@@ -233,7 +241,7 @@ public final class Extras {
      * Herstellen met alleen je herstelsleutel en je inlog bij de dienst: de opslag en de sleutels komen uit het
      * pakket. Geeft de beheerconfiguratie terug (al gemarkeerd als klaar, met de dienstgegevens erin).
      */
-    public static Map<String, Object> recoverViaDienst(String base, String email, String token, String masterKeyInput, Catalog catalog) throws IOException {
+    public static Map<String, Object> recoverViaDienst(String base, String defaultBase, String email, String token, String masterKeyInput, Catalog catalog) throws IOException {
         String key = Console.normalizeMasterKey(masterKeyInput);
         Object me = dienst(base, "GET", "/v1/me", null, token);
         Map<String, Object> order = null;
@@ -265,7 +273,12 @@ public final class Extras {
                 con.put("step", "klaar");
                 con.put("done", true);
                 con.put("keyConfirmed", true);
-                con.put("dienst", Json.obj("email", email, "token", token, "orderId", Json.str(order, "id"), "bundle", order.get("bundle"), "applied", true));
+                Map<String, Object> d = Json.obj();
+                // Bij een andere aanbieder dan de standaard van deze versie: die aanbieder onthouden.
+                if (base != null && !base.isEmpty() && !base.equals(defaultBase)) d.put("url", base);
+                d.putAll(Json.obj("email", email, "token", token, "orderId", Json.str(order, "id"), "bundle", order.get("bundle"), "applied", true));
+                con.put("dienst", d);
+                if (kit.get("users") != null) con.put("maxUsers", kit.get("users"));
                 return c;
             } catch (IOException e) {
                 last = e;
@@ -349,6 +362,7 @@ public final class Extras {
         if (Json.num(kit, "policy", "witnesses") != null) pol.put("witnesses", Json.num(kit, "policy", "witnesses"));
         Map<String, Object> con = console(c);
         con.put("preset", "dienst");
+        con.put("maxUsers", kit.get("users") != null ? kit.get("users") : (Object) 0L);
         Map<String, Object> dns = Json.map(kit, "dns");
         Map<String, Object> d0 = Json.obj("type", "desec", "name", "dienst", "token", dns.get("token"), "zone", dns.get("zone"), "api", dns.get("api"));
         if (dns.get("acme") != null) d0.put("acme", Json.copy(dns.get("acme")));
@@ -497,5 +511,207 @@ public final class Extras {
         if (id == null || id.isEmpty() || secret == null || secret.isEmpty()) return null;
         scw("POST", TEM + "/" + id + "/revoke", secret, Json.obj());
         return "Maildomein bij Scaleway ingetrokken";
+    }
+
+    // ───────── Aanbieders: kiezen, uitnodigingen, huisstijl ─────────
+
+    private static final Pattern SCHEME = Pattern.compile("^[a-z]+://", Pattern.CASE_INSENSITIVE);
+    private static final Pattern LOCAL_HOST = Pattern.compile("^(127\\.0\\.0\\.1|localhost|10\\.0\\.2\\.2)$");
+
+    /** Adres van een aanbieder: https (http alleen lokaal), zonder inlog, zoekdeel of #, zonder / aan het eind. */
+    public static String cleanDienstUrl(String raw) {
+        String v = (raw == null ? "" : raw).trim();
+        if (!SCHEME.matcher(v).find()) v = "https://" + v;
+        java.net.URI u;
+        try {
+            u = new java.net.URI(v);
+        } catch (java.net.URISyntaxException e) {
+            throw new IllegalArgumentException("Dat is geen geldig adres");
+        }
+        String host = u.getHost();
+        if (host == null || host.isEmpty() || u.getScheme() == null) throw new IllegalArgumentException("Dat is geen geldig adres");
+        host = host.toLowerCase(Locale.ROOT);
+        String scheme = u.getScheme().toLowerCase(Locale.ROOT);
+        boolean local = LOCAL_HOST.matcher(host).matches();
+        if (!scheme.equals("https") && !(scheme.equals("http") && local)) throw new IllegalArgumentException("Het adres van een aanbieder begint met https://");
+        if (u.getRawUserInfo() != null || (u.getRawQuery() != null && !u.getRawQuery().isEmpty()) || (u.getRawFragment() != null && !u.getRawFragment().isEmpty()))
+            throw new IllegalArgumentException("Dat is geen geldig adres");
+        int port = u.getPort();
+        boolean defaultPort = port == -1 || (scheme.equals("https") && port == 443) || (scheme.equals("http") && port == 80);
+        String path = u.getRawPath() == null ? "" : u.getRawPath();
+        return scheme + "://" + host + (defaultPort ? "" : ":" + port) + path.replaceFirst("/+$", "");
+    }
+
+    private static final Object AANBIEDERS_LOCK = new Object();
+    private static String aanbiedersFrom;
+    private static long aanbiedersAt;
+    private static List<Object> aanbiedersCache;
+
+    /**
+     * De openbare lijst van aanbieders (aanbieders.json in de repository): ongeldige regels overgeslagen, de
+     * standaardaanbieder van deze versie vooraan als hij er niet in staat. Zonder internet: alleen de standaard.
+     */
+    public static List<Object> aanbieders(String defaultBase) {
+        List<Object> list = null;
+        String from = Endpoints.AANBIEDERS;
+        synchronized (AANBIEDERS_LOCK) {
+            if (aanbiedersCache != null && from.equals(aanbiedersFrom) && System.currentTimeMillis() - aanbiedersAt < 3_600_000L) list = aanbiedersCache;
+        }
+        if (list == null) {
+            list = new ArrayList<>();
+            try {
+                Http.Response r = Http.request("GET", from, Http.headers("accept", "application/json"), null, 10_000);
+                if (r.ok()) {
+                    for (Object a : Json.asList(Json.parse(r.text()))) {
+                        if (Json.truthy(Json.path(a, "naam")) && Json.truthy(Json.path(a, "url"))) list.add(a);
+                    }
+                    synchronized (AANBIEDERS_LOCK) {
+                        aanbiedersCache = list;
+                        aanbiedersFrom = from;
+                        aanbiedersAt = System.currentTimeMillis();
+                    }
+                }
+            } catch (IOException | RuntimeException e) {
+                // geen internet of geen geldige lijst: alleen de standaard
+            }
+        }
+        List<Object> out = new ArrayList<>();
+        for (Object a : list) {
+            try {
+                Map<String, Object> m = Json.copy(Json.asMap(a));
+                m.put("url", cleanDienstUrl(Json.jsString(m.get("url"))));
+                out.add(m);
+            } catch (RuntimeException e) {
+                // ongeldige regel overslaan
+            }
+        }
+        String def = defaultBase == null ? "" : defaultBase.replaceFirst("/$", "");
+        if (!def.isEmpty()) {
+            boolean listed = false;
+            for (Object a : out) listed |= def.equals(Json.str(a, "url"));
+            if (!listed) out.add(0, Json.obj("naam", "Eigen Cloud Dienst", "url", def));
+        }
+        return out;
+    }
+
+    private static final Pattern LOGO_TYPE = Pattern.compile("^image/(png|svg\\+xml|jpeg|webp)");
+
+    /** Huisstijl van een aanbieder, met het logo als data-URL (zodat de app het zonder extra verzoeken toont). */
+    public static Map<String, Object> dienstBrand(String base) throws IOException {
+        Object info = dienst(base, "GET", "/v1/info", null, null);
+        Map<String, Object> brand = Json.map(info, "brand");
+        if (brand == null) brand = Json.obj();
+        String logo = null;
+        if (Json.truthy(brand.get("logoUrl"))) {
+            try {
+                Http.Response r = Http.request("GET", base + "/v1/brand/logo", null, null, 10_000);
+                String type = r.headers.get("content-type") == null ? "" : r.headers.get("content-type");
+                if (r.ok() && LOGO_TYPE.matcher(type).find() && r.body.length <= 200 * 1024) logo = "data:" + type.split(";")[0] + ";base64," + Bytes.base64(r.body);
+            } catch (IOException | RuntimeException e) {
+                // zonder logo
+            }
+        }
+        return Json.obj("url", base,
+                "name", firstNonNull(brand.get("name"), Json.path(info, "name"), "Eigen Cloud Dienst"),
+                "accentColor", brand.get("accentColor"),
+                "contact", brand.get("contact") != null ? brand.get("contact") : Json.obj(),
+                "termsUrl", firstNonNull(brand.get("termsUrl"), Json.path(info, "termsUrl"), null),
+                "privacyUrl", firstNonNull(brand.get("privacyUrl"), Json.path(info, "privacyUrl"), null),
+                "logo", logo,
+                "bundles", Json.path(info, "bundles") != null ? Json.path(info, "bundles") : Json.list(),
+                "freeZone", Json.path(info, "freeZone"));
+    }
+
+    private static Object firstNonNull(Object a, Object b, Object c) { return a != null ? a : b != null ? b : c; }
+
+    private static final Pattern INVITE_CODE = Pattern.compile("^[A-Za-z0-9-]{4,40}$");
+
+    public static Object dienstInvite(String base, String code) throws IOException {
+        if (code == null || !INVITE_CODE.matcher(code).matches()) throw new IllegalArgumentException("Deze code klopt niet");
+        return dienst(base, "GET", "/v1/invite/" + Bytes.encodeURIComponent(code), null, null);
+    }
+
+    /** Aanbieder kiezen (of wisselen zolang er nog niets besteld is). Met een uitnodigingscode wordt die meegestuurd bij bestellen. */
+    public static Map<String, Object> dienstSelect(Map<String, Object> c, String defaultBase, String url, String invite) throws IOException {
+        String base = cleanDienstUrl(url);
+        Map<String, Object> con = console(c);
+        Map<String, Object> cur = Json.map(con, "dienst");
+        if (Json.truthy(Json.path(cur, "orderId")) && !baseOf(c, defaultBase).equals(base))
+            throw new IllegalArgumentException("Je hebt al een abonnement bij een andere aanbieder. Overstappen regel je bij je abonnement.");
+        String code = null;
+        if (invite != null && !invite.isEmpty()) {
+            Object r = dienstInvite(base, invite);
+            if (!Json.truthy(Json.path(r, "valid"))) throw new IOException(Json.str(r, "reason") != null ? Json.str(r, "reason") : "Deze uitnodiging is niet (meer) geldig");
+            code = Json.str(r, "code") != null ? Json.str(r, "code") : invite;
+        }
+        Map<String, Object> brand = dienstBrand(base);
+        boolean same = baseOf(c, defaultBase).equals(base);
+        Map<String, Object> d = same && cur != null ? cur : Json.obj();
+        d.put("url", base);
+        if (code != null) d.put("invite", code);
+        con.put("dienst", d);
+        return brand;
+    }
+
+    // ───────── Hulpvragen, berichten en extra gebruikers ─────────
+
+    private static final Pattern TICKET_ID = Pattern.compile("^[A-Za-z0-9_-]{4,64}$");
+
+    private static String session(Map<String, Object> c) {
+        String token = Json.str(c, "console", "dienst", "token");
+        if (token == null || token.isEmpty()) throw new IllegalArgumentException("Log eerst in bij je aanbieder");
+        return token;
+    }
+
+    public static Object dienstTickets(String base, Map<String, Object> c) throws IOException {
+        return dienst(base, "GET", "/v1/tickets", null, session(c));
+    }
+
+    public static Object dienstTicket(String base, Map<String, Object> c, String id) throws IOException {
+        if (id == null || !TICKET_ID.matcher(id).matches()) throw new IllegalArgumentException("Deze hulpvraag bestaat niet");
+        String token = session(c);
+        return dienst(base, "GET", "/v1/tickets/" + id, null, token);
+    }
+
+    public static Object dienstNewTicket(String base, Map<String, Object> c, Map<String, Object> b) throws IOException {
+        String token = session(c);
+        Map<String, Object> body = Json.obj();
+        if (b != null && b.containsKey("subject")) body.put("subject", b.get("subject"));
+        if (b != null && b.containsKey("message")) body.put("message", b.get("message"));
+        String orderId = Json.str(c, "console", "dienst", "orderId");
+        if (orderId != null && !orderId.isEmpty()) body.put("orderId", orderId);
+        return dienst(base, "POST", "/v1/tickets", body, token);
+    }
+
+    public static Object dienstTicketReply(String base, Map<String, Object> c, String id, String message) throws IOException {
+        if (id == null || !TICKET_ID.matcher(id).matches()) throw new IllegalArgumentException("Deze hulpvraag bestaat niet");
+        String token = session(c);
+        return dienst(base, "POST", "/v1/tickets/" + id + "/messages", Json.obj("message", message), token);
+    }
+
+    public static Object dienstAnnouncements(String base, Map<String, Object> c) throws IOException {
+        return dienst(base, "GET", "/v1/announcements", null, session(c));
+    }
+
+    /** Extra gebruikers bijkopen of minderen; daarna het nieuwe aantal uit het pakket overnemen. */
+    public static Map<String, Object> dienstSetUsers(String base, Map<String, Object> c, Object count) throws IOException {
+        String[] o = order(c);
+        Object r = dienst(base, "POST", "/v1/orders/" + o[1] + "/users", Json.obj("count", count), o[0]);
+        Map<String, Object> kit = Json.asMap(dienst(base, "GET", "/v1/orders/" + o[1] + "/kit", null, o[0]));
+        Object users = kit != null && kit.get("users") != null ? kit.get("users") : (Object) 0L;
+        console(c).put("maxUsers", users);
+        Map<String, Object> out = Json.obj();
+        Map<String, Object> rm = Json.asMap(r);
+        if (rm != null) out.putAll(rm);
+        out.put("maxUsers", users);
+        return out;
+    }
+
+    /** Voor de cloud: waar hij zijn technische gezondheid meldt (alleen bij een abonnement bij een aanbieder). Null anders. */
+    public static Map<String, Object> dienstReport(Map<String, Object> c, String defaultBase) {
+        Map<String, Object> d = Json.map(c, "console", "dienst");
+        String token = Admin.dienstDnsToken(c);
+        if (d == null || !Json.truthy(d.get("orderId")) || !Json.truthy(d.get("applied")) || token == null || token.isEmpty()) return null;
+        return Json.obj("url", baseOf(c, defaultBase), "orderId", d.get("orderId"), "token", token);
     }
 }

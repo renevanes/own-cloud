@@ -434,13 +434,36 @@ async function stepKey() {
 
 let dienstInfoCache = null, lastCheckout = null;
 
+/** Huisstijl van de gekozen aanbieder toepassen (accentkleur), of terug naar de standaard. */
+function applyBrand(brand) {
+  const ok = brand?.accentColor && /^#[0-9a-f]{6}$/i.test(brand.accentColor);
+  if (ok) document.documentElement.style.setProperty("--accent", brand.accentColor);
+  else document.documentElement.style.removeProperty("--accent");
+}
+const brandLine = (b) => b?.name ? `<div class="byline">${b.logo ? `<img src="${esc(b.logo)}" alt="" class="blogo">` : ""}<span>Aangeboden door <b>${esc(b.name)}</b>${b.contact?.email ? ` · <a href="mailto:${esc(b.contact.email)}">${esc(b.contact.email)}</a>` : ""}${b.contact?.phone ? ` · ${esc(b.contact.phone)}` : ""}</span></div>` : "";
+
+let aanbiederKeuze = false;
 async function stepRegelen() {
   if (config.dienst?.orderId) return dienstProgress();
-  dienstInfoCache = state.dienst ? await api("/api/dienst/info").catch(() => null) : null;
+  // Uitnodigingslink geopend op de telefoon? Dan die aanbieder meteen kiezen.
+  const inv = (() => { try { return NATIVE?.pendingInvite ? JSON.parse(NATIVE.pendingInvite()) : null; } catch { return null; } })();
+  if (inv?.dienst && inv.code) {
+    try { await api("/api/dienst/select", { method: "POST", body: { url: inv.dienst, invite: inv.code } }); config = await api("/api/config"); }
+    catch (err) { alert(`De uitnodiging werkt niet: ${err.message}`); }
+    NATIVE.clearInvite?.();
+  }
+  const { aanbieders: list } = await api("/api/aanbieders").catch(() => ({ aanbieders: [] }));
+  if (list.length > 1 && !config.dienst?.url && !aanbiederKeuze) return chooseAanbieder(list);
+  aanbiederKeuze = false;
+  const chosen = config.dienst?.url || list[0]?.url || null;
+  dienstInfoCache = chosen ? await api(`/api/aanbieder/brand?url=${encodeURIComponent(chosen)}`).catch(() => null) : null;
+  applyBrand(dienstInfoCache);
   const info = dienstInfoCache;
   const q = config.quick === "scaleway";
   const dienstHtml = info ? `<section class="dienst">
-      <h2>${q ? "De Eigen Cloud Dienst" : "Wij regelen alles"}</h2>
+      <h2>${q ? esc(info.name) : `${esc(info.name)} regelt alles`}</h2>
+      ${brandLine(info)}
+      ${list.length > 1 && !config.dienst?.orderId ? `<p style="margin:0 0 10px"><button class="link" id="otherAanbieder">Andere aanbieder kiezen</button></p>` : ""}
       <p class="muted" style="margin:0 0 12px">Geen account en geen sleutels: servers en opslag in Amsterdam en Parijs, ${info.freeZone ? `een gratis adres (naam.${esc(info.freeZone)}) of je eigen domein` : "je domein"}, DNS en mail. Eén bedrag per maand, betalen met iDEAL, maandelijks opzegbaar. Je kunt later alles meenemen naar je eigen accounts.</p>
       <div class="presets">${info.bundles.map((b) => `<button class="preset" data-bundle="${esc(b.id)}">
         <b>${esc(b.title)}</b><span class="price">${eurStr(b.monthly)} per maand</span><p>${esc(b.description)}</p>
@@ -458,11 +481,55 @@ async function stepRegelen() {
     ${q ? quickHtml + dienstHtml : dienstHtml + quickHtml}
     <p class="advanced"><button class="link" id="zelf">Zelf per onderdeel kiezen</button> <span class="muted">— voor wie aanbieders wil combineren (Hetzner, UpCloud, Exoscale, eigen opslag)</span></p>`);
   $("#zelf").onclick = async () => { if (q) await api("/api/quick/off", { method: "POST" }); config = await api("/api/config"); go("opslag"); };
-  root.onclick = (e) => { const b = e.target.closest?.("[data-bundle]")?.dataset.bundle; if (b) dienstLogin(b); };
+  $("#otherAanbieder")?.addEventListener("click", () => chooseAanbieder(list));
+  root.onclick = async (e) => {
+    const b = e.target.closest?.("[data-bundle]")?.dataset.bundle;
+    if (!b) return;
+    // De standaardaanbieder zonder expliciete keuze: nu vastleggen bij welke aanbieder je bestelt.
+    if (!config.dienst?.url && info?.url) { try { await api("/api/dienst/select", { method: "POST", body: { url: info.url } }); config = await api("/api/config"); } catch { /* standaard blijft */ } }
+    dienstLogin(b);
+  };
   if (q) {
     $("#qnext").onclick = () => go(nextOf("regelen"));
     $("#qagain").onclick = () => { $("#quick").innerHTML = `<h2>Een andere sleutel van Scaleway</h2>${quickForm()}`; wireQuick(); };
   } else wireQuick();
+}
+
+/** Kiezen uit de aanbieders op de openbare lijst, of met een uitnodigingscode. */
+function chooseAanbieder(list) {
+  root.innerHTML = wizardShell("regelen", `
+    <h1>Kies een aanbieder</h1>
+    <p class="lead">Een aanbieder regelt je servers, opslag, adres en mail, voor een vast bedrag per maand. Je gegevens blijven versleuteld met jouw sleutel; ook de aanbieder kan ze niet lezen. Je kunt later overstappen.</p>
+    <div class="choices" id="alist">${list.map((a, i) => `<button class="choice aanbieder" data-i="${i}"><span class="alogo" id="alogo${i}"></span><span><b>${esc(a.naam)}</b><span class="muted">${esc([a.land, a.omschrijving].filter(Boolean).join(" · "))}</span><span class="muted aprice" id="aprice${i}"></span></span></button>`).join("")}</div>
+    <form class="fields" id="cf" style="margin-top:22px"><label>Heb je een uitnodigingscode?<div class="paste"><input name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="bijv. ABCD-1234"><button class="btn">Gebruiken</button></div></label><p class="msg"></p></form>
+    <p class="advanced"><button class="link" id="zelfKiezen">Zelf regelen, zonder aanbieder</button></p>`);
+  list.forEach(async (a, i) => {
+    try {
+      const b = await api(`/api/aanbieder/brand?url=${encodeURIComponent(a.url)}`);
+      if (b.logo && $(`#alogo${i}`)) $(`#alogo${i}`).innerHTML = `<img src="${esc(b.logo)}" alt="">`;
+      const from = (b.bundles ?? []).map((x) => Number(x.monthly?.value)).filter((n) => n > 0).sort((x, y) => x - y)[0];
+      if (from && $(`#aprice${i}`)) $(`#aprice${i}`).textContent = `vanaf ${eurStr({ currency: "EUR", value: from.toFixed(2) })} per maand`;
+    } catch { if ($(`#aprice${i}`)) $(`#aprice${i}`).textContent = "nu niet bereikbaar"; }
+  });
+  $("#alist").onclick = async (e) => {
+    const i = e.target.closest?.("[data-i]")?.dataset.i;
+    if (i === undefined) return;
+    try { await api("/api/dienst/select", { method: "POST", body: { url: list[Number(i)].url } }); config = await api("/api/config"); stepRegelen(); }
+    catch (err) { formMsg($("#cf"), err.message); }
+  };
+  $("#cf").onsubmit = async (e) => {
+    e.preventDefault();
+    const code = e.target.code.value.trim();
+    for (const a of list) {
+      const r = await api(`/api/aanbieder/invite?url=${encodeURIComponent(a.url)}&code=${encodeURIComponent(code)}`).catch(() => null);
+      if (r?.valid) {
+        try { await api("/api/dienst/select", { method: "POST", body: { url: a.url, invite: code } }); config = await api("/api/config"); return stepRegelen(); }
+        catch (err) { return formMsg(e.target, err.message); }
+      }
+    }
+    formMsg(e.target, "Deze code kennen we bij geen enkele aanbieder. Gebruik de link uit je uitnodiging, of kies hierboven.");
+  };
+  $("#zelfKiezen").onclick = () => { aanbiederKeuze = true; stepRegelen(); };
 }
 
 function quickForm() {
@@ -1048,7 +1115,12 @@ async function renderAbo(msg) {
   catch (err) { box.innerHTML = `<h2>Abonnement</h2><p class="msg err">${esc(err.message)}</p>`; return; }
   const problem = b.status === "payment_problem";
   const cancelled = b.status === "cancelled";
-  box.innerHTML = `<h2>Abonnement</h2>
+  const [brand, ann] = await Promise.all([api("/api/dienst/brand").catch(() => null), api("/api/dienst/announcements").catch(() => ({ announcements: [] }))]);
+  applyBrand(brand);
+  const users = b.users ?? null;
+  box.innerHTML = `${(ann.announcements ?? []).map((a) => `<div class="note ${a.severity === "storing" ? "warn" : ""} bericht"><b>${esc(a.title)}</b>${a.body ? `<br>${esc(a.body)}` : ""}${a.startsAt || a.endsAt ? `<br><small class="muted">${a.startsAt ? "Vanaf " + day(a.startsAt) : ""}${a.endsAt ? " tot " + day(a.endsAt) : ""}</small>` : ""}</div>`).join("")}
+    <h2>Abonnement</h2>
+    ${brandLine(brand)}
     <div class="panel abo">
       <div><b>${esc(b.bundle.title)}</b> · ${eurStr(b.bundle.monthly)} per maand<br>
         <span class="muted">${cancelled ? (b.endsAt ? `Opgezegd; loopt tot ${day(b.endsAt)}` : "Opgezegd") : b.nextPaymentDate ? `Volgende betaling ${day(b.nextPaymentDate)}` : ""}${b.mandate ? ` · ${esc(b.mandate.label ?? b.mandate.method)}` : ""}</span></div>
@@ -1058,8 +1130,11 @@ async function renderAbo(msg) {
         ${!cancelled ? `<button class="btn" data-a="bundle">Ander pakket</button><button class="btn" data-a="payment-method">Betaalmethode wijzigen</button>` : ""}
         ${b.canResume ? `<button class="btn primary" data-a="resume">Toch doorgaan</button>` : ""}
         ${b.domainTransferable ? `<button class="btn" data-a="authcode">Verhuiscode domein</button>` : ""}
+        ${users && users.extraUserMonthly && !cancelled ? `<button class="btn" data-a="users">Gebruikers</button>` : ""}
+        <button class="btn" data-a="help">Hulp vragen</button>
         ${!cancelled ? `<button class="btn danger" data-a="cancel">Opzeggen</button>` : ""}
       </div>
+      ${users ? (() => { const n = (users.included ?? 1) + (users.extra ?? 0); return `<p class="muted" style="margin:0"><small>Ruimte voor ${n} ${n === 1 ? "gebruiker" : "gebruikers"} in je cloud${users.extra ? ` (waarvan ${users.extra} bijgekocht)` : ""}.</small></p>`; })() : ""}
       <div id="aboExtra"></div>
       <p class="msg ${msg?.ok ? "ok" : msg ? "err" : ""}" id="amsg">${esc(msg?.text ?? "")}</p>
     </div>
@@ -1073,6 +1148,19 @@ async function renderAbo(msg) {
     if (inv) return showInvoice(inv).catch(fail);
     const a = e.target.closest?.("[data-a]")?.dataset.a;
     if (!a) return;
+    if (a === "users") {
+      const price = users.extraUserMonthly;
+      extra.innerHTML = `<form class="fields" id="uf"><label>Extra gebruikers bovenop de ${users.included} in je pakket<input type="number" name="count" min="0" max="50" value="${users.extra ?? 0}"></label>
+        <p class="muted" style="margin:0"><small>${eurStr(price)} per extra gebruiker per maand. Je kunt ze meteen toevoegen in je cloud (Instellingen → Gebruikers).</small></p>
+        <div><button class="btn primary">Opslaan</button></div></form>`;
+      $("#uf").onsubmit = async (ev) => {
+        ev.preventDefault();
+        try { const r = await busy($("#uf button"), () => api("/api/dienst/users", { method: "POST", body: { count: Number($("#uf").count.value) } })); config = await api("/api/config"); renderAbo({ ok: true, text: `Je cloud heeft nu ruimte voor ${r.maxUsers} gebruikers.` }); }
+        catch (err) { fail(err); }
+      };
+      return;
+    }
+    if (a === "help") return helpPanel(extra, fail);
     if (a === "bundle") {
       extra.innerHTML = `<form class="fields" id="bf"><fieldset class="radios">${b.bundles.map((x) => `<label class="check"><input type="radio" name="bundle" value="${esc(x.id)}" ${x.current ? "checked" : ""}> ${esc(x.title)} — ${eurStr(x.monthly)} per maand${x.current ? " (nu)" : ""}</label>`).join("")}</fieldset>
         <p class="muted" style="margin:0"><small>Meer servers kun je meteen gebruiken; het nieuwe bedrag geldt vanaf de volgende betaling.</small></p>
@@ -1092,6 +1180,36 @@ async function renderAbo(msg) {
       renderAbo({ ok: true, text: a === "cancel" ? `Opgezegd. Je cloud loopt door tot ${r.endsAt ? day(r.endsAt) : "het einde van de periode"}.` : a === "resume" ? "Je abonnement loopt weer door." : "Gelukt." });
     } catch (err) { fail(err); }
   };
+}
+
+/** Hulpvragen aan je aanbieder: nieuwe vraag, eerdere vragen en antwoorden. */
+async function helpPanel(box, fail) {
+  let list;
+  try { list = (await api("/api/dienst/tickets")).tickets ?? []; } catch (err) { return fail(err); }
+  const STATUS = { open: "wacht op antwoord", beantwoord: "beantwoord", answered: "beantwoord", closed: "gesloten", gesloten: "gesloten" };
+  box.innerHTML = `<form class="fields" id="tf"><h3 style="margin:0">Nieuwe vraag</h3>
+      <label>Onderwerp<input name="subject" maxlength="120" required></label>
+      <label>Je vraag<textarea name="message" rows="4" maxlength="5000" required></textarea></label>
+      <div><button class="btn primary">Versturen</button></div></form>
+    ${list.length ? `<h3>Eerdere vragen</h3><ul class="items">${list.map((t) => `<li><b>${esc(t.subject)}</b><span class="sub">${esc(t.statusLabel ?? STATUS[t.status] ?? t.status ?? "")}${t.updatedAt ? " · " + day(t.updatedAt) : ""}</span><span class="end"><button class="link" data-t="${esc(t.id)}">Openen</button></span></li>`).join("")}</ul>` : ""}
+    <div id="tview"></div>`;
+  $("#tf").onsubmit = async (e) => {
+    e.preventDefault();
+    try { await busy($("#tf button"), () => api("/api/dienst/tickets", { method: "POST", body: { subject: e.target.subject.value, message: e.target.message.value } })); helpPanel(box, fail); }
+    catch (err) { fail(err); }
+  };
+  box.querySelectorAll("[data-t]").forEach((btn) => btn.onclick = async () => {
+    try {
+      const t = await api(`/api/dienst/ticket?id=${encodeURIComponent(btn.dataset.t)}`);
+      $("#tview").innerHTML = `<div class="panel"><b>${esc(t.subject)}</b>${(t.messages ?? []).map((m) => `<div class="tmsg ${m.from === "customer" ? "me" : ""}"><small class="muted">${esc(m.name ?? (m.from === "customer" ? "Jij" : "Aanbieder"))} · ${day(m.at)}</small><p>${esc(m.body ?? "")}</p></div>`).join("")}
+        <form class="fields" id="rf"><label>Reageren<textarea name="message" rows="3" required></textarea></label><div><button class="btn">Versturen</button></div></form></div>`;
+      $("#rf").onsubmit = async (e) => {
+        e.preventDefault();
+        try { await busy($("#rf button"), () => api("/api/dienst/ticket/reply", { method: "POST", body: { id: t.id, message: e.target.message.value } })); btn.click(); }
+        catch (err) { fail(err); }
+      };
+    } catch (err) { fail(err); }
+  });
 }
 
 async function renderDash() {

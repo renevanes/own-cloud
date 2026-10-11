@@ -267,6 +267,85 @@ test("console: gratis deSEC-account en naam.dedyn.io, daarna alles via de Eigen 
     assert.equal((await c("GET", "/api/dienst/billing")).json.status, "ready");
   });
 
+  await t.test("aanbieder: lijst, huisstijl, uitnodiging, hulpvragen, berichten, extra gebruikers, gezondheid", async () => {
+    // De openbare lijst van aanbieders (normaal aanbieders.json op GitHub)
+    const list = http.createServer((_q, r) => { r.writeHead(200, { "content-type": "application/json" }); r.end(JSON.stringify([{ naam: "Dienst Test", url: PUBLIC, land: "NL" }, { naam: "Kapot", url: "ftp://nee" }, { naam: "Ander", url: "https://ander.example" }])); });
+    await new Promise<void>((r) => list.listen(0, "127.0.0.1", () => r()));
+    process.env.EIGEN_AANBIEDERS_URL = `http://127.0.0.1:${(list.address() as { port: number }).port}/aanbieders.json`;
+    t.after(() => { list.close(); delete process.env.EIGEN_AANBIEDERS_URL; });
+    let r = await c("GET", "/api/aanbieders");
+    assert.deepEqual(r.json.aanbieders.map((a: any) => a.url), [PUBLIC, "https://ander.example"], "ongeldige regels overgeslagen, standaard niet dubbel");
+
+    // Huisstijl en een uitnodigingscode bij de aanbieder
+    const { updateBrand } = await import("../src/broker/brand.js");
+    updateBrand(broker.ctx, { name: "Van Es Cloud", accentColor: "#123abc", contact: { email: "hulp@vanes.test" } });
+    r = await c("GET", `/api/aanbieder/brand?url=${encodeURIComponent(PUBLIC)}`);
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.name, "Van Es Cloud");
+    assert.equal(r.json.accentColor, "#123abc");
+    assert.ok(r.json.bundles.length >= 1);
+    const staff = await import("../src/broker/staff.js");
+    const owner = staff.ensureOwner(broker.ctx, "eigenaar@dienst.test", "test") as any;
+    const support = await import("../src/broker/support.js");
+    const inv = support.createInvite(broker.ctx, owner ?? broker.ctx.db.prepare("SELECT * FROM staff LIMIT 1").get(), { label: "test" });
+    r = await c("GET", `/api/aanbieder/invite?url=${encodeURIComponent(PUBLIC)}&code=${inv.code}`);
+    assert.equal(r.json.valid, true);
+    // De gedeelde link opent een pagina met een knop naar de app
+    const page = await (await fetch(`${PUBLIC}/uitnodiging/${inv.code}`)).text();
+    assert.match(page, /Je bent uitgenodigd door Van Es Cloud/);
+    assert.ok(page.includes(`eigencloud://uitnodiging?dienst=${encodeURIComponent(PUBLIC)}&amp;code=${inv.code}`));
+    assert.match(await (await fetch(`${PUBLIC}/uitnodiging/NEPCODE1`)).text(), /werkt niet meer/);
+    assert.match((await c("POST", "/api/dienst/select", { url: "https://ander.example" })).json.error, /al een abonnement/, "wisselen kan niet met een lopend abonnement");
+    r = await c("POST", "/api/dienst/select", { url: PUBLIC, invite: inv.code });
+    assert.equal(r.status, 200, r.text);
+    let conf = (await c("GET", "/api/config")).json;
+    assert.equal(conf.dienst.url, PUBLIC);
+    assert.equal(conf.dienst.invite, inv.code);
+    assert.equal(conf.dienst.orderId, orderId, "bestaande bestelling blijft");
+
+    // Hulpvraag stellen, antwoord van de aanbieder lezen, reageren
+    r = await c("POST", "/api/dienst/tickets", { subject: "Mail komt niet aan", message: "Sinds vanochtend geen mail." });
+    assert.equal(r.status, 200, r.text);
+    const tid = r.json.id;
+    const trow = broker.ctx.db.prepare("SELECT * FROM tickets WHERE id = ?").get(tid) as any;
+    await support.staffReply(broker.ctx, broker.ctx.db.prepare("SELECT * FROM staff LIMIT 1").get() as any, trow, { message: "We kijken ernaar." });
+    r = await c("GET", `/api/dienst/ticket?id=${tid}`);
+    assert.deepEqual(r.json.messages.map((m: any) => m.from), ["customer", "staff"]);
+    assert.equal((await c("POST", "/api/dienst/ticket/reply", { id: tid, message: "Dank je!" })).status, 200);
+    assert.equal((await c("GET", "/api/dienst/tickets")).json.tickets.length, 1);
+
+    // Bericht van de aanbieder
+    support.createAnnouncement(broker.ctx, null, { title: "Onderhoud zondag", body: "Even geen mail tussen 2 en 3 uur.", severity: "onderhoud" });
+    r = await c("GET", "/api/dienst/announcements");
+    assert.equal(r.json.announcements[0].title, "Onderhoud zondag");
+
+    // Extra gebruikers: Mollie-bedrag en het aantal voor de cloud
+    const included = (await c("GET", "/api/dienst/billing")).json.users.included;
+    r = await c("POST", "/api/dienst/users", { count: 2 });
+    assert.equal(r.status, 200, r.text);
+    const before = included;
+    assert.equal(r.json.maxUsers, included + 2);
+    assert.equal((await c("GET", "/api/config")).json.maxUsers, included + 2);
+
+    // Wat de cloud meekrijgt: het aantal gebruikers en waar hij zijn gezondheid meldt
+    const { consoleSettings } = await import("../src/cluster/admin.js");
+    const vaultMod = await import("../src/console/vault.js");
+    const v = new vaultMod.Vault(process.env.EIGEN_VAULT!);
+    v.unlock("vier losse woorden hier");
+    // (het eerdere deel nam het pakket over op een losse kopie van de kluis; hier opnieuw, zoals na "toepassen")
+    const kit = await (await fetch(`${PUBLIC}/v1/orders/${orderId}/kit`, { headers: { authorization: `Bearer ${v.config!.console.dienst!.token}` } })).json() as any;
+    v.config!.dns = [{ type: "desec", name: "dienst", token: kit.dns.token, zone: kit.dns.zone, api: kit.dns.api }];
+    v.config!.console.dienst = { ...v.config!.console.dienst, applied: true };
+    const cs = consoleSettings(v.config! as any);
+    assert.equal(cs.max_users, String(before + 2));
+    const rep = JSON.parse(cs.dienst_report);
+    assert.equal(rep.url, PUBLIC);
+    assert.equal(rep.orderId, orderId);
+    // ...en dat token werkt echt bij de aanbieder
+    const h = await fetch(`${PUBLIC}/v1/orders/${orderId}/health`, { method: "POST", headers: { "content-type": "application/json", authorization: `Token ${rep.token}` }, body: JSON.stringify({ version: "1.8", healthy: true, problems: [], storageUsedBytes: 1234, users: 3, nodes: [] }) });
+    assert.equal(h.status, 200, await h.text());
+  });
+
   await t.test("herstellen via de dienst op een nieuw toestel (e-mail, code, sleutel)", async () => {
     process.env.EIGEN_VAULT = path.join(base, "kluis-nieuw.json");
     const { buildConsole: build2 } = await import(`../src/console/server.js?nieuw=${Date.now()}`);

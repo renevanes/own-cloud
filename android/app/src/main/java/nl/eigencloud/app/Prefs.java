@@ -17,6 +17,11 @@ final class Prefs {
     static final String NOTIFY_HEALTH = "notifyHealth";
     static final String UPDATES = "updates";
     static final String AUTO_INSTALL = "autoInstall";
+    /** Laatst geopende Eigen Cloud Dienst (beheer voor aanbieders). */
+    static final String DIENST_URL = "dienst.url";
+    /** Uitnodiging van een aanbieder (via een eigencloud://uitnodiging-link), tot de console hem heeft verwerkt. */
+    static final String INVITE_DIENST = "invite.dienst";
+    static final String INVITE_CODE = "invite.code";
 
     static SharedPreferences get(Context c) { return c.getApplicationContext().getSharedPreferences("eigen", Context.MODE_PRIVATE); }
 

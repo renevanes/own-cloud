@@ -66,6 +66,7 @@ public final class MainActivity extends Activity {
         web.setDownloadListener((url, ua, disposition, mime, length) -> download(url, disposition, mime));
         if (b != null) web.restoreState(b);
         else open(getIntent());
+        if (b == null) invite(getIntent());
         // Altijd inplannen: ook zonder cloud (tijdens het opzetten) moet de app zichzelf bijwerken.
         SyncJob.schedule(this);
         WhatsNew.maybeShow(this);
@@ -74,6 +75,8 @@ public final class MainActivity extends Activity {
     @Override
     protected void onNewIntent(Intent i) {
         super.onNewIntent(i);
+        setIntent(i);
+        if (invite(i)) return; // de huidige pagina blijft staan; de console gaat erboven open
         open(i);
     }
 
@@ -111,6 +114,39 @@ public final class MainActivity extends Activity {
         if (cloud == null) { web.loadUrl(Assets.ORIGIN + "/start.html"); return; }
         String hash = i != null ? i.getStringExtra(EXTRA_HASH) : null;
         web.loadUrl(cloud + "/" + (hash != null && hash.startsWith("#") ? hash : ""));
+    }
+
+    /**
+     * Uitnodiging van een aanbieder: {@code eigencloud://uitnodiging?dienst=<https-adres, url-gecodeerd>&code=<code>}.
+     * Wordt bewaard tot de console hem ophaalt ({@code EigenNative.pendingInvite()}), en de console gaat open.
+     */
+    private boolean invite(Intent i) {
+        if (i == null || !Intent.ACTION_VIEW.equals(i.getAction()) || i.getData() == null) return false;
+        if ((i.getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) return false; // uit "recente apps": al verwerkt
+        Uri u = i.getData();
+        if (!"eigencloud".equals(u.getScheme()) || !"uitnodiging".equals(u.getHost())) return false;
+        String dienst = validDienst(u.getQueryParameter("dienst"));
+        String code = u.getQueryParameter("code");
+        if (dienst == null || code == null || !code.matches("[A-Za-z0-9-]{4,40}")) {
+            Toast.makeText(this, "Deze uitnodigingslink klopt niet. Vraag je aanbieder om een nieuwe.", Toast.LENGTH_LONG).show();
+            return true;
+        }
+        Prefs.setStr(this, Prefs.INVITE_DIENST, dienst);
+        Prefs.setStr(this, Prefs.INVITE_CODE, code);
+        Toast.makeText(this, "Uitnodiging van " + Uri.parse(dienst).getHost(), Toast.LENGTH_SHORT).show();
+        ConsoleActivity.open(this);
+        return true;
+    }
+
+    /** Alleen een https-adres zonder inlognaam, query of anker; zonder / aan het eind. */
+    static String validDienst(String s) {
+        if (s == null) return null;
+        Uri d = Uri.parse(s.trim());
+        if (!"https".equalsIgnoreCase(d.getScheme()) || d.getHost() == null || d.getHost().isEmpty() || d.getUserInfo() != null
+                || d.getQuery() != null || d.getFragment() != null) return null;
+        String path = d.getPath() == null ? "" : d.getPath().replaceAll("/+$", "");
+        if (!path.isEmpty() && !path.matches("(/[A-Za-z0-9._~-]+)+")) return null;
+        return "https://" + d.getHost().toLowerCase(java.util.Locale.ROOT) + (d.getPort() == -1 ? "" : ":" + d.getPort()) + path;
     }
 
     private boolean isCloud(Uri u) {
@@ -263,7 +299,8 @@ public final class MainActivity extends Activity {
                     "notify", Json.obj("mail", Prefs.flag(c, Prefs.NOTIFY_MAIL), "health", Prefs.flag(c, Prefs.NOTIFY_HEALTH), "permitted", Notify.allowed(c)),
                     "updates", Json.obj("on", Prefs.flag(c, Prefs.UPDATES), "status", Updater.status(c)),
                     "sync", Json.obj("last", Prefs.num(c, "sync.last"), "error", Prefs.str(c, "sync.error")),
-                    "biometric", Biometrics.available(c), "console", ConsoleBackend.get(c).vault.exists()));
+                    "biometric", Biometrics.available(c), "console", ConsoleBackend.get(c).vault.exists(),
+                    "dienst", Prefs.str(c, Prefs.DIENST_URL)));
         }
 
         @JavascriptInterface
@@ -302,6 +339,22 @@ public final class MainActivity extends Activity {
         public void openConsole() {
             if (!trusted()) return;
             ConsoleActivity.open(MainActivity.this);
+        }
+
+        /** Voor aanbieders: het beheer van je Eigen Cloud Dienst openen. Bij een fout komt er een event {type:"dienst", error}. */
+        @JavascriptInterface
+        public void openDienst(String url) {
+            if (!trusted()) return;
+            main.post(() -> {
+                try {
+                    String u = DienstActivity.normalize(url);
+                    Prefs.setStr(MainActivity.this, Prefs.DIENST_URL, u);
+                    DienstActivity.open(MainActivity.this, u);
+                    event(Json.obj("type", "dienst", "url", u));
+                } catch (IllegalArgumentException e) {
+                    event(Json.obj("type", "dienst", "error", e.getMessage()));
+                }
+            });
         }
 
         @JavascriptInterface

@@ -72,6 +72,32 @@
     if (confirm("De app helemaal opnieuw instellen?\n\nDe app vergeet je cloud, je inlog, de beheerkluis en alle instellingen, alsof hij net is geïnstalleerd. Je cloud zelf en je foto's daarin blijven bestaan. Voor het beheer heb je daarna je herstelsleutel nodig.")) phone.resetApp("all");
   });
 
+  // ── Voor aanbieders: beheer van je Eigen Cloud Dienst ──
+  var dienstForm = $("#dienstForm");
+  function dienstMsg(text) {
+    var m = dienstForm.querySelector(".msg");
+    m.textContent = text || "";
+    m.className = text ? "msg err" : "msg";
+  }
+  $("#dienstOpen").addEventListener("click", function () {
+    if (!phone.openDienst) { dienstMsg("Werk de app bij om het beheer van je dienst te openen."); dienstForm.hidden = false; return; }
+    dienstForm.address.value = (info.dienst || "").replace(/^https:\/\//, "");
+    dienstMsg("");
+    dienstForm.hidden = false;
+    $("#dienstOpen").hidden = true;
+    dienstForm.address.focus();
+  });
+  $("#dienstCancel").addEventListener("click", function () {
+    dienstForm.hidden = true;
+    $("#dienstOpen").hidden = false;
+    dienstMsg("");
+  });
+  dienstForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    dienstMsg("");
+    if (phone.openDienst) phone.openDienst(dienstForm.address.value);
+  });
+
   var form = $("#connect");
   form.addEventListener("submit", function (e) {
     e.preventDefault();
@@ -87,6 +113,13 @@
       updMsg = d.error || (d.installing ? "Versie " + d.installing + " wordt geïnstalleerd…" : d.type === "update" && !d.available ? "Je hebt de nieuwste versie." : "");
       $("#check").disabled = false; $("#install").disabled = false;
       reload();
+      return;
+    }
+    if (d.type === "dienst") {
+      if (d.error) { dienstMsg(d.error); return; }
+      info.dienst = d.url;
+      dienstForm.hidden = true;
+      $("#dienstOpen").hidden = false;
       return;
     }
     if (d.type !== "connect") return;

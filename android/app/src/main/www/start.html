@@ -60,6 +60,17 @@
         </dl>
       </div>
 
+      <div class="block" id="provider">
+        <h2>Voor aanbieders</h2>
+        <p>Bied je Eigen Cloud aan anderen aan? Open hier het beheer van je dienst.</p>
+        <div class="actions"><button class="btn" id="dienstOpen">Beheer van je dienst openen</button></div>
+        <form class="fields" id="dienstForm" hidden>
+          <label>Adres van je dienst<input name="address" inputmode="url" autocapitalize="off" autocomplete="url" spellcheck="false" placeholder="dienst.jouwbedrijf.nl" required></label>
+          <p class="msg" role="status"></p>
+          <div class="actions"><button class="btn primary">Openen</button><button class="btn" type="button" id="dienstCancel">Annuleren</button></div>
+        </form>
+      </div>
+
       <div class="block">
         <h2>Privacy</h2>
         <p>De app praat alleen met je eigen cloud, met de aanbieders die je zelf kiest, en met GitHub om nieuwe versies op te halen. Geen Google-diensten, geen advertenties, geen statistieken. De sleutels voor het beheer staan versleuteld op deze telefoon; schermafbeeldingen van het beheer zijn geblokkeerd.</p>

@@ -33,7 +33,10 @@ public final class ConsoleApi {
     private final Listener listener;
     private long lastUse;
     /** Inloggen bij de dienst vóór er een kluis is (herstellen op een nieuw apparaat); alleen in het geheugen. */
-    private volatile String recoverEmail, recoverToken;
+    private volatile String recoverEmail, recoverToken, recoverBase;
+    /** Hoeveel aanbieders de openbare lijst had (bij de laatste keer ophalen). */
+    private volatile int knownAanbieders;
+    private final Map<String, Object[]> brandCache = new HashMap<>(); // base → {at (Long), brand}
 
     /** Base URL of the Eigen Cloud Dienst (central paid service); empty = not offered. */
     public volatile String dienstUrl = "";
@@ -77,7 +80,7 @@ public final class ConsoleApi {
         }
         try {
             first.term = term;
-            first.initialSettings = term > 0 ? null : Console.initialSettings(c);
+            first.initialSettings = term > 0 ? null : Console.initialSettings(c, dienstUrl);
             Admin.Provisioned r = Admin.provisionFirstNode(c, first);
             setStep("server", "done", r.info.ipv4 != null ? "IP-adres " + r.info.ipv4 : "");
             Console.markLaunched(c, first, r);
@@ -163,7 +166,8 @@ public final class ConsoleApi {
             Map<String, Object> copy = Json.copy(c);
             Thread t = new Thread(() -> {
                 try { Admin.saveAdminCopy(copy); } catch (RuntimeException ignored) { /* volgende keer */ }
-                try { Admin.pushAdminConfig(copy); } catch (IOException | RuntimeException ignored) { /* volgende keer */ }
+                String def = dienstUrl;
+                try { Admin.pushAdminConfig(copy, def); } catch (IOException | RuntimeException ignored) { /* volgende keer */ }
             }, "eigen-save");
             t.setDaemon(true);
             t.start();
@@ -218,8 +222,10 @@ public final class ConsoleApi {
                 "domainMode", con == null || con.get("domainMode") == null ? "own" : con.get("domainMode"),
                 "desec", Json.map(con, "desec") == null ? null : Json.obj("email", Json.str(con, "desec", "email"), "at", Json.path(con, "desec", "at")),
                 "quick", con == null ? null : con.get("quick"),
-                "dienst", Json.map(con, "dienst") == null ? null : Json.obj("email", Json.str(con, "dienst", "email"), "loggedIn", Json.str(con, "dienst", "token") != null,
-                        "orderId", Json.str(con, "dienst", "orderId"), "bundle", Json.path(con, "dienst", "bundle"), "applied", Json.truthy(Json.path(con, "dienst", "applied"))));
+                "dienst", Json.map(con, "dienst") == null ? null : Json.obj("url", Json.path(con, "dienst", "url"), "invite", Json.path(con, "dienst", "invite"),
+                        "email", Json.str(con, "dienst", "email"), "loggedIn", Json.str(con, "dienst", "token") != null,
+                        "orderId", Json.str(con, "dienst", "orderId"), "bundle", Json.path(con, "dienst", "bundle"), "applied", Json.truthy(Json.path(con, "dienst", "applied"))),
+                "maxUsers", con == null || con.get("maxUsers") == null ? (Object) 0L : con.get("maxUsers"));
     }
 
     /** What /api/state reports about biometric unlock (filled in by the app). */
@@ -261,6 +267,31 @@ public final class ConsoleApi {
         }
     }
 
+    /** Waarde uit de querystring (zoals Fastify: + is een spatie), of "" als hij ontbreekt. */
+    static String query(String path, String name) {
+        int q = path.indexOf('?');
+        if (q < 0) return "";
+        for (String part : path.substring(q + 1).split("&")) {
+            int eq = part.indexOf('=');
+            String k = Bytes.decodeURIComponent((eq < 0 ? part : part.substring(0, eq)).replace('+', ' '));
+            if (k.equals(name)) return eq < 0 ? "" : Bytes.decodeURIComponent(part.substring(eq + 1).replace('+', ' '));
+        }
+        return "";
+    }
+
+    /** Aanbieder van de huidige kluis (ontgrendeld), anders de standaard van deze versie. */
+    private String currentBase() { return Extras.baseOf(vault.isUnlocked() ? cfg() : null, dienstUrl); }
+
+    private Map<String, Object> brandCached(String base) throws IOException {
+        synchronized (brandCache) {
+            Object[] hit = brandCache.get(base);
+            if (hit != null && System.currentTimeMillis() - (Long) hit[0] < 10 * 60_000L) return Json.copy(Json.asMap(hit[1]));
+        }
+        Map<String, Object> v = Extras.dienstBrand(base);
+        synchronized (brandCache) { brandCache.put(base, new Object[] {System.currentTimeMillis(), Json.copy(v)}); }
+        return v;
+    }
+
     private static final Pattern STORE = Pattern.compile("^/api/stores/(.+)$"), PROVIDER = Pattern.compile("^/api/providers/(.+)$");
 
     private Reply route(String method, String path, Map<String, Object> b) throws IOException {
@@ -274,18 +305,30 @@ public final class ConsoleApi {
                 return ok(Json.obj("vault", vault.exists(), "unlocked", unlocked(), "step", con == null ? null : con.get("step"),
                         "done", con != null && Json.truthy(con.get("done")), "domain", vault.isUnlocked() ? cfg().get("domain") : null,
                         "offers", Json.obj("stores", catalog.storeOffers(), "servers", catalog.serverOffers()),
-                        "phone", true, "biometric", biometric, "dienst", dienstUrl != null && !dienstUrl.isEmpty(),
+                        "phone", true, "biometric", biometric,
+                        "dienst", (dienstUrl != null && !dienstUrl.isEmpty()) || Json.truthy(Json.path(con, "dienst", "url")) || knownAanbieders > 0,
+                        "aanbieder", Json.path(con, "dienst", "url"),
                         "domainMode", con == null ? null : con.get("domainMode"),
                         "scaleway", Json.obj("signup", Extras.SCW_SIGNUP_URL, "keys", Extras.SCW_KEYS_URL)));
             }
             case "GET /api/dienst/info":
-                return ok(Extras.dienstInfo(dienstUrl));
+                return ok(Extras.dienstInfo(currentBase()));
             case "GET /api/dienst/check": {
                 String name = "";
                 int q = path.indexOf("?name=");
                 if (q >= 0) name = Bytes.decodeURIComponent(path.substring(q + 6).replaceFirst("&.*$", ""));
-                return ok(Extras.dienstCheck(dienstUrl, name));
+                return ok(Extras.dienstCheck(currentBase(), name));
             }
+            // Aanbieders: de openbare lijst, hun huisstijl en uitnodigingscodes.
+            case "GET /api/aanbieders": {
+                List<Object> list = Extras.aanbieders(dienstUrl);
+                knownAanbieders = list.size();
+                return ok(Json.obj("aanbieders", list, "gekozen", vault.isUnlocked() ? Json.path(cfg(), "console", "dienst", "url") : null));
+            }
+            case "GET /api/aanbieder/brand":
+                return ok(brandCached(Extras.cleanDienstUrl(query(path, "url"))));
+            case "GET /api/aanbieder/invite":
+                return ok(Extras.dienstInvite(Extras.cleanDienstUrl(query(path, "url")), query(path, "code")));
             case "POST /api/setup/create": {
                 if (vault.exists()) return err(409, "Er is al een kluis. Ontgrendel hem.");
                 String mode = Json.str(b, "domainMode") == null ? "own" : Json.str(b, "domainMode");
@@ -305,21 +348,26 @@ public final class ConsoleApi {
                 touch();
                 return ok(Json.obj("ok", true));
             }
-            case "POST /api/recover/dienst/login":
-                recoverEmail = Extras.dienstStartLogin(dienstUrl, Json.str(b, "email"));
+            case "POST /api/recover/dienst/login": {
+                String url = Json.str(b, "url");
+                String base = url != null && !url.isEmpty() ? Extras.cleanDienstUrl(url) : dienstUrl;
+                recoverEmail = Extras.dienstStartLogin(base, Json.str(b, "email"));
+                recoverBase = base;
                 recoverToken = null;
                 return ok(Json.obj("ok", true));
+            }
             case "POST /api/recover/dienst/verify":
                 if (recoverEmail == null) return err(400, "Vul eerst je e-mailadres in");
-                recoverToken = Extras.dienstFinishLogin(dienstUrl, recoverEmail, Json.str(b, "code"));
+                recoverToken = Extras.dienstFinishLogin(recoverBase, recoverEmail, Json.str(b, "code"));
                 return ok(Json.obj("ok", true));
             case "POST /api/setup/recover-dienst": {
                 if (vault.exists()) return err(409, "Er is al een kluis op deze telefoon");
                 if (recoverToken == null) return err(400, "Log eerst in bij de dienst");
-                Map<String, Object> c = Extras.recoverViaDienst(dienstUrl, recoverEmail, recoverToken, Json.str(b, "masterKey"), catalog);
+                Map<String, Object> c = Extras.recoverViaDienst(recoverBase, dienstUrl, recoverEmail, recoverToken, Json.str(b, "masterKey"), catalog);
                 vault.create(Json.str(b, "passphrase"), c);
                 recoverEmail = null;
                 recoverToken = null;
+                recoverBase = null;
                 touch();
                 return ok(Json.obj("ok", true));
             }
@@ -346,6 +394,7 @@ public final class ConsoleApi {
         if (!unlocked()) return err(401, "De kluis is op slot");
         touch();
         Map<String, Object> c = cfg();
+        String base = Extras.baseOf(c, dienstUrl);
         Matcher m;
 
         switch (key) {
@@ -503,27 +552,58 @@ public final class ConsoleApi {
                 save();
                 return ok(r.toJson());
             }
+            // ── Aanbieder kiezen, huisstijl, hulpvragen, berichten, gebruikers ──
+            case "POST /api/dienst/select": {
+                String invite = Json.str(b, "invite");
+                Map<String, Object> r = Extras.dienstSelect(c, dienstUrl, Json.str(b, "url") == null ? "" : Json.str(b, "url"), invite == null || invite.isEmpty() ? null : invite);
+                save();
+                return ok(r);
+            }
+            case "GET /api/dienst/brand": {
+                if (base.isEmpty()) return ok(Json.obj("url", null));
+                try {
+                    return ok(brandCached(base));
+                } catch (IOException | RuntimeException e) {
+                    return err(502, e.getMessage());
+                }
+            }
+            case "GET /api/dienst/tickets":
+                return ok(Extras.dienstTickets(base, c));
+            case "POST /api/dienst/tickets":
+                return ok(Extras.dienstNewTicket(base, c, b));
+            case "GET /api/dienst/ticket":
+                return ok(Extras.dienstTicket(base, c, query(path, "id")));
+            case "POST /api/dienst/ticket/reply":
+                return ok(Extras.dienstTicketReply(base, c, Json.str(b, "id") == null ? "" : Json.str(b, "id"), Json.str(b, "message") == null ? "" : Json.str(b, "message")));
+            case "GET /api/dienst/announcements":
+                return ok(Extras.dienstAnnouncements(base, c));
+            case "POST /api/dienst/users": {
+                Map<String, Object> r = Extras.dienstSetUsers(base, c, jsNumber(b.get("count")));
+                save();
+                return ok(r);
+            }
+
             case "POST /api/dienst/login": {
-                Map<String, Object> r = Extras.dienstLogin(dienstUrl, c, Json.str(b, "email"));
+                Map<String, Object> r = Extras.dienstLogin(base, c, Json.str(b, "email"));
                 save();
                 return ok(r);
             }
             case "POST /api/dienst/verify": {
-                Map<String, Object> r = Extras.dienstVerify(dienstUrl, c, Json.str(b, "code"));
+                Map<String, Object> r = Extras.dienstVerify(base, c, Json.str(b, "code"));
                 save();
                 return ok(r);
             }
             case "POST /api/dienst/order": {
-                Map<String, Object> r = Extras.dienstOrder(dienstUrl, c, b);
+                Map<String, Object> r = Extras.dienstOrder(base, c, b);
                 save();
                 return ok(r);
             }
             case "GET /api/dienst/status":
-                return ok(Extras.dienstStatus(dienstUrl, c));
+                return ok(Extras.dienstStatus(base, c));
             case "GET /api/dienst/billing":
-                return ok(Extras.dienstBilling(dienstUrl, c));
+                return ok(Extras.dienstBilling(base, c));
             case "POST /api/dienst/bundle": {
-                Map<String, Object> r = Extras.dienstChangeBundle(dienstUrl, c, Json.str(b, "bundle"));
+                Map<String, Object> r = Extras.dienstChangeBundle(base, c, Json.str(b, "bundle"));
                 save();
                 if (Json.truthy(Json.path(c, "console", "done"))) {
                     Admin.Status st = Admin.clusterStatus(c, Console.knownUrls(c));
@@ -537,16 +617,16 @@ public final class ConsoleApi {
             case "POST /api/dienst/settle":
             case "POST /api/dienst/cancel":
             case "POST /api/dienst/resume":
-                return ok(Extras.dienstAction(dienstUrl, c, p.substring("/api/dienst/".length())));
+                return ok(Extras.dienstAction(base, c, p.substring("/api/dienst/".length())));
             case "GET /api/dienst/authcode":
-                return ok(Extras.dienstAuthcode(dienstUrl, c));
+                return ok(Extras.dienstAuthcode(base, c));
             case "GET /api/dienst/invoice": {
                 int q = path.indexOf("?id=");
-                return ok(Extras.dienstInvoice(dienstUrl, c, q < 0 ? "" : Bytes.decodeURIComponent(path.substring(q + 4).replaceFirst("&.*$", ""))));
+                return ok(Extras.dienstInvoice(base, c, q < 0 ? "" : Bytes.decodeURIComponent(path.substring(q + 4).replaceFirst("&.*$", ""))));
             }
             case "POST /api/dienst/apply": {
                 try {
-                    return ok(Extras.dienstApply(dienstUrl, c, catalog));
+                    return ok(Extras.dienstApply(base, c, catalog));
                 } finally {
                     save();
                 }
@@ -612,6 +692,25 @@ public final class ConsoleApi {
             return ok(Json.obj("ok", true));
         }
         return err(404, "Onbekend: " + key);
+    }
+
+    /** JS {@code Number(v ?? 0)} for a JSON value: a number, or null for NaN (as JSON.stringify writes it). */
+    static Object jsNumber(Object v) {
+        if (v == null) return 0L;
+        if (v instanceof Number) return v;
+        if (v instanceof Boolean) return (Boolean) v ? 1L : 0L;
+        if (v instanceof String) {
+            String t = ((String) v).trim();
+            if (t.isEmpty()) return 0L;
+            try {
+                double d = Double.parseDouble(t);
+                if (Double.isInfinite(d) || Double.isNaN(d)) return null;
+                return d == Math.rint(d) && Math.abs(d) < 9.007199254740992E15 ? (Object) (long) d : (Object) d;
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private static Map<String, Object> step(String label, boolean ok, String detail) {

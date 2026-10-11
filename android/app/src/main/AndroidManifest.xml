@@ -38,7 +38,22 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Uitnodiging van een aanbieder: eigencloud://uitnodiging?dienst=<https-adres>&code=<code> -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="eigencloud" android:host="uitnodiging" />
+            </intent-filter>
         </activity>
+
+        <!-- Beheer van een Eigen Cloud Dienst (voor aanbieders en hun medewerkers) -->
+        <activity
+            android:name=".DienstActivity"
+            android:exported="false"
+            android:label="Beheer dienst"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|smallestScreenSize"
+            android:windowSoftInputMode="adjustResize" />
 
         <activity
             android:name=".ConsoleActivity"

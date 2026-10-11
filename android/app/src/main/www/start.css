@@ -17,3 +17,5 @@
 .facts { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0 0 8px; }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
+#about #dienstForm { margin: 4px 0 8px; }
+#about #dienstForm .actions { margin: 0; }

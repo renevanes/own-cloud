@@ -823,7 +823,33 @@ export class ClusterService {
         this.event("notice", `Melding sturen mislukt: ${(e as Error).message}`, "warn");
       }
     }
+    await this.reportToDienst(checks).catch((e) => console.error("dienst-melding:", (e as Error).message));
     return checks;
+  }
+
+  /**
+   * Abonnement bij een aanbieder: technische gezondheid melden (versie, problemen, opslaggebruik, aantal gebruikers,
+   * servers). Nooit inhoud. De aanbieder ziet zo een storing, en zijn klant krijgt er een bericht over.
+   */
+  async reportToDienst(checks: health.Check[]) {
+    const raw = this.getSetting("dienst_report");
+    if (!raw) return;
+    let r: { url: string; orderId: string; token: string };
+    try { r = JSON.parse(raw); } catch { return; }
+    if (!/^https?:\/\//.test(r.url ?? "") || !/^[A-Za-z0-9_-]{4,64}$/.test(r.orderId ?? "") || !/^[0-9a-f]{64}$/i.test(r.token ?? "")) return;
+    const { countUsers, storageUsage } = await import("../users.js");
+    let storageUsedBytes = 0;
+    for (const u of storageUsage().values()) storageUsedBytes += u.total;
+    const bad = checks.filter((c) => c.status === "fail");
+    const body = {
+      version: VERSION(), healthy: bad.length === 0, problems: bad.map((c) => c.title).slice(0, 20), storageUsedBytes, users: countUsers(),
+      nodes: this.nodes().map((n) => ({ id: n.id, region: n.region, status: n.status })),
+    };
+    const res = await request(`${r.url.replace(/\/$/, "")}/v1/orders/${r.orderId}/health`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Token ${r.token}` }, body: JSON.stringify(body), headersTimeout: 15_000, bodyTimeout: 15_000,
+    });
+    await res.body.dump();
+    if (res.statusCode >= 300) throw new Error(`aanbieder antwoordt ${res.statusCode}`);
   }
 
   manifest(state: "awake" | "asleep" = "awake", topology?: unknown[]) {

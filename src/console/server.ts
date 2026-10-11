@@ -24,6 +24,7 @@ import { restoreFromAny, restoreFromStore } from "../cluster/backup.js";
 import { rpc } from "../cluster/transport.js";
 import * as extras from "./extras.js";
 import { findAdminConfig } from "../cluster/admin.js";
+import { consoleSettings } from "../cluster/admin.js";
 import { clusterStatus, findLeader, prepareStore, probeCluster, provisionFirstNode, readManifest, recoverAdminConfig, saveAdminCopy, sendJob, adminProof, pushAdminConfig } from "../cluster/admin.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -47,8 +48,17 @@ const storeOffers = (): StoreOffer[] => LOCAL
 
 let session: { token: string; lastUse: number } | null = null;
 /** Inloggen bij de dienst vóórdat er een kluis is (herstellen op een nieuw apparaat). Alleen in het geheugen. */
-let recoverDienst: { email: string; token?: string } | null = null;
+let recoverDienst: { email: string; token?: string; base?: string } | null = null;
 const IDLE_MS = 30 * 60_000;
+let knownAanbieders = 0;
+const brandCache = new Map<string, { at: number; v: Awaited<ReturnType<typeof extras.dienstBrand>> }>();
+async function brandCached(base: string) {
+  const hit = brandCache.get(base);
+  if (hit && Date.now() - hit.at < 10 * 60_000) return hit.v;
+  const v = await extras.dienstBrand(base);
+  brandCache.set(base, { at: Date.now(), v });
+  return v;
+}
 
 function newSession(reply: FastifyReply) {
   session = { token: crypto.randomBytes(24).toString("hex"), lastUse: Date.now() };
@@ -73,7 +83,7 @@ const save = () => {
   const c = vault.config!;
   if (c.console.done) {
     void saveAdminCopy(c).catch(() => {});
-    void pushAdminConfig(c).catch(() => {});
+    void pushAdminConfig(c, extras.DIENST_URL()).catch(() => {});
   }
 };
 
@@ -94,7 +104,8 @@ function sanitized(c: AdminConfig) {
     domainMode: c.console.domainMode ?? "own",
     desec: c.console.desec ? { email: c.console.desec.email, at: c.console.desec.at } : null,
     quick: c.console.quick ?? null,
-    dienst: c.console.dienst ? { email: c.console.dienst.email ?? null, loggedIn: !!c.console.dienst.token, orderId: c.console.dienst.orderId ?? null, bundle: c.console.dienst.bundle ?? null, applied: !!c.console.dienst.applied } : null,
+    dienst: c.console.dienst ? { url: c.console.dienst.url ?? null, invite: c.console.dienst.invite ?? null, email: c.console.dienst.email ?? null, loggedIn: !!c.console.dienst.token, orderId: c.console.dienst.orderId ?? null, bundle: c.console.dienst.bundle ?? null, applied: !!c.console.dienst.applied } : null,
+    maxUsers: c.console.maxUsers ?? 0,
   };
 }
 
@@ -299,17 +310,32 @@ export async function buildConsole() {
     done: vault.config?.console.done ?? false,
     domain: vault.config?.domain ?? null,
     offers: { stores: storeOffers(), servers: serverOffers() },
-    dienst: !!extras.DIENST_URL(),
+    dienst: !!(extras.DIENST_URL() || vault.config?.console.dienst?.url || knownAanbieders > 0),
+    aanbieder: vault.config?.console.dienst?.url ?? null,
     domainMode: vault.config?.console.domainMode ?? null,
     scaleway: { signup: extras.SCW_SIGNUP_URL, keys: extras.SCW_KEYS_URL },
   }));
 
   // Openbaar (ook vóór de kluis): de dienst en domeinbeschikbaarheid tonen in de eerste stap.
+  const currentBase = () => extras.baseOf(vault.config);
   app.get("/api/dienst/info", async (_req, reply) => {
-    try { return await extras.dienstInfo(); } catch (e) { return reply.code(502).send({ error: (e as Error).message }); }
+    try { return await extras.dienstInfo(currentBase()); } catch (e) { return reply.code(502).send({ error: (e as Error).message }); }
   });
   app.get<{ Querystring: { name?: string } }>("/api/dienst/check", async (req, reply) => {
-    try { return await extras.dienstCheck(req.query.name ?? ""); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    try { return await extras.dienstCheck(req.query.name ?? "", currentBase()); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+  });
+
+  // Aanbieders: de openbare lijst, hun huisstijl en uitnodigingscodes.
+  app.get("/api/aanbieders", async () => {
+    const list = await extras.aanbieders();
+    knownAanbieders = list.length;
+    return { aanbieders: list, gekozen: vault.config?.console.dienst?.url ?? null };
+  });
+  app.get<{ Querystring: { url?: string } }>("/api/aanbieder/brand", async (req, reply) => {
+    try { return await brandCached(extras.cleanDienstUrl(req.query.url ?? "")); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+  });
+  app.get<{ Querystring: { url?: string; code?: string } }>("/api/aanbieder/invite", async (req, reply) => {
+    try { return await extras.dienstInvite(extras.cleanDienstUrl(req.query.url ?? ""), req.query.code ?? ""); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
   });
 
   app.post<{ Body: { passphrase: string; domain: string; domainMode?: "own" | "free" | "buy" | "sub"; mailbox: string; alertEmail?: string; appPassword: string } }>("/api/setup/create", async (req, reply) => {
@@ -354,12 +380,16 @@ export async function buildConsole() {
   });
 
   // Herstellen via de Eigen Cloud Dienst: inloggen met een code; opslag en sleutels komen uit je pakket.
-  app.post<{ Body: { email: string } }>("/api/recover/dienst/login", async (req, reply) => {
-    try { recoverDienst = { email: await extras.dienstStartLogin(req.body?.email) }; return { ok: true }; } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+  app.post<{ Body: { email: string; url?: string } }>("/api/recover/dienst/login", async (req, reply) => {
+    try {
+      const base = req.body?.url ? extras.cleanDienstUrl(req.body.url) : extras.DIENST_URL();
+      recoverDienst = { email: await extras.dienstStartLogin(req.body?.email, base), base };
+      return { ok: true };
+    } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
   });
   app.post<{ Body: { code: string } }>("/api/recover/dienst/verify", async (req, reply) => {
     if (!recoverDienst) return reply.code(400).send({ error: "Vul eerst je e-mailadres in" });
-    try { recoverDienst.token = await extras.dienstFinishLogin(recoverDienst.email, req.body?.code); return { ok: true }; } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    try { recoverDienst.token = await extras.dienstFinishLogin(recoverDienst.email, req.body?.code, recoverDienst.base); return { ok: true }; } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
   });
   app.post<{ Body: { masterKey: string; passphrase: string } }>("/api/setup/recover-dienst", async (req, reply) => {
     if (vault.exists()) return reply.code(409).send({ error: "Er is al een kluis op deze computer" });
@@ -367,7 +397,7 @@ export async function buildConsole() {
     const key = (req.body.masterKey ?? "").replace(/[^0-9a-f]/gi, "").toLowerCase();
     if (key.length !== 64) return reply.code(400).send({ error: "De sleutel bestaat uit 64 tekens (0–9 en a–f)" });
     try {
-      const { order, kit } = await extras.dienstOrderKit(recoverDienst.token);
+      const { order, kit } = await extras.dienstOrderKit(recoverDienst.token, recoverDienst.base);
       let found: Awaited<ReturnType<typeof findAdminConfig>> | null = null, lastErr: Error | null = null;
       for (const st of [...kit.storage].sort((a, b) => (a.purpose === "replica" ? -1 : 1) - (b.purpose === "replica" ? -1 : 1))) {
         const offer = storeOffers().find((o) => o.id === st.offer);
@@ -380,7 +410,7 @@ export async function buildConsole() {
       }
       if (!found) throw lastErr ?? new Error("Geen opslag gevonden in je pakket");
       const rec = found.config as AdminConfig;
-      const cfg = { ...rec, console: { ...rec.console, step: "klaar", done: true, keyConfirmed: true, dienst: { email: recoverDienst.email, token: recoverDienst.token, orderId: order.id, bundle: order.bundle, applied: true } } } as AdminConfig;
+      const cfg = { ...rec, console: { ...rec.console, step: "klaar", done: true, keyConfirmed: true, dienst: { ...(recoverDienst.base && recoverDienst.base !== extras.DIENST_URL() ? { url: recoverDienst.base } : {}), email: recoverDienst.email, token: recoverDienst.token, orderId: order.id, bundle: order.bundle, applied: true }, maxUsers: kit.users ?? rec.console.maxUsers } } as AdminConfig;
       vault.create(req.body.passphrase ?? "", cfg);
       recoverDienst = null;
       newSession(reply);
@@ -569,6 +599,34 @@ export async function buildConsole() {
     s.get("/api/dienst/status", async (_req, reply) => {
       try { return await extras.dienstStatus(cfg()); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     });
+    // ── Aanbieder kiezen, huisstijl, hulpvragen, berichten, gebruikers ──
+    s.post<{ Body: { url?: string; invite?: string } }>("/api/dienst/select", async (req, reply) => {
+      try { const r = await extras.dienstSelect(cfg(), req.body?.url ?? "", req.body?.invite || undefined); save(); return r; } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+    s.get("/api/dienst/brand", async (_req, reply) => {
+      const base = extras.baseOf(cfg());
+      if (!base) return { url: null };
+      try { return await brandCached(base); } catch (e) { return reply.code(502).send({ error: (e as Error).message }); }
+    });
+    s.get("/api/dienst/tickets", async (_req, reply) => {
+      try { return await extras.dienstTickets(cfg()); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+    s.post<{ Body: { subject?: string; message?: string } }>("/api/dienst/tickets", async (req, reply) => {
+      try { return await extras.dienstNewTicket(cfg(), req.body ?? {}); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+    s.get<{ Querystring: { id?: string } }>("/api/dienst/ticket", async (req, reply) => {
+      try { return await extras.dienstTicket(cfg(), req.query.id ?? ""); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+    s.post<{ Body: { id?: string; message?: string } }>("/api/dienst/ticket/reply", async (req, reply) => {
+      try { return await extras.dienstTicketReply(cfg(), req.body?.id ?? "", req.body?.message ?? ""); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+    s.get("/api/dienst/announcements", async (_req, reply) => {
+      try { return await extras.dienstAnnouncements(cfg()); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+    s.post<{ Body: { count?: number } }>("/api/dienst/users", async (req, reply) => {
+      try { const r = await extras.dienstSetUsers(cfg(), Number(req.body?.count ?? 0)); save(); return r; } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    });
+
     s.get("/api/dienst/billing", async (_req, reply) => {
       try { return await extras.dienstBilling(cfg()); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     });
@@ -749,6 +807,9 @@ async function startLaunch(c: AdminConfig, first: { provider: string; region: st
     if (c.console.mailRelay) initialSettings.mail_relay = c.console.mailRelay;
     if (c.console.spfExtra) initialSettings.spf_extra = c.console.spfExtra;
     if (c.console.extraDns?.length) initialSettings.extra_dns = JSON.stringify(c.console.extraDns);
+    const cs = consoleSettings(c, extras.DIENST_URL());
+    if (cs.max_users !== "0") initialSettings.max_users = cs.max_users;
+    if (cs.dienst_report) initialSettings.dienst_report = cs.dienst_report;
     const r = await provisionFirstNode(c, { ...first, term, initialSettings: term ? undefined : initialSettings });
     setStep("server", "done", r.info.ipv4 ? `IP-adres ${r.info.ipv4}` : "");
     c.console.firstLaunch = { at: Date.now(), nodeId: r.nodeId, provider: first.provider, region: first.region, clusterUrl: r.clusterUrl, apiUrl: r.info.apiUrl };

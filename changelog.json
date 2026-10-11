@@ -1,5 +1,17 @@
 [
   {
+    "version": "1.8",
+    "date": "2026-10-11",
+    "changes": [
+      "Kies je aanbieder uit een lijst, of open de uitnodigingslink van een aanbieder: de app opent dan meteen bij die aanbieder",
+      "De app toont de naam, het logo, de kleur en de contactgegevens van je aanbieder",
+      "Hulp vragen aan je aanbieder en antwoorden lezen, en berichten over onderhoud en storingen, bij je abonnement",
+      "Extra gebruikers bijkopen bij je abonnement; je cloud krijgt meteen ruimte voor meer gebruikers",
+      "Je cloud meldt elk kwartier aan je aanbieder of alles goed gaat (alleen techniek, nooit je mail of foto's); bij een storing krijg je een bericht",
+      "Voor aanbieders: het beheer van je dienst openen vanuit de app (Over Eigen Cloud), inloggen met vingerafdruk"
+    ]
+  },
+  {
     "version": "1.7",
     "date": "2026-10-11",
     "changes": [

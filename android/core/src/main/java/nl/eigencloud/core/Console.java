@@ -370,8 +370,14 @@ public final class Console {
         return (t == null ? 0 : t.longValue()) + 1;
     }
 
-    /** initialSettings for the first launch of a new cluster (mail_from, password_hash, alert_email, mail_relay, spf_extra). */
-    public static Map<String, Object> initialSettings(Map<String, Object> c) {
+    /** {@link #initialSettings(Map, String)} without a build-default service. */
+    public static Map<String, Object> initialSettings(Map<String, Object> c) { return initialSettings(c, ""); }
+
+    /**
+     * initialSettings for the first launch of a new cluster (mail_from, password_hash, alert_email, mail_relay,
+     * spf_extra, extra_dns; max_users and dienst_report from {@link Admin#consoleSettings} when set).
+     */
+    public static Map<String, Object> initialSettings(Map<String, Object> c, String defaultDienst) {
         Map<String, Object> con = console(c);
         Map<String, Object> s = Json.obj("mail_from", Json.path(c, "appEnv", "MAIL_FROM"));
         if (Json.truthy(con.get("appPasswordHash"))) s.put("password_hash", con.get("appPasswordHash"));
@@ -380,6 +386,9 @@ public final class Console {
         if (Json.truthy(con.get("spfExtra"))) s.put("spf_extra", con.get("spfExtra"));
         List<Object> extra = Json.asList(con.get("extraDns"));
         if (extra != null && !extra.isEmpty()) s.put("extra_dns", Json.stringify(extra));
+        Map<String, Object> cs = Admin.consoleSettings(c, defaultDienst);
+        if (!"0".equals(cs.get("max_users"))) s.put("max_users", cs.get("max_users"));
+        if (Json.truthy(cs.get("dienst_report"))) s.put("dienst_report", cs.get("dienst_report"));
         return s;
     }
 

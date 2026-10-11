@@ -101,9 +101,12 @@ export function changeDomain(c: AdminConfig, domain: string, mode: "own" | "free
 
 // ───────── Eigen Cloud Dienst ─────────
 
-async function dienst(path: string, opts: { method?: string; body?: unknown; token?: string } = {}) {
-  const base = DIENST_URL();
-  if (!base) throw new Error("De Eigen Cloud Dienst is in deze versie niet ingesteld");
+/** Bij welke aanbieder (dienst) hoort deze kluis: de gekozen aanbieder, anders de standaard van deze versie. */
+export const baseOf = (c?: AdminConfig | null) => (c?.console.dienst?.url || DIENST_URL()).replace(/\/$/, "");
+
+async function dienst(path: string, opts: { method?: string; body?: unknown; token?: string; base?: string } = {}) {
+  const base = (opts.base || DIENST_URL()).replace(/\/$/, "");
+  if (!base) throw new Error("Kies eerst een aanbieder");
   const r = await fetch(base + path, {
     method: opts.method ?? (opts.body ? "POST" : "GET"),
     headers: { ...(opts.body ? { "content-type": "application/json" } : {}), ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}) },
@@ -116,19 +119,19 @@ async function dienst(path: string, opts: { method?: string; body?: unknown; tok
   return j;
 }
 
-export const dienstInfo = () => dienst("/v1/info");
+export const dienstInfo = (base?: string) => dienst("/v1/info", { base });
 
-export async function dienstCheck(name: string) {
+export async function dienstCheck(name: string, base?: string) {
   const d = name.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
   // Zonder punt: een gratis adres van de dienst (naam.<zone>); de dienst controleert de naam zelf.
   if (!/^[a-z0-9-]+(\.[a-z0-9-]+)*$/.test(d)) throw new Error("Vul een domeinnaam in, zoals vanes.nl");
-  return dienst(`/v1/domains/check?name=${encodeURIComponent(d)}`);
+  return dienst(`/v1/domains/check?name=${encodeURIComponent(d)}`, { base });
 }
 
 export async function dienstLogin(c: AdminConfig, email: string) {
   const e = (email ?? "").trim();
   if (!/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(e)) throw new Error("Vul een geldig e-mailadres in");
-  await dienst("/v1/auth/start", { body: { email: e } });
+  await dienst("/v1/auth/start", { body: { email: e }, base: baseOf(c) });
   c.console.dienst = { ...(c.console.dienst ?? {}), email: e };
   return { ok: true, email: e };
 }
@@ -136,7 +139,7 @@ export async function dienstLogin(c: AdminConfig, email: string) {
 export async function dienstVerify(c: AdminConfig, code: string) {
   const email = c.console.dienst?.email;
   if (!email) throw new Error("Vul eerst je e-mailadres in");
-  const r = await dienst("/v1/auth/verify", { body: { email, code: (code ?? "").replace(/\s/g, "") } });
+  const r = await dienst("/v1/auth/verify", { body: { email, code: (code ?? "").replace(/\s/g, "") }, base: baseOf(c) });
   c.console.dienst = { ...(c.console.dienst ?? {}), token: r.token };
   return { ok: true, email };
 }
@@ -157,8 +160,8 @@ export async function dienstOrder(c: AdminConfig, b: OrderInput) {
   if (c.domain?.endsWith(".dedyn.io")) throw new Error("Bij de dienst hoort een eigen domeinnaam of een gratis adres van de dienst. Kies eerst een adres.");
   const mode = c.console.domainMode === "sub" ? "sub" : b.mode;
   const r = await dienst("/v1/orders", {
-    token,
-    body: { bundle: b.bundle, domain: { mode, name: c.domain, authCode: b.authCode || undefined }, registrant: mode === "register" || mode === "transfer" ? b.registrant : undefined, acceptTerms: true },
+    token, base: baseOf(c),
+    body: { bundle: b.bundle, domain: { mode, name: c.domain, authCode: b.authCode || undefined }, registrant: mode === "register" || mode === "transfer" ? b.registrant : undefined, acceptTerms: true, ...(c.console.dienst?.invite ? { invite: c.console.dienst.invite } : {}) },
   });
   c.console.dienst = { ...(c.console.dienst ?? {}), orderId: r.orderId, bundle: b.bundle, applied: false };
   return { ok: true, orderId: r.orderId, checkoutUrl: r.checkoutUrl };
@@ -167,32 +170,32 @@ export async function dienstOrder(c: AdminConfig, b: OrderInput) {
 export async function dienstStatus(c: AdminConfig) {
   const d = c.console.dienst;
   if (!d?.token || !d.orderId) return { status: "none" };
-  return dienst(`/v1/orders/${d.orderId}`, { token: d.token });
+  return dienst(`/v1/orders/${d.orderId}`, { token: d.token, base: baseOf(c) });
 }
 
 // ───────── Herstellen op een nieuw apparaat, via de dienst ─────────
 
-export async function dienstStartLogin(email: string) {
+export async function dienstStartLogin(email: string, base?: string) {
   const e = (email ?? "").trim();
   if (!/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(e)) throw new Error("Vul een geldig e-mailadres in");
-  await dienst("/v1/auth/start", { body: { email: e } });
+  await dienst("/v1/auth/start", { body: { email: e }, base });
   return e;
 }
 
-export async function dienstFinishLogin(email: string, code: string): Promise<string> {
-  const r = await dienst("/v1/auth/verify", { body: { email, code: (code ?? "").replace(/\s/g, "") } });
+export async function dienstFinishLogin(email: string, code: string, base?: string): Promise<string> {
+  const r = await dienst("/v1/auth/verify", { body: { email, code: (code ?? "").replace(/\s/g, "") }, base });
   return r.token as string;
 }
 
 /** Het lopende abonnement en zijn pakket (voor herstellen: opslag en sleutels komen uit het pakket). */
-export async function dienstOrderKit(token: string) {
-  const me = await dienst("/v1/me", { token });
+export async function dienstOrderKit(token: string, base?: string) {
+  const me = await dienst("/v1/me", { token, base });
   const orders = ((me.orders ?? []) as { id: string; status: string; bundle: string; createdAt?: number }[])
     .filter((o) => ["ready", "payment_problem", "cancelled"].includes(o.status))
     .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
   if (!orders.length) throw new Error("Bij dit e-mailadres hoort geen actief abonnement");
   const o = orders[0];
-  const kit = (await dienst(`/v1/orders/${o.id}/kit`, { token })) as Kit;
+  const kit = (await dienst(`/v1/orders/${o.id}/kit`, { token, base })) as Kit;
   return { order: o, kit };
 }
 
@@ -201,19 +204,19 @@ export async function dienstOrderKit(token: string) {
 function order(c: AdminConfig) {
   const d = c.console.dienst;
   if (!d?.token || !d.orderId) throw new Error("Er is geen abonnement bij de dienst");
-  return { token: d.token, id: d.orderId };
+  return { token: d.token, id: d.orderId, base: baseOf(c) };
 }
 
 export async function dienstBilling(c: AdminConfig) {
   const o = order(c);
-  return dienst(`/v1/orders/${o.id}/billing`, { token: o.token });
+  return dienst(`/v1/orders/${o.id}/billing`, { token: o.token, base: o.base });
 }
 
 /** Ander pakket: de dienst past het abonnement aan; daarna nemen we de nieuwe plekken en aantallen over. */
 export async function dienstChangeBundle(c: AdminConfig, bundle: string) {
   const o = order(c);
-  const r = await dienst(`/v1/orders/${o.id}/bundle`, { token: o.token, body: { bundle } });
-  const kit = (await dienst(`/v1/orders/${o.id}/kit`, { token: o.token })) as Kit;
+  const r = await dienst(`/v1/orders/${o.id}/bundle`, { token: o.token, base: o.base, body: { bundle } });
+  const kit = (await dienst(`/v1/orders/${o.id}/kit`, { token: o.token, base: o.base })) as Kit;
   c.policy = { ...c.policy, placement: kit.placement, minDataNodes: kit.policy.minDataNodes, witnesses: kit.policy.witnesses };
   c.console.dienst = { ...c.console.dienst, bundle };
   return { ok: true, bundle: r.bundle, effective: r.effective, policy: { minDataNodes: kit.policy.minDataNodes, witnesses: kit.policy.witnesses } };
@@ -221,19 +224,19 @@ export async function dienstChangeBundle(c: AdminConfig, bundle: string) {
 
 export async function dienstAction(c: AdminConfig, action: "payment-method" | "settle" | "cancel" | "resume") {
   const o = order(c);
-  return dienst(`/v1/orders/${o.id}/${action}`, { token: o.token, body: {} });
+  return dienst(`/v1/orders/${o.id}/${action}`, { token: o.token, base: o.base, body: {} });
 }
 
 export async function dienstAuthcode(c: AdminConfig) {
   const o = order(c);
-  return dienst(`/v1/orders/${o.id}/authcode`, { token: o.token });
+  return dienst(`/v1/orders/${o.id}/authcode`, { token: o.token, base: o.base });
 }
 
 /** Factuur als HTML (de dienst vraagt een sessie, dus de console haalt hem op en toont hem zelf). */
 export async function dienstInvoice(c: AdminConfig, id: string) {
   const o = order(c);
   if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("Onbekende factuur");
-  const r = await fetch(`${DIENST_URL()}/v1/invoices/${encodeURIComponent(id)}`, { headers: { authorization: `Bearer ${o.token}` }, signal: AbortSignal.timeout(20_000) });
+  const r = await fetch(`${o.base}/v1/invoices/${encodeURIComponent(id)}`, { headers: { authorization: `Bearer ${o.token}` }, signal: AbortSignal.timeout(20_000) });
   if (!r.ok) throw new Error(r.status === 404 ? "Factuur niet gevonden" : `De dienst antwoordt ${r.status}`);
   return { html: await r.text() };
 }
@@ -249,6 +252,8 @@ export interface Kit {
   dns: { type: "desec"; name: string; token: string; zone: string; api: string; acme?: { username: string; password: string; subdomain: string; server_url: string } };
   mailRelay: { host: string; port: number; user: string; password: string; secure: boolean } | null;
   spfExtra: string;
+  /** Aantal gebruikers in de cloud (bundel + bijgekocht); ontbreekt bij oudere diensten. */
+  users?: number;
 }
 
 /**
@@ -258,7 +263,7 @@ export interface Kit {
 export async function dienstApply(c: AdminConfig, addStore: (b: { offer: string; region: string; accessKey: string; secretKey: string; purpose: "replica" | "backup" }) => Promise<{ ok: boolean; steps: { label: string; ok: boolean; detail?: string }[]; name: string }>) {
   const d = c.console.dienst;
   if (!d?.token || !d.orderId) throw new Error("Er is nog geen bestelling");
-  const kit = (await dienst(`/v1/orders/${d.orderId}/kit`, { token: d.token })) as Kit;
+  const kit = (await dienst(`/v1/orders/${d.orderId}/kit`, { token: d.token, base: baseOf(c) })) as Kit;
   if (kit.domain !== c.domain) throw new Error(`Het pakket is voor ${kit.domain}, niet voor ${c.domain}`);
   c.providers[kit.provider.id] = { ...kit.provider.fields };
   const results = [];
@@ -269,6 +274,7 @@ export async function dienstApply(c: AdminConfig, addStore: (b: { offer: string;
   }
   c.policy = { ...DEFAULT_POLICY, ...c.policy, placement: kit.placement, minDataNodes: kit.policy.minDataNodes, witnesses: kit.policy.witnesses };
   c.console.preset = "dienst";
+  c.console.maxUsers = kit.users ?? 0;
   c.dns = [{ type: "desec", name: "dienst", token: kit.dns.token, zone: kit.dns.zone, api: kit.dns.api, ...(kit.dns.acme ? { acme: kit.dns.acme } : {}) }];
   c.console.dnsMode = "dienst";
   c.console.nameservers = kit.nameservers;
@@ -353,4 +359,119 @@ export async function scwRevokeMail(c: AdminConfig) {
   if (!c.console.temDomainId || !secret) return null;
   await scw("POST", `/transactional-email/v1alpha1/regions/fr-par/domains/${c.console.temDomainId}/revoke`, secret, {});
   return "Maildomein bij Scaleway ingetrokken";
+}
+
+// ───────── Aanbieders: kiezen, uitnodigingen, huisstijl ─────────
+
+export interface Aanbieder { naam: string; url: string; land?: string; contact?: string; omschrijving?: string }
+
+/** De openbare lijst van aanbieders (aanbieders.json in de repository; nieuwe aanbieders komen erbij via GitHub). */
+export const AANBIEDERS_URL = () => process.env.EIGEN_AANBIEDERS_URL || "https://raw.githubusercontent.com/renevanes/own-cloud/main/aanbieders.json";
+let aanbiedersCache: { at: number; list: Aanbieder[] } | null = null;
+
+export function cleanDienstUrl(raw: string) {
+  let v = String(raw ?? "").trim();
+  if (!/^[a-z]+:\/\//i.test(v)) v = `https://${v}`;
+  let u: URL;
+  try { u = new URL(v); } catch { throw new Error("Dat is geen geldig adres"); }
+  const local = /^(127\.0\.0\.1|localhost|10\.0\.2\.2)$/.test(u.hostname);
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && local)) throw new Error("Het adres van een aanbieder begint met https://");
+  if (u.username || u.password || u.search || u.hash) throw new Error("Dat is geen geldig adres");
+  return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}`;
+}
+
+export async function aanbieders(): Promise<Aanbieder[]> {
+  let list: Aanbieder[] = [];
+  if (aanbiedersCache && Date.now() - aanbiedersCache.at < 3600_000) list = aanbiedersCache.list;
+  else {
+    try {
+      const r = await fetch(AANBIEDERS_URL(), { signal: AbortSignal.timeout(10_000) });
+      if (r.ok) list = ((await r.json()) as Aanbieder[]).filter((a) => a && a.naam && a.url);
+    } catch { /* geen internet: de meegeleverde lijst */ }
+    if (!list.length) {
+      try { list = JSON.parse(readFileSync(new URL("../../aanbieders.json", import.meta.url), "utf8")) as Aanbieder[]; } catch { list = []; }
+    }
+    aanbiedersCache = { at: Date.now(), list };
+  }
+  const out: Aanbieder[] = [];
+  for (const a of list) { try { out.push({ ...a, url: cleanDienstUrl(a.url) }); } catch { /* ongeldige regel overslaan */ } }
+  const def = DIENST_URL();
+  if (def && !out.some((a) => a.url === def)) out.unshift({ naam: "Eigen Cloud Dienst", url: def });
+  return out;
+}
+
+/** Huisstijl van een aanbieder, met het logo als data-URL (zodat de app het zonder extra verzoeken toont). */
+export async function dienstBrand(base: string) {
+  const info = await dienst("/v1/info", { base });
+  const brand = (info?.brand ?? {}) as { name?: string; accentColor?: string | null; contact?: Record<string, string | null>; logoUrl?: string | null; termsUrl?: string | null; privacyUrl?: string | null };
+  let logo: string | null = null;
+  if (brand.logoUrl) {
+    try {
+      const r = await fetch(`${base}/v1/brand/logo`, { signal: AbortSignal.timeout(10_000) });
+      const type = r.headers.get("content-type") ?? "";
+      const buf = Buffer.from(await r.arrayBuffer());
+      if (r.ok && /^image\/(png|svg\+xml|jpeg|webp)/.test(type) && buf.length <= 200 * 1024) logo = `data:${type.split(";")[0]};base64,${buf.toString("base64")}`;
+    } catch { /* zonder logo */ }
+  }
+  return { url: base, name: brand.name ?? info?.name ?? "Eigen Cloud Dienst", accentColor: brand.accentColor ?? null, contact: brand.contact ?? {}, termsUrl: brand.termsUrl ?? info?.termsUrl ?? null, privacyUrl: brand.privacyUrl ?? info?.privacyUrl ?? null, logo, bundles: info?.bundles ?? [], freeZone: info?.freeZone ?? null };
+}
+
+export async function dienstInvite(base: string, code: string) {
+  if (!/^[A-Za-z0-9-]{4,40}$/.test(code ?? "")) throw new Error("Deze code klopt niet");
+  return dienst(`/v1/invite/${encodeURIComponent(code)}`, { base });
+}
+
+/** Aanbieder kiezen (of wisselen zolang er nog niets besteld is). Met een uitnodigingscode wordt die meegestuurd bij bestellen. */
+export async function dienstSelect(c: AdminConfig, url: string, invite?: string) {
+  const base = cleanDienstUrl(url);
+  const cur = c.console.dienst;
+  if (cur?.orderId && baseOf(c) !== base) throw new Error("Je hebt al een abonnement bij een andere aanbieder. Overstappen regel je bij je abonnement.");
+  let code: string | undefined;
+  if (invite) {
+    const r = await dienstInvite(base, invite);
+    if (!r.valid) throw new Error(r.reason ?? "Deze uitnodiging is niet (meer) geldig");
+    code = r.code ?? invite;
+  }
+  const brand = await dienstBrand(base);
+  const same = baseOf(c) === base;
+  c.console.dienst = same ? { ...(cur ?? {}), url: base, ...(code ? { invite: code } : {}) } : { url: base, ...(code ? { invite: code } : {}) };
+  return brand;
+}
+
+// ───────── Hulpvragen, berichten en extra gebruikers ─────────
+
+function session(c: AdminConfig) {
+  const d = c.console.dienst;
+  if (!d?.token) throw new Error("Log eerst in bij je aanbieder");
+  return { token: d.token, base: baseOf(c) };
+}
+export const dienstTickets = (c: AdminConfig) => dienst("/v1/tickets", session(c));
+export function dienstTicket(c: AdminConfig, id: string) {
+  if (!/^[A-Za-z0-9_-]{4,64}$/.test(id ?? "")) throw new Error("Deze hulpvraag bestaat niet");
+  return dienst(`/v1/tickets/${id}`, session(c));
+}
+export function dienstNewTicket(c: AdminConfig, b: { subject?: string; message?: string }) {
+  return dienst("/v1/tickets", { ...session(c), body: { subject: b.subject, message: b.message, ...(c.console.dienst?.orderId ? { orderId: c.console.dienst.orderId } : {}) } });
+}
+export function dienstTicketReply(c: AdminConfig, id: string, message: string) {
+  if (!/^[A-Za-z0-9_-]{4,64}$/.test(id ?? "")) throw new Error("Deze hulpvraag bestaat niet");
+  return dienst(`/v1/tickets/${id}/messages`, { ...session(c), body: { message } });
+}
+export const dienstAnnouncements = (c: AdminConfig) => dienst("/v1/announcements", session(c));
+
+/** Extra gebruikers bijkopen of minderen; daarna het nieuwe aantal uit het pakket overnemen. */
+export async function dienstSetUsers(c: AdminConfig, count: number) {
+  const o = order(c);
+  const r = await dienst(`/v1/orders/${o.id}/users`, { token: o.token, base: o.base, body: { count } });
+  const kit = (await dienst(`/v1/orders/${o.id}/kit`, { token: o.token, base: o.base })) as Kit;
+  c.console.maxUsers = kit.users ?? 0;
+  return { ...r, maxUsers: c.console.maxUsers };
+}
+
+/** Voor de cloud: waar hij zijn technische gezondheid meldt (alleen bij een abonnement bij een aanbieder). */
+export function dienstReport(c: AdminConfig) {
+  const d = c.console.dienst;
+  const token = c.dns.find((x) => x.type === "desec" && x.name === "dienst")?.token;
+  if (!d?.orderId || !d.applied || !token) return null;
+  return { url: baseOf(c), orderId: d.orderId, token };
 }

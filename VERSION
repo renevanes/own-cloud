@@ -1,5 +1,5 @@
 # Eén versienummer voor de Android-app én de servers.
 # Gaat bij ELKE wijziging omhoog:  scripts/bump.sh "Wat er veranderd is" ...   (daarna scripts/publish.sh)
 # VERSION_CODE is voor Android en loopt altijd met 1 op (hij begint hoog omdat de eerste builds 2000000+bouwnummer hadden).
-VERSION_NAME=1.7
-VERSION_CODE=2000107
+VERSION_NAME=1.8
+VERSION_CODE=2000108

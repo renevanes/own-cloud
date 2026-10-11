@@ -193,6 +193,23 @@ public final class ConsoleActivity extends Activity {
             }
         }
 
+        /** Uitnodiging van een aanbieder (eigencloud://uitnodiging-link): {"dienst":"https://…","code":"…"} of null. */
+        @JavascriptInterface
+        public String pendingInvite() {
+            if (!onOurPage()) return "null";
+            String dienst = Prefs.str(ConsoleActivity.this, Prefs.INVITE_DIENST), code = Prefs.str(ConsoleActivity.this, Prefs.INVITE_CODE);
+            if (dienst == null || code == null) return "null";
+            return Json.stringify(Json.obj("dienst", dienst, "code", code));
+        }
+
+        /** De uitnodiging is verwerkt (of afgewezen): vergeten. */
+        @JavascriptInterface
+        public void clearInvite() {
+            if (!onOurPage()) return;
+            Prefs.setStr(ConsoleActivity.this, Prefs.INVITE_DIENST, null);
+            Prefs.setStr(ConsoleActivity.this, Prefs.INVITE_CODE, null);
+        }
+
         @JavascriptInterface
         public void openUrl(String url) {
             if (!onOurPage()) return;
