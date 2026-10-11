@@ -140,11 +140,12 @@ cp "$COMPOSE" "$COMPOSE.prev"
 sed -i -E "s|^(    image: ).*(  # eigen-app)$|\\1$APP\\2|" "$COMPOSE"
 [ "$HAS_CADDY" = 1 ] && sed -i -E "s|^(    image: ).*(  # eigen-caddy)$|\\1$CADDY\\2|" "$COMPOSE"
 (cd "$ROOT" && docker compose up -d) >/dev/null 2>&1
+HEALTH_URL="\${HEALTH_URL:-http://127.0.0.1:$PORT/cluster/health}"; CADDY_HEALTH_URL="\${CADDY_HEALTH_URL-http://127.0.0.1:3000/healthz}"
 healthy() {
   local body
-  body=$(curl -fsS --max-time 3 "http://127.0.0.1:$PORT/cluster/health" 2>/dev/null) || return 1
+  body=$(curl -fsS --max-time 3 "$HEALTH_URL" 2>/dev/null) || return 1
   python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]).get("version")==sys.argv[2] else 1)' "$body" "$VERSION" || return 1
-  if [ "$HAS_CADDY" = 1 ]; then curl -fsS --max-time 3 http://127.0.0.1:3000/healthz >/dev/null 2>&1 || return 1; fi
+  if [ "$HAS_CADDY" = 1 ] && [ -n "$CADDY_HEALTH_URL" ]; then curl -fsS --max-time 3 "$CADDY_HEALTH_URL" >/dev/null 2>&1 || return 1; fi
 }
 ok=0
 for _ in $(seq 1 $((HEALTH_SECONDS / 3))); do if healthy; then ok=1; break; fi; sleep 3; done
@@ -166,6 +167,194 @@ if [ -n "$SAVE_APP" ]; then
 fi
 result 1 0 "$saved" ""
 docker image prune -f >/dev/null 2>&1 || true`;
+}
+
+// ───────── De Eigen Cloud Dienst van een aanbieder, op één eigen server ─────────
+
+export interface DienstInit {
+  /** Hostnaam van de Dienst, bijv. "dienst.vanes.nl" (Caddy haalt het certificaat met HTTP-01). */
+  host: string;
+  /** Mailadres voor Let's Encrypt (de eigenaar). */
+  email: string;
+  /** Inhoud van /srv/dienst/dienst.env (BROKER_*, MOLLIE_*, …), in deze volgorde. */
+  env: [string, string][];
+  /** Images om te starten (tag of vaste versie) en de tags waarop de dagelijkse controle naar nieuwe versies kijkt. */
+  appImage: string;
+  caddyImage: string;
+  appRef: string;
+  caddyRef: string;
+}
+
+/** Eén waarde in dienst.env: letterlijk (de Dienst leest het bestand zelf), dus zonder regelovergangen. */
+export function dienstEnvFile(env: [string, string][]) {
+  for (const [k, v] of env) {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(k)) throw new Error(`Ongeldige naam ${k}`);
+    if (/[\r\n]/.test(v)) throw new Error(`${k} mag geen regelovergang bevatten`);
+  }
+  return env.map(([k, v]) => `${k}=${v}`).join("\n");
+}
+
+/**
+ * Het opstartscript voor de server van een Dienst. Anders dan bij een cloud staan de geheimen hier wél in (in
+ * /srv/dienst/dienst.env, alleen leesbaar voor root): de server hoort alleen bij de aanbieder zelf, en de console haalt
+ * de user-data bij Scaleway weg zodra de Dienst bereikbaar is. Docker, de Dienst (`node dist/broker/main.js`), Caddy
+ * met HTTPS (HTTP-01), de updater (dezelfde als op een cloud) en een dagelijkse controle op een nieuwe versie.
+ */
+export function dienstUserData(o: DienstInit) {
+  if (!/^[a-z0-9.-]+$/.test(o.host) || !/^[^\s@'"]+@[^\s@'"]+$/.test(o.email)) throw new Error("Ongeldig adres of e-mailadres");
+  const prefix = updatePrefix(o.appRef);
+  return `#!/bin/bash
+# Eigen Cloud Dienst — ${o.host}
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y && apt-get install -y ca-certificates curl ufw chrony python3
+systemctl enable --now chrony
+command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
+ufw allow 22/tcp; ufw allow 80/tcp; ufw allow 443/tcp
+ufw --force enable
+umask 077
+mkdir -p /srv/dienst/data /srv/dienst/caddy
+cat > /srv/dienst/dienst.env <<'EOF'
+${dienstEnvFile(o.env)}
+EOF
+chmod 600 /srv/dienst/dienst.env
+printf '%s\\n' '${o.appRef}' '${o.caddyRef}' > /srv/dienst/update-refs
+cat > /srv/dienst/Caddyfile <<'EOF'
+{
+\temail ${o.email}
+}
+${o.host} {
+\tencode zstd gzip
+\treverse_proxy 127.0.0.1:4100
+}
+EOF
+cat > /srv/dienst/docker-compose.yml <<'EOF'
+services:
+  app:
+    image: ${o.appImage}  # eigen-app
+    restart: unless-stopped
+    network_mode: host
+    command: ["node", "dist/broker/main.js"]
+    stop_grace_period: 2m
+    environment:
+      - BROKER_ENV_FILE=/etc/dienst/dienst.env
+      - BROKER_DATA_DIR=/data
+      - BROKER_HOST=127.0.0.1
+      - BROKER_PORT=4100
+      - BROKER_TRUST_PROXY=loopback
+    volumes:
+      - /srv/dienst/data:/data
+      - /srv/dienst/dienst.env:/etc/dienst/dienst.env:ro
+  caddy:
+    image: ${o.caddyImage}  # eigen-caddy
+    restart: unless-stopped
+    network_mode: host
+    command: caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    volumes:
+      - /srv/dienst/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /srv/dienst/caddy:/data
+EOF
+docker pull ${o.appImage}
+docker pull ${o.caddyImage}
+cd /srv/dienst && docker compose up -d
+${prefix ? dienstUpdaterInstall(prefix) : "# geen updates op afstand: image zonder registry-pad"}
+`;
+}
+
+/** Updater (zelfde script als op een cloud, met de gezondheid van de Dienst) en de dagelijkse controle op een nieuwe versie. */
+export function dienstUpdaterInstall(prefix: string) {
+  return `printf '%s\\n' '${prefix}' > /srv/dienst/update-allowed
+cat > /srv/dienst/eigen-update.sh <<'UPDATER'
+${updaterScript()}
+UPDATER
+cat > /srv/dienst/dienst-check.sh <<'CHECK'
+${dienstCheckScript()}
+CHECK
+chmod 700 /srv/dienst/eigen-update.sh /srv/dienst/dienst-check.sh
+cat > /srv/dienst/update.env <<'EOF'
+EIGEN_ROOT=/srv/dienst
+HEALTH_URL=http://127.0.0.1:4100/v1/status
+CADDY_HEALTH_URL=
+EOF
+cat > /etc/systemd/system/dienst-update.path <<'EOF'
+[Path]
+PathModified=/srv/dienst/data/update-request.json
+[Install]
+WantedBy=multi-user.target
+EOF
+cat > /etc/systemd/system/dienst-update.service <<'EOF'
+[Unit]
+Description=Eigen Cloud Dienst bijwerken
+[Service]
+Type=oneshot
+EnvironmentFile=/srv/dienst/update.env
+ExecStart=/srv/dienst/eigen-update.sh
+EOF
+cat > /etc/systemd/system/dienst-check.service <<'EOF'
+[Unit]
+Description=Eigen Cloud Dienst: nieuwe versie zoeken
+[Service]
+Type=oneshot
+EnvironmentFile=/srv/dienst/update.env
+ExecStart=/srv/dienst/dienst-check.sh
+EOF
+cat > /etc/systemd/system/dienst-check.timer <<'EOF'
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=1h
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload && systemctl enable --now dienst-update.path dienst-check.timer
+echo '{"v":1}' > /srv/dienst/data/updater.json`;
+}
+
+/**
+ * Dagelijks (systemd-timer): kijkt met de code uit het draaiende image (resolveImage in updates.ts) welke versie de tag
+ * in de registry heeft. Is die nieuwer dan wat /v1/status meldt, dan komt er een verzoek voor eigen-update.sh, met vaste
+ * versies (image@sha256). Een versie die al eens mislukte, wordt niet opnieuw geprobeerd. Te testen met EIGEN_ROOT.
+ */
+export function dienstCheckScript() {
+  return `#!/bin/bash
+# Eigen Cloud Dienst — kijken of er een nieuwere versie is; zo ja: een verzoek voor eigen-update.sh.
+set -uo pipefail
+ROOT="\${EIGEN_ROOT:-/srv/dienst}"; HEALTH_URL="\${HEALTH_URL:-http://127.0.0.1:4100/v1/status}"
+REQ="$ROOT/data/update-request.json"; RES="$ROOT/data/update-result.json"; COMPOSE="$ROOT/docker-compose.yml"
+APP_REF=$(sed -n 1p "$ROOT/update-refs" 2>/dev/null); CADDY_REF=$(sed -n 2p "$ROOT/update-refs" 2>/dev/null)
+[ -n "$APP_REF" ] || exit 0
+CUR_IMAGE=$(sed -nE 's|^    image: (.*)  # eigen-app$|\\1|p' "$COMPOSE")
+[ -n "$CUR_IMAGE" ] || exit 0
+NOW=$(curl -fsS --max-time 5 "$HEALTH_URL" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version") or "")') || exit 0
+REL=$(docker run --rm --network host --entrypoint node "$CUR_IMAGE" --input-type=module -e 'const { resolveImage } = await import("/app/dist/cluster/updates.js"); const app = await resolveImage(process.argv[1]); const caddy = process.argv[2] ? await resolveImage(process.argv[2]) : null; console.log(JSON.stringify({ version: app.version, app: app.pinned, caddy: caddy ? caddy.pinned : null }));' "$APP_REF" "$CADDY_REF" 2>/dev/null | tail -n1) || exit 0
+python3 - "$REL" "$NOW" "$REQ" "$RES" <<'PY'
+import json, os, sys, time
+rel, now, req, res = sys.argv[1:5]
+try:
+    r = json.loads(rel)
+except Exception:
+    sys.exit(0)
+def parse(v):
+    try:
+        return [int(x) for x in str(v).split(".")]
+    except Exception:
+        return None
+new, cur = parse(r.get("version") or ""), parse(now)
+if not new or not cur or not r.get("app"):
+    sys.exit(0)
+n = max(len(new), len(cur))
+if new + [0] * (n - len(new)) <= cur + [0] * (n - len(cur)):
+    sys.exit(0)
+try:
+    last = json.load(open(res))
+    if last.get("version") == r["version"] and not last.get("ok"):
+        sys.exit(0)
+except Exception:
+    pass
+tmp = req + ".tmp"
+json.dump({"id": "auto-%s-%d" % (r["version"], int(time.time())), "app": r["app"], "caddy": r.get("caddy"), "version": r["version"]}, open(tmp, "w"))
+os.replace(tmp, req)
+PY`;
 }
 
 /** Caddyfile met DNS-01 (werkt ook als cloud.<domein> naar meerdere servers wijst). */

@@ -87,7 +87,8 @@ het risico op wanbetaling, de btw en je eigen tijd.
 | `BROKER_TRUST_PROXY` | `loopback,uniquelocal` | Welke proxy het IP-adres van de bezoeker mag doorgeven |
 | `BROKER_SECRET` | — | 64 hex-tekens; anders wordt `geheim.key` gemaakt. **Bewaar een kopie veilig**: zonder deze sleutel zijn de pakketten niet meer te lezen |
 | `BROKER_TERMS_URL`, `BROKER_PRIVACY_URL` | — | Links naar je voorwaarden en privacyverklaring (standaard; in het beheer onder Huisstijl te overschrijven) |
-| `BROKER_FREE_ZONE` | uit | Domein van de dienst voor gratis adressen, bijv. `eigencloud.nl`: klanten kiezen dan alleen een naam (`vanes.eigencloud.nl`), zonder domein te kopen. Zie hieronder |
+| `BROKER_FREE_ZONE` | uit | Domein van de dienst voor gratis adressen, bijv. `eigencloud.nl`: klanten kiezen dan alleen een naam (`vanes.eigencloud.nl`), zonder domein te kopen. Zie hieronder. Wordt genegeerd als `BROKER_ADRES_URL` is ingesteld |
+| `BROKER_ADRES_URL` | uit | Adres van de centrale **adressendienst**, bijv. `https://adressen.eigencloud.nl`. Gratis adressen komen dan uit de gedeelde zone van die dienst, zodat klanten hun adres houden als ze van aanbieder wisselen. Zie hieronder en [ADRESSEN.md](ADRESSEN.md) |
 | `MOLLIE_API_KEY` | — | `test_…` of `live_…` |
 | `MOLLIE_API_URL` | `https://api.mollie.com/v2` | |
 | `OPENPROVIDER_USERNAME`, `OPENPROVIDER_PASSWORD` | — | |
@@ -112,6 +113,9 @@ het risico op wanbetaling, de btw en je eigen tijd.
 | `BROKER_BRAND_NAME` | `Eigen Cloud Dienst` | Standaardnaam van je dienst in de app en in mails aan medewerkers; in het beheer (Huisstijl) te overschrijven |
 | `BROKER_HEALTH_UNHEALTHY_MS` | `900000` (15 min) | Zo lang mag een cloud ongezond melden voordat de klant automatisch een bericht krijgt |
 | `BROKER_HEALTH_SILENT_MS` | `21600000` (6 uur) | Zo lang mag een klare cloud (die zich al eens gemeld heeft) stil blijven voordat er automatisch een bericht komt |
+| `BROKER_ENV_FILE` | — | Bestand met regels `NAAM=waarde` (letterlijk, zonder aanhalingstekens; `#` en lege regels tellen niet). Wat al in de omgeving staat gaat voor. De server die de app opzet gebruikt `/srv/dienst/dienst.env` |
+| `BROKER_BACKUP_ENDPOINT`, `BROKER_BACKUP_REGION` (`fr-par`), `BROKER_BACKUP_BUCKET`, `BROKER_BACKUP_ACCESS_KEY`, `BROKER_BACKUP_SECRET_KEY` | uit | Eigen back-up van de Dienst naar een S3-bucket, zie *Back-up van de Dienst*. Alleen samen met `BROKER_SECRET` |
+| `BROKER_BACKUP_EVERY_MS` | `3600000` | Hoe vaak de Dienst een back-up maakt |
 
 ### 3. Starten
 
@@ -135,7 +139,9 @@ Mollie moet `https://dienst.jouwbedrijf.nl/v1/mollie/webhook` kunnen bereiken.
 
 ### 4. Gratis adressen (`BROKER_FREE_ZONE`)
 
-Zo hoeft een nieuwe klant geen domein te kopen en geen houdergegevens in te vullen:
+Zo hoeft een nieuwe klant geen domein te kopen en geen houdergegevens in te vullen. Let op: met
+`BROKER_FREE_ZONE` zijn de adressen van **jouw** Dienst; een klant die overstapt kan zijn adres niet meenemen.
+Gebruik liever de centrale adressendienst (4b).
 
 1. Neem een domein voor de dienst, bijvoorbeeld `eigencloud.nl`, en maak het bij deSEC aan (in hetzelfde account als `DESEC_TOKEN`).
 2. Zet bij je registrar de nameservers van dat domein op `ns1.desec.io` en `ns2.desec.org` (en de DS-records van deSEC voor DNSSEC).
@@ -143,12 +149,142 @@ Zo hoeft een nieuwe klant geen domein te kopen en geen houdergegevens in te vull
 
 Per klant maakt de dienst een eigen zone `naam.eigencloud.nl` bij deSEC (met een eigen DNS-token, net als bij een eigen domein) en zet in `eigencloud.nl` de verwijzing ernaartoe (NS en DS). Namen van 3 tot 32 tekens; een paar namen zijn gereserveerd (`www`, `mail`, `cloud`, `api`, `dienst`, …, zie `RESERVED_LABELS` in `src/broker/config.ts`). Let op: deSEC heeft een standaardlimiet op het aantal zones per account; vraag deSEC om een hogere limiet voordat je veel klanten hebt. Na opzeggen en opruimen blijft de zone staan (naam bezet) tot je hem zelf weghaalt.
 
+### 4b. Gratis adressen via de centrale adressendienst (`BROKER_ADRES_URL`)
+
+Dit is de bedoelde manier (zie ROLLEN.md): de gratis adressen (`naam.eigencloud.nl`) zijn **gedeeld door alle
+aanbieders** en worden uitgegeven door één centrale adressendienst (draait bij Rene, zie [ADRESSEN.md](ADRESSEN.md)).
+Een klant houdt zijn adres als hij naar een andere aanbieder overstapt.
+
+1. **Sleutel van je Dienst.** Bij de eerste start maakt de Dienst `aanbieder.key` in de datamap (Ed25519,
+   alleen leesbaar voor de eigenaar). De publieke sleutel staat bij het starten in het logboek, en met
+   `npm run dienst:cli -- sleutel` (of `docker exec dienst node dist/broker/cli.js sleutel`) krijg je hem
+   samen met een kant-en-klare regel voor `aanbieders.json`. **Bewaar `aanbieder.key` in je back-up**: een
+   nieuwe sleutel betekent een nieuwe pull request op de lijst.
+2. **Op de lijst.** Zet je regel met `"sleutel"` in `aanbieders.json` (pull request, zie *De lijst van
+   aanbieders* hieronder). De `url` moet **precies** je `BROKER_PUBLIC_URL` zijn: zo herkent de
+   adressendienst je verzoeken.
+3. Zet `BROKER_ADRES_URL=https://adressen.eigencloud.nl` en start de Dienst opnieuw.
+
+Wat er dan anders is:
+
+- `GET /v1/info` geeft als `freeZone` de zone van de adressendienst; *vrij of bezet* vraagt de Dienst daar na.
+- Bij het klaarzetten vraagt de Dienst de naam aan bij de adressendienst (stap *DNS-zone*). Die maakt de
+  zone `naam.eigencloud.nl` in **zijn** deSEC-account (deSEC staat geen subzone in een ander account toe),
+  zet de verwijzing (NS/DS) en geeft de Dienst een deSEC-token dat **alleen in die zone** mag schrijven.
+  De stap *Je gratis adres aanzetten* hoeft dan niets meer te doen.
+- Omdat de zone niet van jou is, gaat **alles wat de zone van de klant aanraakt** met dat token: de DNS-proxy
+  (`/v1/desec/…`), acme-dns (certificaten) en de mailrecords (DKIM/DMARC) bij het klaarzetten. Je eigen
+  `DESEC_TOKEN` wordt voor deze klanten niet gebruikt. Het token staat versleuteld bij de bestelling.
+- **Overdrachtscode.** De adressendienst geeft bij elk adres een overdrachtscode (`ABCD-EFGH-JKLM-NPQR-STUV`)
+  die **van de klant** is. Hij staat in het pakket (`kit.dns.transferCode`), dus de console of app van de
+  klant bewaart hem. Wil de klant naar een andere aanbieder, dan bestelt hij daar een gratis adres met
+  dezelfde naam én die code (`domain: {mode: "sub", name, transferCode}`). De nieuwe Dienst controleert de
+  code vóór de betaling, en neemt het adres na betaling over: de adressendienst trekt het token van de oude
+  aanbieder in, geeft de nieuwe een eigen token en een **nieuwe** code (de oude werkt dan niet meer). De
+  records in de zone blijven staan; de cloud verhuist daarna met de gewone verhuisfunctie.
+- **Opzeggen en opruimen** laat het adres bewust staan bij de adressendienst (op jouw naam): de klant kan
+  het nog meenemen. Is dat niet meer nodig, dan geef je het terug met
+  `npm run dienst:cli -- adres-vrijgeven <id> --zeker` (alleen bij een opgezegde bestelling). De zone met alle
+  records gaat dan weg; na 30 dagen kan iemand anders de naam krijgen. Is de klant al overgestapt, dan meldt
+  dit dat het adres bij een andere aanbieder hoort en gebeurt er niets.
+- Bestellingen die vóór het instellen van `BROKER_ADRES_URL` met `BROKER_FREE_ZONE` zijn gedaan, blijven
+  zoals ze waren (eigen zone, eigen token); per bestelling is vastgelegd welke manier hij gebruikt.
+
+### De lijst van aanbieders (`aanbieders.json`)
+
+Een JSON-lijst in de repository; de app leest hem (om een aanbieder te kiezen) en de adressendienst ook (wie
+gratis adressen mag aanvragen). Een aanbieder voegt zich toe met een pull request.
+
+```json
+[
+  {
+    "naam": "Van Es Diensten",
+    "url": "https://dienst.vanes.nl",
+    "land": "NL",
+    "contact": "hallo@vanes.nl",
+    "omschrijving": "Eigen Cloud vanuit Rotterdam",
+    "sleutel": "MCowBQYDK2VwAyEA…"
+  }
+]
+```
+
+| Veld | Nodig | Wat |
+|---|---|---|
+| `naam` | ja | Naam zoals de app hem toont |
+| `url` | ja | Adres van de Dienst, precies `BROKER_PUBLIC_URL` (https) |
+| `land`, `contact`, `omschrijving` | nee | Voor de app |
+| `sleutel` | voor gratis adressen | Publieke Ed25519-sleutel van de Dienst (base64 SPKI), uit `dienst:cli -- sleutel`. Zonder sleutel kan de aanbieder geen gratis adressen aanvragen |
+
 ### 5. De app laten weten waar de dienst staat
 
 Zet het adres (bijv. `https://dienst.eigencloud.nl`) in het bestand `DIENST_URL` in de repository, of als GitHub-variabele `EIGEN_DIENST_URL`. Vanaf de volgende versie bieden de app en de console de dienst aan nieuwe gebruikers aan als eerste keuze ("Wij regelen alles"); zonder adres zien ze alleen de route met hun eigen Scaleway-sleutel.
 
 Maak dagelijks een back-up van de datamap (de database `dienst.sqlite` met `sqlite3 dienst.sqlite ".backup …"`)
-en bewaar `BROKER_SECRET` / `geheim.key` apart.
+en bewaar `BROKER_SECRET` / `geheim.key` en `aanbieder.key` apart. Of laat de Dienst het zelf doen met `BROKER_BACKUP_*`
+(zie *Back-up van de Dienst*); dat gebeurt vanzelf als je de Dienst vanuit de app opzet.
+
+## Opzetten vanuit de app (zonder terminal)
+
+Wie al een Eigen Cloud heeft, kan in de beheerconsole (computer of app, op het overzicht: **Aanbieder worden**) zijn
+eigen Dienst laten opzetten. De console doet dan wat hierboven met de hand staat. Vier stappen, met Vorige/Volgende:
+
+1. **Bedrijf**: naam, adres, KvK, btw-nummer (voor de facturen, `BROKER_COMPANY_*`) en het e-mailadres van de eigenaar
+   (`BROKER_OWNER_EMAIL`; die krijgt de eerste inlogcode voor `/beheer`).
+2. **Accounts**, elk meteen gecontroleerd: Scaleway (geheime sleutel + organisatie-ID; `GET /account/v3/projects`),
+   Mollie (`GET /v2/methods`), deSEC (`GET /domains/`), de mailserver (SMTP: inloggen; leeg = de relay van je eigen
+   cloud, afzender `noreply@<je domein>`), en optioneel Openprovider (inloggen; houdt niet tegen, want Openprovider kijkt
+   ook naar het IP-adres) en de adressendienst (`BROKER_ADRES_URL`).
+3. **Adres**: standaard `https://dienst.<je domein>`. Je cloud zet het A-record zelf in je DNS (instelling `extra_dns`,
+   nu ook met A/AAAA; een lege waarde haalt een record weg). Een adres onder een ander domein kan ook; dan zet je het
+   record zelf.
+4. **Opzetten**: bij Scaleway een project `eigen-cloud-dienst` met
+   - een **eigen sleutel voor de back-ups**: IAM-applicatie `eigen-cloud-dienst-backup` met alleen
+     `ObjectStorageFullAccess` in dat project (net als de projectsleutels van klanten). De organisatiesleutel zelf gaat
+     ook naar de server (de Dienst heeft hem nodig om klantprojecten te maken), maar de back-ups hangen er niet van af;
+   - een **bucket in Parijs** (`<cluster>-dienst-backup-<willekeurig>`) met versiebeheer en 30 dagen object-lock;
+   - een **server** DEV1-S in Amsterdam met cloud-init (`dienstUserData` in `src/cluster/cloudinit.ts`): Docker, het
+     image van je cloud met `node dist/broker/main.js`, `/srv/dienst/dienst.env` (0600) met alle instellingen
+     (`BROKER_*`, `MOLLIE_API_KEY`, `DESEC_TOKEN`, `SCW_*`, `OPENPROVIDER_*`, `BROKER_BACKUP_*`, `BROKER_SECRET`),
+     de datamap `/srv/dienst/data`, en Caddy (het `eigen-caddy`-image) met HTTPS via HTTP-01.
+
+   De console maakt `BROKER_SECRET` (64 hex) zelf en bewaart hem in je kluis (en dus versleuteld in de herstelkopie in je
+   opslag). Let op: anders dan bij een cloud staan de geheimen hier wél in de user-data. De server is alleen van jou,
+   en zodra de Dienst bereikbaar is haalt de console de user-data weg bij Scaleway (`DELETE …/user_data/cloud-init`).
+
+Daarna (**Je dienst**): status (bereikbaar, versie, laatste back-up, DNS), **Beheer openen** (in de app: het
+beheerscherm met vingerafdruk), **Instellingen wijzigen** (de stappen opnieuw) en **Opnieuw opzetten**: de huidige
+server maakt een laatste back-up en schrijft daarna niets meer, er komt een nieuwe server met de nieuwe instellingen die
+die back-up bij de eerste start terugzet, het A-record gaat naar de nieuwe server en de oude wordt verwijderd. Door de
+DNS (deSEC: minstens een uur) kan een deel van de bezoekers de Dienst daarna even niet bereiken. **Dienst verwijderen**
+(typ het adres ter bevestiging): laatste back-up, server weg, A-record weg; de bucket met back-ups en de sleutel blijven,
+zodat *Opnieuw opzetten* alles terugzet.
+
+**Bijwerken**: dezelfde updater als op een cloud (`/srv/dienst/eigen-update.sh`, gezondheid via `GET /v1/status`, bij
+een probleem de vorige versie terug). Elke nacht (systemd-timer `dienst-check.timer`) kijkt `dienst-check.sh` met de code
+uit het draaiende image (`resolveImage` uit `updates.ts`) welke versie `ghcr.io/renevanes/eigen-cloud:latest` heeft; is
+die nieuwer, dan volgt een update naar die vaste versie (`image@sha256:…`). Een versie die al eens mislukte, wordt niet
+opnieuw geprobeerd.
+
+Routes van de console (ook in de app, zelfde JSON): `GET /api/aanbieder`, `POST /api/aanbieder/stap {step}`
+(`uit` = stoppen zolang er geen Dienst is), `POST /api/aanbieder/bedrijf`, `POST /api/aanbieder/accounts`,
+`POST /api/aanbieder/adres`, `POST /api/aanbieder/opzetten` (ook voor opnieuw opzetten), `GET /api/aanbieder/status`,
+`POST /api/aanbieder/verwijderen {confirm}`. De toestand staat in de kluis onder `console.aanbieder`; antwoorden bevatten
+nooit sleutels (alleen de laatste 4 tekens).
+
+## Back-up van de Dienst (`BROKER_BACKUP_*`)
+
+- Elk uur (en bij het starten en stoppen) een kopie via de online back-up van SQLite (`db.backup`), samen met
+  `aanbieder.key` en `bundles.json`, gzip, versleuteld (AES-256-GCM in blokken, zoals de back-ups van een cloud) met een
+  sleutel afgeleid van `BROKER_SECRET` (HKDF, doel `dienst-backup`). Naam: `dienst/<JJJJMMDDTHHMMSSZ>-<x>.enc`.
+- Bewaard: alles van de laatste 48 uur, daarna de nieuwste per dag tot 30 dagen; ouder gaat weg (de bucket heeft zelf
+  ook 30 dagen object-lock).
+- **Terugzetten**: start de Dienst met een lege datamap (geen `dienst.sqlite`), dan zet hij eerst de nieuwste back-up
+  terug, vóórdat hij een nieuwe `aanbieder.key` zou maken. Lukt dat niet (opslag onbereikbaar), dan stopt hij; Docker
+  start hem opnieuw. Zo komt er nooit een lege database als nieuwste back-up.
+- `GET /v1/status` (openbaar, zonder gegevens): `{version, uptime, lastBackupAt, backup: "aan"|"fout"|"uit", closing}`.
+- `POST /v1/status/handover` met `Authorization: Beheer <hex(HKDF(BROKER_SECRET, "dienst-beheer"))>`: laatste back-up,
+  daarna geeft deze server op alles behalve `/v1/status` een 503 en maakt hij geen back-ups meer (de console gebruikt
+  dit bij opnieuw opzetten en verwijderen).
 
 ## Bundels (`bundles.json`)
 
@@ -276,6 +412,8 @@ npm run dienst:cli -- facturen <id>        # alleen die van één bestelling
 npm run dienst:cli -- eigenaar <e-mail>    # eerste (of extra) eigenaar voor het beheer
 npm run dienst:cli -- medewerkers          # alle medewerkers, hun rol en tweede stap
 npm run dienst:cli -- tweede-stap-wissen <e-mail>   # telefoon kwijt: opnieuw laten instellen
+npm run dienst:cli -- sleutel              # publieke sleutel van je Dienst, met een regel voor aanbieders.json
+npm run dienst:cli -- adres-vrijgeven <id> [--zeker]   # gratis adres (adressendienst) van een opgezegde bestelling teruggeven
 ```
 
 `klanten` laat per bestelling ook het maandbedrag en het aantal facturen (en het betaalde totaal) zien.
@@ -475,6 +613,12 @@ Controleer met echte (test)accounts vóór je live gaat:
   `POST /domains/{id}/authcode/reset`. Gebouwd volgens de documentatie, nog niet met een echt account getest.
   Controleer ook per extensie of de code direct terugkomt (bij sommige registries gaat hij per mail naar de houder).
 
+**Opzetten vanuit de app** (nog niet tegen echte accounts gedraaid): of `GET /account/v3/projects?organization_id=…`
+werkt met een sleutel van een IAM-applicatie met `ProjectManager`; of een nieuwe IAM-sleutel binnen een paar seconden
+bij Object Storage werkt (de console probeert het 4 keer); `DELETE …/servers/{id}/user_data/cloud-init`; of
+`eigen-caddy` met alleen HTTP-01 een certificaat haalt; of `docker run … --entrypoint node <image> -e …` in het image de
+nieuwste versie vindt; en `GET /v2/methods` bij Mollie met een live-sleutel.
+
 ## Juridisch en administratief (kort)
 
 - **Reseller-voorwaarden**: lees de voorwaarden van Openprovider (houdergegevens moeten kloppen, je bent
@@ -497,15 +641,16 @@ JSON; fouten als `{ "error": "…" }`. Inloggen met `Authorization: Bearer <toke
 
 | Methode en pad | Wat |
 |---|---|
-| `GET /v1/info` | Naam, bundels (met `includes.users` en `extraUserMonthly`), links naar voorwaarden en privacy, `brand` |
+| `GET /v1/status` | `{version, uptime, lastBackupAt, backup, closing}`; zie *Back-up van de Dienst* |
+| `GET /v1/info` | Naam, bundels (met `includes.users` en `extraUserMonthly`), links naar voorwaarden en privacy, `brand`, `freeZone` (zone voor gratis adressen: van de adressendienst of `BROKER_FREE_ZONE`; `null` = uit) |
 | `GET /v1/brand` · `GET /v1/brand/logo` | Huisstijl van de aanbieder: `{name, accentColor, contact:{email,phone,website}, termsUrl, privacyUrl, logoUrl}`; het logo als PNG/SVG |
 | `GET /v1/invite/:code` | `{valid, code?, reason?, brand, bundle?}` (hoofdletters en streepjes maken niet uit) |
 | `POST /v1/auth/start` `{email}` | Mailt een code van 6 cijfers (15 minuten, 5 pogingen) → 202 |
 | `POST /v1/auth/verify` `{email, code}` | → `{token, customer}` (token 90 dagen geldig) |
 | `GET /v1/domains/check?name=` | → `{domain, available, price}` |
-| `POST /v1/orders` | `{bundle, domain:{mode,name,authCode?}, registrant?, acceptTerms:true, invite?}` → `{orderId, checkoutUrl}`. Een ongeldige `invite` geeft 400; een geldige wordt bij de bestelling bewaard en geteld |
+| `POST /v1/orders` | `{bundle, domain:{mode,name,authCode?,transferCode?}, registrant?, acceptTerms:true, invite?}` → `{orderId, checkoutUrl}`. Een ongeldige `invite` geeft 400; een geldige wordt bij de bestelling bewaard en geteld. `transferCode` (ook op het hoogste niveau toegestaan) alleen bij `mode: "sub"` met de adressendienst: het adres overnemen van een andere aanbieder; een foute code geeft 400, een adres dat niet bestaat 404 |
 | `GET /v1/orders/:id` | Status en stappen |
-| `GET /v1/orders/:id/kit` | Het pakket (alleen als het klaar is; anders 409) |
+| `GET /v1/orders/:id/kit` | Het pakket (alleen als het klaar is; anders 409). Bij een gratis adres van de adressendienst met `dns.transferCode` (de overdrachtscode van de klant) |
 | `GET /v1/me` | Klant en bestellingen. Herstellen op een nieuw toestel gebruikt dit: inloggen met e-mail en code → nieuwste bestelling → `kit` → de console zoekt met de herstelsleutel de versleutelde configuratie in de opslag van het pakket (de dienst kan die zelf niet lezen) |
 | `POST /v1/orders/:id/cancel` | Opzeggen → `{ok, endsAt}` (`endsAt` hier als datum `JJJJ-MM-DD`) |
 | `GET /v1/orders/:id/billing` | Abonnement en betalingen, zie hieronder |

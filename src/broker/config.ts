@@ -5,6 +5,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { backupTarget, type BackupTarget } from "./backup.js";
 
 export interface Money { currency: "EUR"; value: string }
 
@@ -35,6 +36,15 @@ export interface BrokerConfig {
   publicUrl: string;
   /** Zone van de dienst voor gratis adressen (BROKER_FREE_ZONE, bijv. "eigencloud.nl" → naam.eigencloud.nl); null = uit. */
   freeZone: string | null;
+  /**
+   * Centrale adressendienst (BROKER_ADRES_URL): gratis adressen komen dan uit de gedeelde zone van die dienst
+   * in plaats van uit BROKER_FREE_ZONE, zodat de klant zijn adres houdt als hij overstapt. Zie ADRESSEN.md.
+   */
+  adresUrl: string | null;
+  /** Ed25519-sleutel van deze aanbieder (aanbieder.key in de datamap); ondertekent verzoeken aan de adressendienst. */
+  providerKey: crypto.KeyObject;
+  /** De publieke sleutel daarvan (base64 SPKI) voor "sleutel" in aanbieders.json. */
+  providerPublicKey: string;
   termsUrl: string | null;
   privacyUrl: string | null;
   mollie: { apiKey: string; url: string };
@@ -61,6 +71,9 @@ export interface BrokerConfig {
   costs: CostTable;
   /** Gezondheid van clouds: na hoeveel ms ongezond / zonder melding komt er automatisch een bericht. */
   health: { unhealthyMs: number; silentMs: number };
+  /** Eigen back-up van de Dienst (BROKER_BACKUP_*), alleen samen met BROKER_SECRET; null = uit. */
+  backup: BackupTarget | null;
+  backupEveryMs: number;
 }
 
 export const NAMESERVERS = ["ns1.desec.io", "ns2.desec.org"];
@@ -180,11 +193,25 @@ function loadSecret(env: NodeJS.ProcessEnv, dataDir: string): Buffer {
   return Buffer.from(fs.readFileSync(f, "utf8").trim(), "hex");
 }
 
+/** Leest de Ed25519-sleutel van de aanbieder, of maakt hem eenmalig in de datamap (alleen leesbaar voor de eigenaar). */
+export function loadProviderKey(dataDir: string): crypto.KeyObject {
+  const f = path.join(dataDir, "aanbieder.key");
+  if (!fs.existsSync(f)) {
+    const { privateKey } = crypto.generateKeyPairSync("ed25519");
+    try { fs.writeFileSync(f, privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600, flag: "wx" }); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; }
+  }
+  const key = crypto.createPrivateKey(fs.readFileSync(f, "utf8"));
+  if (key.asymmetricKeyType !== "ed25519") throw new Error(`${f}: geen Ed25519-sleutel`);
+  return key;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BrokerConfig {
   const dataDir = path.resolve(env.BROKER_DATA_DIR || "./data-dienst");
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const port = Number(env.BROKER_PORT || 4100);
   const trim = (u: string) => u.replace(/\/+$/, "");
+  const providerKey = loadProviderKey(dataDir);
   return {
     dataDir,
     port,
@@ -192,6 +219,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BrokerConfig {
     trustProxy: env.BROKER_TRUST_PROXY || "loopback,uniquelocal",
     publicUrl: trim(env.BROKER_PUBLIC_URL || `http://localhost:${port}`),
     freeZone: env.BROKER_FREE_ZONE ? env.BROKER_FREE_ZONE.trim().toLowerCase().replace(/^\.|\.$/g, "") : null,
+    adresUrl: env.BROKER_ADRES_URL ? trim(env.BROKER_ADRES_URL.trim()) : null,
+    providerKey,
+    providerPublicKey: crypto.createPublicKey(providerKey).export({ type: "spki", format: "der" }).toString("base64"),
     termsUrl: env.BROKER_TERMS_URL || null,
     privacyUrl: env.BROKER_PRIVACY_URL || null,
     mollie: { apiKey: env.MOLLIE_API_KEY || "", url: trim(env.MOLLIE_API_URL || "https://api.mollie.com/v2") },
@@ -226,7 +256,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BrokerConfig {
       unhealthyMs: Number(env.BROKER_HEALTH_UNHEALTHY_MS || 15 * 60_000),
       silentMs: Number(env.BROKER_HEALTH_SILENT_MS || 6 * 3600_000),
     },
+    backup: backupTarget(env),
+    backupEveryMs: Number(env.BROKER_BACKUP_EVERY_MS || 3_600_000),
   };
+}
+
+/**
+ * BROKER_ENV_FILE: instellingen uit een bestand met regels `NAAM=waarde` (letterlijk, zonder aanhalingstekens; lege
+ * regels en # worden overgeslagen). Wat al in de omgeving staat, gaat voor. Zo hoeft er niets te worden ge-escaped.
+ */
+export function loadEnvFile(env: NodeJS.ProcessEnv = process.env) {
+  const f = env.BROKER_ENV_FILE;
+  if (!f) return 0;
+  let n = 0;
+  for (const line of fs.readFileSync(f, "utf8").split(/\r?\n/)) {
+    const m = /^([A-Z][A-Z0-9_]*)=(.*)$/.exec(line);
+    if (!m || line.startsWith("#")) continue;
+    if (env[m[1]] === undefined) { env[m[1]] = m[2]; n++; }
+  }
+  return n;
 }
 
 function loadVat(v: string | undefined): number {
@@ -246,5 +294,6 @@ export function missingSettings(c: BrokerConfig, env: NodeJS.ProcessEnv = proces
   if (!c.smtpUrl) out.push("BROKER_SMTP_URL");
   if (!env.BROKER_PUBLIC_URL) out.push("BROKER_PUBLIC_URL");
   if (!c.company.name) out.push("BROKER_COMPANY_NAME (en BROKER_COMPANY_ADDRESS/_KVK/_VAT) voor de facturen");
+  if (c.backup && !env.BROKER_SECRET) out.push("BROKER_SECRET (zonder deze sleutel maakt de Dienst geen back-ups)");
   return out;
 }

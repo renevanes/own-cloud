@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import dnsp from "node:dns/promises";
 import fs from "node:fs";
+import { isIPv4, isIPv6 } from "node:net";
 import tls from "node:tls";
 import { config } from "./config.js";
 import { db, getSetting, setSetting } from "./db.js";
@@ -118,10 +119,22 @@ export function expectedRecords(info: Pick<ClusterInfo, "ips4" | "ips6">): DnsRe
   recs.push({ sub: "", type: "TXT", values: [txt(`v=spf1 a:mail.${d}${extra ? " " + extra : ""} -all`)], ttl: 3600 });
   const pub = dkimPublic();
   if (pub) recs.push({ sub: `${dkimSelector()}._domainkey`, type: "TXT", values: [txt(`v=DKIM1; k=rsa; p=${pub}`)], ttl: 3600 });
-  // Extra records uit de beheerconsole (bijv. de DKIM-sleutel van de mail-relay bij Scaleway).
+  // Extra records uit de beheerconsole: de DKIM-sleutel van de mail-relay bij Scaleway (TXT), en het adres van de
+  // Eigen Cloud Dienst van een aanbieder (A/AAAA, bijv. dienst.<domein>). Een lege A/AAAA-waarde haalt het record weg.
+  // Records die de cloud zelf beheert (cloud, mail, apex, DKIM, DMARC) kunnen niet overschreven worden.
   try {
+    const own = new Set(recs.map((r) => `${r.sub}/${r.type}`));
     for (const x of JSON.parse(getSetting("extra_dns") || "[]") as { sub: string; type: string; value: string }[]) {
-      if (x.type === "TXT" && typeof x.sub === "string" && x.sub && !recs.some((r) => r.sub === x.sub && r.type === "TXT")) recs.push({ sub: x.sub, type: "TXT", values: [txt(x.value)], ttl: 3600 });
+      if (typeof x.sub !== "string" || !/^[a-z0-9_]([a-z0-9_.-]*[a-z0-9])?$/i.test(x.sub) || ["cloud", "mail", "_dmarc"].includes(x.sub.toLowerCase())) continue;
+      if (own.has(`${x.sub}/${x.type}`)) continue;
+      const value = typeof x.value === "string" ? x.value.trim() : "";
+      if (x.type === "TXT") {
+        if (!recs.some((r) => r.sub === x.sub && r.type === "TXT")) recs.push({ sub: x.sub, type: "TXT", values: [txt(x.value)], ttl: 3600 });
+      } else if ((x.type === "A" && (value === "" || isIPv4(value))) || (x.type === "AAAA" && (value === "" || isIPv6(value)))) {
+        const r = recs.find((y) => y.sub === x.sub && y.type === x.type);
+        if (r) { if (value && !r.values.includes(value)) r.values.push(value); }
+        else recs.push({ sub: x.sub, type: x.type, values: value ? [value] : [], ttl: 300 });
+      }
     }
   } catch { /* ongeldige instelling: negeren */ }
   const rua = getSetting("alert_email") || ownAddress();

@@ -38,6 +38,11 @@ export function fakeS3() {
           return send(200);
         }
         if (!b) return err(404, "NoSuchBucket");
+        if (req.method === "GET" && u.searchParams.get("list-type") === "2") {
+          const pfx = u.searchParams.get("prefix") ?? "";
+          const items = [...b.objects].filter(([k, vs]) => k.startsWith(pfx) && vs[vs.length - 1]?.body).map(([k, vs]) => `<Contents><Key>${k}</Key><Size>${vs[vs.length - 1].body!.length}</Size></Contents>`);
+          return send(200, `<ListBucketResult>${items.join("")}<IsTruncated>false</IsTruncated></ListBucketResult>`);
+        }
         if (req.method === "GET" && u.searchParams.has("versions")) {
           const items = [...b.objects].flatMap(([k, vs]) => vs.map((v) => v.body ? `<Version><Key>${k}</Key><VersionId>${v.id}</VersionId></Version>` : `<DeleteMarker><Key>${k}</Key><VersionId>${v.id}</VersionId></DeleteMarker>`));
           return send(200, `<ListVersionsResult>${items.join("")}</ListVersionsResult>`);

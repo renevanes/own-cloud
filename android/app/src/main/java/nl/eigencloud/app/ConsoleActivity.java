@@ -210,6 +210,22 @@ public final class ConsoleActivity extends Activity {
             Prefs.setStr(ConsoleActivity.this, Prefs.INVITE_CODE, null);
         }
 
+        /** Voor aanbieders: het beheer van de eigen Dienst openen (zelfde scherm als vanuit de app, met vingerafdruk). */
+        @JavascriptInterface
+        public void openDienst(String url) {
+            if (!onOurPage()) return;
+            main.post(() -> {
+                try {
+                    String u = DienstActivity.normalize(url);
+                    Prefs.setStr(ConsoleActivity.this, Prefs.DIENST_URL, u);
+                    DienstActivity.open(ConsoleActivity.this, u);
+                } catch (IllegalArgumentException e) {
+                    Uri x = Uri.parse(url);
+                    if ("https".equals(x.getScheme())) openExternal(x);
+                }
+            });
+        }
+
         @JavascriptInterface
         public void openUrl(String url) {
             if (!onOurPage()) return;

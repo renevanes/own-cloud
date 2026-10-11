@@ -301,6 +301,7 @@ const PAGES = [
   { id: "huisstijl", label: "Huisstijl", perm: "brand" },
   { id: "medewerkers", label: "Medewerkers", perm: "staff" },
   { id: "logboek", label: "Logboek", perm: "audit" },
+  { id: "lijst", label: "Op de lijst", perm: "brand" },
 ];
 let counts = {};
 function renderNav(current) {
@@ -323,7 +324,7 @@ window.addEventListener("hashchange", () => { if (me) route(); });
 
 async function route() {
   const [, page = "overzicht", arg] = location.hash.replace(/^#/, "").split("?")[0].split("/");
-  const known = { overzicht, klanten, klant, hulpvragen, hulpvraag, berichten, geld, kosten, aanbod, uitnodigingen, huisstijl, medewerkers, logboek, account };
+  const known = { overzicht, klanten, klant, hulpvragen, hulpvraag, berichten, geld, kosten, aanbod, uitnodigingen, huisstijl, medewerkers, logboek, account, lijst };
   const fn = known[page] ?? overzicht;
   renderNav(page);
   loading();
@@ -842,3 +843,26 @@ async function account() {
 
 fetch("/v1/brand").then((r) => r.json()).then(applyBrand).catch(() => {});
 start();
+
+
+// ───────── Op de openbare lijst van aanbieders ─────────
+
+async function lijst() {
+  const r = await api("/v1/admin/lijst");
+  const json = JSON.stringify(r.entry, null, 2);
+  root.innerHTML = `<h1>Op de lijst van aanbieders</h1>
+    <p class="lead">In de app kiezen nieuwe klanten een aanbieder uit een openbare lijst. Die lijst staat in het open-sourceproject op GitHub; je zet jezelf erop met een voorstel dat de beheerders van het project goedkeuren.</p>
+    ${r.opLijst ? `<p class="note">✓ Je staat op de lijst.</p>` : ""}
+    <ol class="steps">
+      <li>Controleer de regel hieronder en vul <b>omschrijving</b> en <b>land</b> aan. Naam en contact komen uit je huisstijl.</li>
+      <li>Kopieer de regel en open het bestand op GitHub (je hebt een gratis GitHub-account nodig).</li>
+      <li>Zet de regel tussen de blokhaken, met een komma ertussen als er al aanbieders staan, en kies <i>Propose changes</i>. Daarmee maak je een voorstel; je hoeft niets te installeren.</li>
+    </ol>
+    <pre class="code" id="entry">${esc(json)}</pre>
+    <p><button class="btn" id="copy">Regel kopiëren</button> <a class="btn primary" href="${esc(r.editUrl)}" target="_blank" rel="noopener">aanbieders.json openen op GitHub</a></p>
+    <p class="muted"><small>De sleutel hoort bij deze dienst; daarmee herkent de gedeelde adressendienst je, zodat je klanten een gratis adres kunnen nemen en meenemen als ze overstappen. Deel nooit het bestand aanbieder.key zelf.</small></p>`;
+  $("#copy").onclick = async () => {
+    try { await navigator.clipboard.writeText(json); toast("Gekopieerd"); }
+    catch { const sel = getSelection(); const range = document.createRange(); range.selectNodeContents($("#entry")); sel.removeAllRanges(); sel.addRange(range); toast("Geselecteerd: kopieer met je toetsenbord"); }
+  };
+}

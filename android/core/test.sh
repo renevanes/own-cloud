@@ -102,6 +102,7 @@ else
   echo "   dienst niet gestart:"; tail -30 "$BUILD/dienst.log"; RESULTS+=("FAIL ConsoleExtrasTest"); FAILED=1
 fi
 jrun QuickSetupTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
+jrun AanbiederTest MOTO_URL="http://127.0.0.1:$MOTO_PORT" SMTP_INFO="$BUILD/smtp-info.json"
 run golden-verify.ts npx tsx scripts/golden-verify.ts "$BUILD"
 
 echo "== Wachten op de cluster-node (leider)"

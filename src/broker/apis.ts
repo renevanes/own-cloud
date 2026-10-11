@@ -3,6 +3,7 @@
  * elke basis-URL komt uit de config zodat tests een nep-server kunnen gebruiken.
  */
 import type { BrokerConfig } from "./config.js";
+import { AdresClient } from "./adres.js";
 
 export class ApiError extends Error {
   constructor(readonly service: string, readonly status: number, message: string, readonly body?: unknown) { super(message); }
@@ -13,7 +14,7 @@ export class ApiError extends Error {
 /** Een netwerkfout of 5xx is tijdelijk; ApiError.permanent bepaalt de rest. */
 export const isPermanent = (e: unknown) => e instanceof ApiError && e.permanent;
 
-async function call(service: string, url: string, init: { method?: string; headers?: Record<string, string>; body?: unknown; raw?: string }) {
+export async function call(service: string, url: string, init: { method?: string; headers?: Record<string, string>; body?: unknown; raw?: string }) {
   const headers: Record<string, string> = { accept: "application/json", ...init.headers };
   let body: string | undefined = init.raw;
   if (init.body !== undefined) { body = JSON.stringify(init.body); headers["content-type"] = "application/json"; }
@@ -117,10 +118,12 @@ export class Openprovider {
   }
 }
 
-// ───────── deSEC (met het eigen token van de dienst) ─────────
+// ───────── deSEC (met het eigen token van de dienst, of het token van één gratis adres) ─────────
 
 export class Desec {
   constructor(private c: BrokerConfig["desec"]) {}
+  /** Zelfde deSEC, ander token (bijv. het token dat alleen in de zone van één gratis adres mag schrijven). */
+  withToken(token: string) { return new Desec({ ...this.c, token }); }
   private h() { return { authorization: `Token ${this.c.token}` }; }
   async getZone(name: string) {
     try { return (await call("deSEC", `${this.c.url}/domains/${name}/`, { headers: this.h() })).json; }
@@ -164,8 +167,15 @@ export class Scaleway {
   }
 }
 
-export interface Apis { mollie: Mollie; openprovider: Openprovider; desec: Desec; scaleway: Scaleway }
+export interface Apis {
+  mollie: Mollie; openprovider: Openprovider; desec: Desec; scaleway: Scaleway;
+  /** Centrale adressendienst (alleen met BROKER_ADRES_URL). */
+  adres: AdresClient | null;
+}
 
 export function makeApis(c: BrokerConfig): Apis {
-  return { mollie: new Mollie(c.mollie), openprovider: new Openprovider(c.openprovider), desec: new Desec(c.desec), scaleway: new Scaleway(c.scaleway) };
+  return {
+    mollie: new Mollie(c.mollie), openprovider: new Openprovider(c.openprovider), desec: new Desec(c.desec), scaleway: new Scaleway(c.scaleway),
+    adres: c.adresUrl ? new AdresClient({ url: c.adresUrl, dienst: c.publicUrl, key: c.providerKey }) : null,
+  };
 }

@@ -50,6 +50,39 @@ public class FormatsGoldenTest {
             }
             for (Object o : Json.listAt(g, "caddyfile")) T.eq(Json.str(o, "out"), CloudInit.caddyfile(Json.map(o, "cfg")), "caddyfile");
 
+            // Server van een Eigen Cloud Dienst (aanbieder), de updater en de dagelijkse versiecontrole
+            T.eq(Json.str(g, "updaterScript"), CloudInit.updaterScript(), "updaterScript");
+            T.eq(Json.str(g, "dienstCheckScript"), CloudInit.dienstCheckScript(), "dienstCheckScript");
+            for (Object o : Json.listAt(g, "dienstUserData")) {
+                Map<String, Object> in = Json.map(o, "o");
+                CloudInit.DienstInit d = new CloudInit.DienstInit();
+                d.host = Json.str(in, "host");
+                d.email = Json.str(in, "email");
+                d.appImage = Json.str(in, "appImage");
+                d.caddyImage = Json.str(in, "caddyImage");
+                d.appRef = Json.str(in, "appRef");
+                d.caddyRef = Json.str(in, "caddyRef");
+                for (Object kv : Json.listAt(in, "env")) d.env.add(new String[] {Json.str(kv, 0), Json.str(kv, 1)});
+                T.eq(Json.str(o, "out"), CloudInit.dienstUserData(d), "dienstUserData " + d.host);
+            }
+            int n = 0;
+            for (Object o : Json.listAt(g, "aanbieder")) {
+                Map<String, Object> cfg = Json.copy(Json.map(o, "cfg"));
+                n++;
+                T.eq(Json.stringify(Json.path(o, "view")), Json.stringify(Aanbieder.view(cfg)), "aanbieder view " + n);
+                T.eq(Json.stringify(Json.path(o, "settings")), Json.stringify(Admin.consoleSettings(cfg, "")), "consoleSettings met aanbieder " + n);
+                Map<String, Object> a = Json.map(cfg, "console", "aanbieder");
+                String ud = a != null && a.get("server") != null ? Aanbieder.serverUserData(cfg, a) : null;
+                T.eq(Json.str(o, "userData"), ud, "aanbieder user-data " + n);
+            }
+            T.check(n >= 6, "aanbieder-gevallen");
+            for (Object o : Json.listAt(g, "cleanUrl")) {
+                String in = Json.str(o, "input");
+                if (Json.str(o, "out") != null) T.eq(Json.str(o, "out"), Aanbieder.cleanUrl(in), "cleanUrl " + in);
+                else T.throwsWith(Json.str(o, "error"), () -> Aanbieder.cleanUrl(in), "cleanUrl " + in);
+            }
+            for (Object o : Json.listAt(g, "smtpDisplay")) T.eq(Json.str(o, "out"), Aanbieder.smtpDisplay(Json.str(o, "input")), "smtpDisplay " + Json.str(o, "input"));
+
             // 8. pickSize / buildPresets
             for (Object o : Json.listAt(g, "pickSize")) {
                 List<Catalog.SizeOption> sizes = new ArrayList<>();

@@ -23,6 +23,7 @@ import { makeStore, S3Store, type StoreConfig } from "../cluster/stores.js";
 import { restoreFromAny, restoreFromStore } from "../cluster/backup.js";
 import { rpc } from "../cluster/transport.js";
 import * as extras from "./extras.js";
+import * as aanbieder from "./aanbieder.js";
 import { findAdminConfig } from "../cluster/admin.js";
 import { consoleSettings } from "../cluster/admin.js";
 import { clusterStatus, findLeader, prepareStore, probeCluster, provisionFirstNode, readManifest, recoverAdminConfig, saveAdminCopy, sendJob, adminProof, pushAdminConfig } from "../cluster/admin.js";
@@ -661,6 +662,35 @@ export async function buildConsole() {
         save();
         return r;
       } catch (e) { save(); return reply.code(400).send({ error: (e as Error).message }); }
+    });
+
+    // ── Aanbieder worden: je eigen Eigen Cloud Dienst opzetten en bijhouden ──
+    const aDeps = (): aanbieder.Deps => ({
+      save,
+      storeEndpoint: (region) => storeOffers().find((o) => o.id === "scaleway")?.regions.find((r) => r.id === region)?.endpoint ?? `https://s3.${region}.scw.cloud`,
+    });
+    const aFail = (reply: FastifyReply, e: unknown) => reply.code(400).send({ error: (e as Error).message, ...((e as { steps?: unknown }).steps ? { steps: (e as { steps?: unknown }).steps } : {}) });
+    s.get("/api/aanbieder", async () => aanbieder.view(cfg()));
+    s.post<{ Body: { step?: string } }>("/api/aanbieder/stap", async (req, reply) => {
+      try { const r = aanbieder.setStep(cfg(), req.body?.step ?? ""); save(); return r; } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: Record<string, string> }>("/api/aanbieder/bedrijf", async (req, reply) => {
+      try { const r = aanbieder.saveBedrijf(cfg(), req.body ?? {}); save(); return r; } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: Record<string, unknown> }>("/api/aanbieder/accounts", async (req, reply) => {
+      try { const r = await aanbieder.saveAccounts(cfg(), req.body ?? {}); save(); return r; } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: { url?: string } }>("/api/aanbieder/adres", async (req, reply) => {
+      try { const r = aanbieder.saveAdres(cfg(), req.body ?? {}); save(); return r; } catch (e) { return aFail(reply, e); }
+    });
+    s.post("/api/aanbieder/opzetten", async (_req, reply) => {
+      try { return await aanbieder.opzetten(cfg(), aDeps()); } catch (e) { return aFail(reply, e); }
+    });
+    s.get("/api/aanbieder/status", async (_req, reply) => {
+      try { return await aanbieder.status(cfg(), aDeps()); } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: { confirm?: string } }>("/api/aanbieder/verwijderen", async (req, reply) => {
+      try { return await aanbieder.verwijderen(cfg(), req.body ?? {}, aDeps()); } catch (e) { return aFail(reply, e); }
     });
 
     // ── Mail ──

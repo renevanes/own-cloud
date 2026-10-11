@@ -5,7 +5,7 @@
  */
 import crypto from "node:crypto";
 import { NAMESERVERS } from "./config.js";
-import { ApiError, isPermanent } from "./apis.js";
+import { ApiError, isPermanent, type Desec } from "./apis.js";
 import { type OrderRow, getOrder, getCustomer, orderState, patchState, setStatus, event, sha256 } from "./db.js";
 import { type Ctx, bundleOf, setStep, getSteps, withLock } from "./context.js";
 import { trySend } from "./mail.js";
@@ -13,6 +13,8 @@ import { trySend } from "./mail.js";
 export interface OrderInput {
   registrant?: Registrant;
   authCode?: string;
+  /** Gratis adres meenemen van een andere aanbieder: de overdrachtscode van de klant. */
+  transferCode?: string;
 }
 
 export interface Registrant {
@@ -21,7 +23,14 @@ export interface Registrant {
   phone: string; email: string;
 }
 
-export interface OrderSecrets { apiKey?: { accessKey: string; secretKey: string }; dnsToken?: string }
+export interface OrderSecrets {
+  apiKey?: { accessKey: string; secretKey: string };
+  dnsToken?: string;
+  /** Gratis adres via de adressendienst: deSEC-token dat alleen in de zone van dit adres mag schrijven. */
+  zoneToken?: string;
+  /** En de overdrachtscode van de klant (ook in het pakket). */
+  transferCode?: string;
+}
 
 export interface Kit {
   domain: string;
@@ -31,7 +40,11 @@ export interface Kit {
   storage: { offer: "scaleway"; region: string; accessKey: string; secretKey: string; purpose: "replica" | "backup" }[];
   placement: { provider: string; region: string; size: string; country: string; kind: "data" | "witness" }[];
   policy: { minDataNodes: number; witnesses: number };
-  dns: { type: "desec"; name: string; token: string; zone: string; api: string; acme: { username: string; password: string; subdomain: string; server_url: string } };
+  dns: {
+    type: "desec"; name: string; token: string; zone: string; api: string; acme: { username: string; password: string; subdomain: string; server_url: string };
+    /** Gratis adres via de adressendienst: hiermee neemt een andere aanbieder het adres over (overstappen). */
+    transferCode?: string;
+  };
   mailRelay: { host: string; port: number; user: string; password: string; secure: boolean } | null;
   spfExtra: string;
   /** Hoeveel gebruikers de cloud mag hebben (bundel + extra gekocht). */
@@ -47,6 +60,20 @@ export function writeSecrets(ctx: Ctx, id: string, patch: Partial<OrderSecrets>)
   const s = { ...readSecrets(ctx, o), ...patch };
   ctx.db.prepare("UPDATE orders SET secrets_enc = ? WHERE id = ?").run(ctx.secrets.seal(s, `secrets:${id}`), id);
   return s;
+}
+
+/** Gratis adres uit de centrale adressendienst (de zone staat niet in ons eigen deSEC-account). */
+export const isCentral = (o: OrderRow) => o.domain_mode === "sub" && orderState(o).adres === "centraal";
+
+/**
+ * deSEC voor de zone van deze bestelling. Bij een adres van de adressendienst is dat het token dat alleen in die
+ * zone mag schrijven; anders het token van de dienst zelf. Alles wat de zone van de klant aanraakt gaat hierlangs.
+ */
+export function desecFor(ctx: Ctx, o: OrderRow): Desec {
+  if (!isCentral(o)) return ctx.apis.desec;
+  const token = readSecrets(ctx, o).zoneToken;
+  if (!token) throw new ApiError("Dienst", 503, "Dit adres heeft nog geen DNS-toegang van de adressendienst");
+  return ctx.apis.desec.withToken(token);
 }
 
 export function splitDomain(domain: string) {
@@ -109,6 +136,20 @@ type StepFn = (ctx: Ctx, o: OrderRow) => Promise<string | undefined>;
 
 const STEPS: [string, StepFn][] = [
   ["dns-zone", async (ctx, o) => {
+    if (isCentral(o)) {
+      // Gratis adres van de adressendienst: die maakt de zone (in het centrale account) en geeft ons een token voor alleen die zone.
+      const adres = ctx.apis.adres;
+      if (!adres) throw new ApiError("Dienst", 400, "Deze dienst is niet (meer) gekoppeld aan de adressendienst (BROKER_ADRES_URL)");
+      if (readSecrets(ctx, o).zoneToken) return undefined;
+      const transferCode = readInput(ctx, o).transferCode;
+      const label = o.domain.slice(0, o.domain.indexOf("."));
+      const r = transferCode ? await adres.transfer(o.domain, transferCode, o.id) : await adres.create(label, o.id);
+      if (!r?.token || !r?.overdrachtscode || r.naam !== o.domain) throw new ApiError("Adressendienst", 502, "De adressendienst gaf geen bruikbaar antwoord");
+      writeSecrets(ctx, o.id, { zoneToken: r.token, transferCode: r.overdrachtscode });
+      patchState(ctx.db, o.id, { zone: true, adresMovedIn: !!transferCode });
+      event(ctx.db, o.id, transferCode ? "adres-overgenomen" : "adres-aangevraagd", { naam: r.naam });
+      return transferCode ? "Je adres is overgenomen, met al je DNS-records" : "Je adres is aangevraagd bij de adressendienst";
+    }
     let z = await ctx.apis.desec.getZone(o.domain);
     if (!z) {
       try { z = await ctx.apis.desec.createZone(o.domain); }
@@ -126,6 +167,7 @@ const STEPS: [string, StepFn][] = [
 
   ["domain", async (ctx, o) => {
     if (o.domain_mode === "own") return `Zet bij je eigen registrar de nameservers op ${NAMESERVERS.join(" en ")}`;
+    if (isCentral(o)) return "Je adres werkt"; // de adressendienst heeft de verwijzing (NS/DS) al gezet
     if (o.domain_mode === "sub") {
       // Gratis adres: in de zone van de dienst naar de eigen zone van de klant wijzen (NS), met DNSSEC (DS).
       const parent = ctx.cfg.freeZone;
@@ -236,14 +278,15 @@ const STEPS: [string, StepFn][] = [
     st = patchState(ctx.db, o.id, { temDomainId: dom.id });
 
     const rec = temRecords(dom, st.projectId);
+    const desec = desecFor(ctx, o);
     const rrsets: { subname: string; type: string; ttl: number; records: string[] }[] = [];
     if (rec.dkim) rrsets.push({ subname: subnameOf(rec.dkim.name, o.domain), type: "TXT", ttl: 3600, records: [txtRecord(rec.dkim.value)] });
     if (rec.dmarc) {
       const sub = subnameOf(rec.dmarc.name || "_dmarc", o.domain);
-      if (!(await ctx.apis.desec.getRrset(o.domain, sub, "TXT"))) rrsets.push({ subname: sub, type: "TXT", ttl: 3600, records: [txtRecord(rec.dmarc.value)] });
+      if (!(await desec.getRrset(o.domain, sub, "TXT"))) rrsets.push({ subname: sub, type: "TXT", ttl: 3600, records: [txtRecord(rec.dmarc.value)] });
     }
     // Geen SPF hier: het cluster beheert het apex-TXT-record zelf en voegt spfExtra toe.
-    if (rrsets.length) await ctx.apis.desec.putRrsets(o.domain, rrsets);
+    if (rrsets.length) await desec.putRrsets(o.domain, rrsets);
     patchState(ctx.db, o.id, { spfExtra: rec.spfExtra });
     // Laat Scaleway de records controleren; dat gebeurt op de achtergrond en houdt "klaar" niet op.
     await scw.req("POST", `${base}/${dom.id}/check`, {}).catch((e) => event(ctx.db, o.id, "tem-check", (e as Error).message));
@@ -253,7 +296,7 @@ const STEPS: [string, StepFn][] = [
   ["dns-token", async (ctx, o) => {
     // Certificaten (Let's Encrypt, DNS-01) gaan via ons acme-dns-adres: de uitdagingen voor cloud. en mail.
     // wijzen naar _acme.<domein>; alleen dat ene TXT-record kan de server via ons bijwerken.
-    await ctx.apis.desec.putRrsets(o.domain, ["cloud", "mail"].map((h) => ({ subname: `_acme-challenge.${h}`, type: "CNAME", ttl: 3600, records: [`_acme.${o.domain}.`] })));
+    await desecFor(ctx, o).putRrsets(o.domain, ["cloud", "mail"].map((h) => ({ subname: `_acme-challenge.${h}`, type: "CNAME", ttl: 3600, records: [`_acme.${o.domain}.`] })));
     const s = readSecrets(ctx, o);
     if (s.dnsToken && o.dns_token_hash === sha256(s.dnsToken)) return undefined;
     const token = crypto.randomBytes(32).toString("hex");
@@ -300,6 +343,7 @@ export function saveKit(ctx: Ctx, orderId: string): Kit {
     dns: {
       type: "desec", name: "dienst", token: s.dnsToken, zone: o.domain, api: `${ctx.cfg.publicUrl}/v1/desec`,
       acme: { username: o.id, password: s.dnsToken, subdomain: "_acme", server_url: `${ctx.cfg.publicUrl}/v1/acme-dns` },
+      ...(isCentral(o) && s.transferCode ? { transferCode: s.transferCode } : {}),
     },
     mailRelay: b.includes.mail ? { host: "smtp.tem.scaleway.com", port: 587, user: st.projectId, password: s.apiKey.secretKey, secure: false } : null,
     spfExtra: st.spfExtra ?? "",

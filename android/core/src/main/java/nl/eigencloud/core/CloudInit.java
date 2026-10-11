@@ -156,4 +156,49 @@ public final class CloudInit {
             return false;
         }
     }
+
+    // ───────── De Eigen Cloud Dienst van een aanbieder (dienstUserData in cloudinit.ts) ─────────
+
+    /** Wat er op de server van een Dienst komt. env: paren {naam, waarde} in vaste volgorde. */
+    public static final class DienstInit {
+        public String host, email, appImage, caddyImage, appRef, caddyRef;
+        public java.util.List<String[]> env = new java.util.ArrayList<>();
+    }
+
+    private static final java.util.regex.Pattern ENV_NAME = java.util.regex.Pattern.compile("^[A-Z][A-Z0-9_]*$");
+    private static final java.util.regex.Pattern HOST = java.util.regex.Pattern.compile("^[a-z0-9.-]+$");
+    private static final java.util.regex.Pattern MAIL = java.util.regex.Pattern.compile("^[^\\s@'\"]+@[^\\s@'\"]+$");
+
+    /** dienst.env: regels NAAM=waarde, letterlijk (de Dienst leest het bestand zelf); geen regelovergangen. */
+    public static String dienstEnvFile(java.util.List<String[]> env) {
+        StringBuilder b = new StringBuilder();
+        for (String[] kv : env) {
+            if (!ENV_NAME.matcher(kv[0]).matches()) throw new IllegalArgumentException("Ongeldige naam " + kv[0]);
+            if (kv[1].indexOf('\n') >= 0 || kv[1].indexOf('\r') >= 0) throw new IllegalArgumentException(kv[0] + " mag geen regelovergang bevatten");
+            if (b.length() > 0) b.append('\n');
+            b.append(kv[0]).append('=').append(kv[1]);
+        }
+        return b.toString();
+    }
+
+    /** Het opstartscript voor de server van een Dienst (tekst gelijk aan de TS-versie). */
+    public static String dienstUserData(DienstInit o) {
+        if (!HOST.matcher(o.host).matches() || !MAIL.matcher(o.email).matches()) throw new IllegalArgumentException("Ongeldig adres of e-mailadres");
+        String prefix = updatePrefix(o.appRef);
+        String head = DienstTemplates.HEAD.replace("@@HOST@@", o.host).replace("@@EMAIL@@", o.email)
+                .replace("@@APP_IMAGE@@", o.appImage).replace("@@CADDY_IMAGE@@", o.caddyImage)
+                .replace("@@APP_REF@@", o.appRef).replace("@@CADDY_REF@@", o.caddyRef)
+                .replace("@@ENV@@", dienstEnvFile(o.env));
+        return head + (prefix != null ? DienstTemplates.UPDATER.replace("@@PREFIX@@", prefix) : "# geen updates op afstand: image zonder registry-pad") + "\n";
+    }
+
+    /** Het updatescript (updaterScript in cloudinit.ts). */
+    public static String updaterScript() { return UpdaterInstall.script(); }
+
+    /** De dagelijkse versiecontrole op de server van een Dienst (dienstCheckScript in cloudinit.ts). */
+    public static String dienstCheckScript() {
+        String t = DienstTemplates.UPDATER;
+        int a = t.indexOf("<<'CHECK'\n") + "<<'CHECK'\n".length();
+        return t.substring(a, t.indexOf("\nCHECK\n", a));
+    }
 }

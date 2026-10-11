@@ -1,7 +1,7 @@
 /** Beheerhandelingen: opzeggen (klant), opschorten, hervatten, opnieuw proberen en opruimen (CLI). */
 import { type OrderRow, getOrder, getCustomer, orderState, patchState, setStatus, event } from "./db.js";
 import { type Ctx, bundleOf, setStep, getSteps, withLock, paidThrough, todayNl } from "./context.js";
-import { newApiKey, saveKit, provisionOrder, writeSecrets } from "./provision.js";
+import { newApiKey, saveKit, provisionOrder, writeSecrets, isCentral, readSecrets } from "./provision.js";
 import { ApiError } from "./apis.js";
 import { trySend } from "./mail.js";
 
@@ -94,7 +94,9 @@ export async function retryOrder(ctx: Ctx, orderId: string) {
 }
 
 /**
- * Na opzegging: IAM-applicatie (met sleutels en policy) en maildomein weg. Zonder `sure` alleen
+ * Na opzegging: IAM-applicatie (met sleutels en policy) en maildomein weg. Een gratis adres van de
+ * adressendienst blijft bewust staan: de klant kan het met zijn overdrachtscode naar een andere aanbieder
+ * meenemen. Vrijgeven kan daarna met releaseAdres (dienst:cli -- adres-vrijgeven). Zonder `sure` alleen
  * een overzicht van wat er zou gebeuren. Servers, volumes en buckets: zie BROKER.md (handmatig).
  */
 export async function cleanupOrder(ctx: Ctx, orderId: string, sure: boolean) {
@@ -111,7 +113,9 @@ export async function cleanupOrder(ctx: Ctx, orderId: string, sure: boolean) {
   const manual = [
     ...servers.map((s) => `Server ${s.name || s.id} (${s.zone}, ${s.state}) — zelf verwijderen in de Scaleway-console (met volumes)`),
     ...(st.projectId ? [`Buckets in project ${st.projectId} — eerst leegmaken (object-lock!), daarna het project verwijderen`] : []),
-    `DNS-zone ${o.domain} bij deSEC en de domeinnaam bij Openprovider blijven staan tot de klant verhuist of de domeinnaam vervalt`,
+    isCentral(o)
+      ? `Gratis adres ${o.domain} blijft bij de adressendienst op jouw naam staan, zodat de klant het met zijn overdrachtscode kan meenemen. Niet meer nodig? npm run dienst:cli -- adres-vrijgeven ${o.id} --zeker`
+      : `DNS-zone ${o.domain} bij deSEC en de domeinnaam bij Openprovider blijven staan tot de klant verhuist of de domeinnaam vervalt`,
   ];
   if (!sure) return { done: [] as string[], plan, manual };
   const done: string[] = [];
@@ -125,5 +129,31 @@ export async function cleanupOrder(ctx: Ctx, orderId: string, sure: boolean) {
     done.push("DNS-toegang en pakket gewist");
     event(ctx.db, o.id, "cleanup", done);
     return { done, plan, manual };
+  });
+}
+
+/**
+ * Gratis adres van een opgezegde bestelling teruggeven aan de adressendienst: zone, verwijzing en ons token
+ * gaan weg; na 30 dagen kan iemand anders de naam krijgen. Zonder `sure` alleen wat er zou gebeuren.
+ */
+export async function releaseAdres(ctx: Ctx, orderId: string, sure: boolean) {
+  const o = getOrder(ctx.db, orderId)!;
+  if (!isCentral(o)) throw new Error("Deze bestelling heeft geen gratis adres van de adressendienst");
+  if (o.status !== "cancelled") throw new Error(`Alleen bij een opgezegde bestelling (deze staat op '${o.status}')`);
+  if (!ctx.apis.adres) throw new Error("BROKER_ADRES_URL is niet ingesteld");
+  const plan = [`${o.domain} vrijgeven bij de adressendienst: de zone met alle records van de klant wordt verwijderd`, "De naam is na 30 dagen weer vrij voor anderen"];
+  if (!sure) return { done: [] as string[], plan };
+  return withLock(orderId, async () => {
+    if (!readSecrets(ctx, o).zoneToken) throw new Error("Dit adres is al vrijgegeven of overgenomen");
+    let r: { vrijVanaf?: string } | null = null;
+    try { r = await ctx.apis.adres!.release(o.domain); }
+    catch (e) {
+      // 403: inmiddels bij een andere aanbieder (de klant is overgestapt); 404: al vrijgegeven.
+      if (!(e instanceof ApiError && (e.status === 403 || e.status === 404))) throw e;
+    }
+    writeSecrets(ctx, o.id, { zoneToken: undefined, transferCode: undefined });
+    patchState(ctx.db, o.id, { adresReleasedAt: Date.now() });
+    event(ctx.db, o.id, "adres-vrijgegeven", r ?? "al weg of overgenomen");
+    return { done: [r ? `${o.domain} vrijgegeven; weer beschikbaar vanaf ${r.vrijVanaf?.slice(0, 10)}` : `${o.domain} was al vrijgegeven of hoort nu bij een andere aanbieder`], plan };
   });
 }

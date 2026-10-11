@@ -12,8 +12,9 @@ import { deriveKey, seal, sealJson } from "../src/cluster/crypto.js";
 import { sealMsg } from "../src/cluster/transport.js";
 import { keysFor, DEFAULT_POLICY, type ClusterConfig } from "../src/cluster/config.js";
 import { S3Store } from "../src/cluster/stores.js";
-import { userData, caddyfile } from "../src/cluster/cloudinit.js";
-import { adminProof } from "../src/cluster/admin.js";
+import { userData, caddyfile, dienstUserData, dienstCheckScript, updaterScript } from "../src/cluster/cloudinit.js";
+import { adminProof, consoleSettings } from "../src/cluster/admin.js";
+import * as aanbieder from "../src/console/aanbieder.js";
 import { buildPresets, pickSize, fetchSizes, SERVER_OFFERS, type SizeOption, type RegionInfo } from "../src/console/catalog.js";
 import { hashPassword } from "../src/auth.js";
 
@@ -243,12 +244,52 @@ const proofs = proofPayloads.map((p) => ({ payload: p, ts: 1760000000123, mac: (
   return r.mac;
 })() }));
 
+// ───────── Aanbieder: de server van een Dienst, DNS-records en de JSON van /api/aanbieder ─────────
+const aanbiederState = {
+  step: "klaar", url: "https://dienst.vanes.nl",
+  company: { name: "Rene's \"Diensten\" <bv>", address: ["Blaak 10", "3011 TA Rotterdam"], kvk: "12345678", vat: "NL001234567B01", email: "rene@elders.example" },
+  accounts: { scalewaySecretKey: "12345678-aaaa-bbbb-cccc-1234567890ab", scalewayOrgId: "87654321-dddd-eeee-ffff-ba0987654321", mollieKey: "live_abcDEF123", desecToken: "desec-tok", openproviderUser: "rene", openproviderPass: "op wacht'woord", adresUrl: "https://adressen.eigencloud.nl" },
+  checked: { scaleway: true, mollie: true, desec: true, smtp: true, openprovider: false, adres: true },
+  projectId: "proj-1", secret: "ab".repeat(32), createdAt: 1760000000000,
+  backup: { endpoint: "https://s3.fr-par.scw.cloud", region: "fr-par", bucket: "vanes-dienst-backup-abc123", accessKey: "SCWBACKUP", secretKey: "backup-geheim", applicationId: "app-1", policyId: "pol-1" },
+  server: { provider: "scaleway", region: "nl-ams-1", size: "DEV1-S", serverId: "nl-ams-1/srv-1/ip-1", ipv4: "192.0.2.10", createdAt: 1760000001000 },
+  lastHealth: { at: 1760000002000, reachable: true, version: "1.9.0.4", uptime: 120, lastBackupAt: 1760000001500, backup: "aan", closing: false },
+};
+const withA = (a: unknown, extra: Record<string, unknown> = {}) => ({ ...sampleConfig, ...extra, console: { ...sampleConfig.console, mailRelay: "smtp://proj:geheim@smtp.tem.scaleway.com:587", extraDns: [{ sub: "x._domainkey", type: "TXT", value: "v=DKIM1" }], ...(a ? { aanbieder: a } : {}) } });
+const aanbiederConfigs = [
+  withA(aanbiederState),
+  withA({ ...aanbiederState, accounts: { ...aanbiederState.accounts, smtpUrl: "smtps://post%40vanes.nl:x@mail.vanes.nl", mailFrom: "dienst@vanes.nl", openproviderUser: undefined, adresUrl: undefined }, company: { ...aanbiederState.company, kvk: "", vat: "", address: [] } }),
+  withA({ ...aanbiederState, url: "https://dienst.andersdomein.nl", dnsRemove: ["oud"] }),
+  withA({ ...aanbiederState, server: null, removed: true, lastHealth: null, retired: ["nl-ams-1/srv-1/ip-1"] }),
+  withA({ step: "accounts", company: aanbiederState.company }),
+  withA(null),
+  withA({ ...aanbiederState, server: { ...aanbiederState.server, ipv6: "2001:db8::1" } }, { domain: undefined }),
+  withA({ ...aanbiederState, dnsRemove: ["dienst", "oud"], server: { ...aanbiederState.server, ipv6: "2001:db8::1" } }, { image: { ref: "eigen-cloud:latest", caddyRef: "ghcr.io/x/caddy@sha256:" + "c".repeat(64) } }),
+];
+const clean = (x: unknown) => JSON.parse(JSON.stringify(x));
+const aanbiederOut = aanbiederConfigs.map((cfg) => {
+  const c = clean(cfg);
+  const a = c.console.aanbieder;
+  let ud: string | null = null;
+  try { ud = a?.server ? aanbieder.serverUserData(c, a) : null; } catch (e) { ud = `FOUT ${(e as Error).message}`; }
+  return { cfg: c, view: aanbieder.view(c), settings: consoleSettings(c), userData: ud };
+});
+const dienstInits = [
+  { host: "dienst.vanes.nl", email: "rene@elders.example", env: [["A", "x y 'z' \\n $HOME"], ["B_2", ""]], appImage: "ghcr.io/renevanes/eigen-cloud:latest", caddyImage: "ghcr.io/renevanes/eigen-caddy:latest", appRef: "ghcr.io/renevanes/eigen-cloud:latest", caddyRef: "ghcr.io/renevanes/eigen-caddy:latest" },
+  { host: "d.example.org", email: "a@b.c", env: [], appImage: "eigen-cloud:1", caddyImage: "caddy:2", appRef: "eigen-cloud:1", caddyRef: "caddy:2" },
+] as const;
+const dienstUserDataOut = dienstInits.map((o) => ({ o, out: dienstUserData(o as never) }));
+const urlCases = ["dienst.vanes.nl", " HTTPS://Dienst.Vanes.NL/ ", "http://dienst.vanes.nl", "https://dienst.vanes.nl/pad", "https://dienst.vanes.nl:8443", "https://u:p@d.nl", "localhost", "https://d.nl?x=1"]
+  .map((input) => { try { return { input, out: aanbieder.cleanUrl(input) }; } catch (e) { return { input, error: (e as Error).message }; } });
+const smtpCases = ["smtp://user%40x.nl:geheim@smtp.example.org:587", "smtps://mail.example.org", "smtp://127.0.0.1:2525", "", "geen url"].map((input) => ({ input, out: aanbieder.smtpDisplay(input) }));
+
 const out = {
   generated: new RealDate().toISOString(),
   masterKey, derived, derived16, derived64, seals, sealJson: sealJsonOut, rpc, bootstrap,
   json, presign, sign, userData: userDataOut, caddyfile: caddyOut,
   pickSize: pickCases, presets, apiResponses, fetchSizes: fetchSizesOut,
   sheets, sheetDateText: dateText, dates, checklists, pbkdf2, passwords, proofs, sampleConfig,
+  aanbieder: aanbiederOut, dienstUserData: dienstUserDataOut, dienstCheckScript: dienstCheckScript(), updaterScript: updaterScript(), cleanUrl: urlCases, smtpDisplay: smtpCases,
 };
 fs.mkdirSync(path.dirname(outFile), { recursive: true });
 fs.writeFileSync(outFile, JSON.stringify(out, null, 1));

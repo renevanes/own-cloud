@@ -9,12 +9,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyRequest, type FastifyReply } from "fastify";
-import { type BrokerConfig, NAMESERVERS, RESERVED_LABELS } from "./config.js";
-import { makeApis, type Apis } from "./apis.js";
+import { type BrokerConfig, NAMESERVERS } from "./config.js";
+import { makeApis, ApiError, type Apis } from "./apis.js";
 import { makeMailer, type Mailer } from "./mail.js";
 import { openDb, Secrets, sha256, type CustomerRow, type OrderRow, type DomainMode, getOrder, getCustomer, event } from "./db.js";
 import { type Ctx, bundleOf, initSteps, getSteps } from "./context.js";
-import { type Registrant, parsePhone, readKit, splitDomain, provisionDue } from "./provision.js";
+import { type Registrant, parsePhone, readKit, splitDomain, provisionDue, desecFor } from "./provision.js";
+import { parseFreeName } from "../adressen/labels.js";
 import { handleWebhook, ensureSubscription } from "./payments.js";
 import { cancelOrder } from "./ops.js";
 import { runGuard } from "./guard.js";
@@ -25,6 +26,8 @@ import { getBrand, loadOfferingFromDb, publicBundle } from "./brand.js";
 import { registerStaffAuth, ensureOwner } from "./staff.js";
 import { registerAdmin } from "./admin.js";
 import { registerCustomerSupport, checkHealth, useInvite, SupportError, getInvite, inviteState } from "./support.js";
+import { DienstBackup, beheerToken } from "./backup.js";
+import { VERSION } from "../version.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 /** De beheerpagina's (web-dienst/) en de lettertypes (web/fonts/), vanuit src/broker of dist/broker. */
@@ -67,6 +70,8 @@ export interface Broker {
   runLoop(): Promise<void>;
   startLoops(): void;
   close(): Promise<void>;
+  /** Eigen back-up van de Dienst (BROKER_BACKUP_*), of null. */
+  backup: DienstBackup | null;
 }
 
 export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?: Mailer } = {}): Promise<Broker> {
@@ -95,6 +100,36 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
   });
   app.setNotFoundHandler((_req, reply) => httpError(reply, 404, "Niet gevonden"));
 
+  // ── Status en overdragen (voor de console van de aanbieder die deze Dienst opzette) ──
+  const backup = cfg.backup ? new DienstBackup(cfg.backup, cfg.secret, db, cfg.dataDir, cfg.backupEveryMs) : null;
+  const startedAt = Date.now();
+  /** Na het overdragen (server wordt vervangen of verwijderd) schrijft deze server niets meer. */
+  let closing = false;
+  app.addHook("onRequest", async (req, reply) => {
+    if (closing && !(req.method === "GET" && req.url.split("?")[0] === "/v1/status")) {
+      return reply.code(503).header("retry-after", "300").send({ error: "De dienst verhuist naar een nieuwe server. Probeer het over een paar minuten opnieuw." });
+    }
+  });
+  /** Openbaar en zonder gegevens: versie, hoe lang hij draait en wanneer de laatste back-up was. */
+  app.get("/v1/status", async () => ({
+    version: VERSION(), uptime: Math.round((Date.now() - startedAt) / 1000),
+    lastBackupAt: backup?.lastBackupAt ?? null, backup: backup ? backup.status() : "uit", closing,
+  }));
+  app.post("/v1/status/handover", async (req, reply) => {
+    const want = Buffer.from(`Beheer ${beheerToken(cfg.secret)}`);
+    const got = Buffer.from(String(req.headers.authorization ?? ""));
+    if (got.length !== want.length || !crypto.timingSafeEqual(got, want)) return httpError(reply, 401, "Geen toegang");
+    closing = true;
+    try {
+      const r = backup ? await backup.handover() : null;
+      return { ok: true, lastBackupAt: r?.at ?? backup?.lastBackupAt ?? null, backup: !!backup };
+    } catch (e) {
+      closing = false;
+      backup?.start();
+      return httpError(reply, 502, `Laatste back-up mislukt: ${(e as Error).message}`);
+    }
+  });
+
   const limits = {
     startEmail: new RateLimit(5, 60 * 60_000),
     startIp: new RateLimit(20, 60 * 60_000),
@@ -105,22 +140,30 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     authcodeCustomer: new RateLimit(10, 60 * 60_000),
   };
 
-  /** Gratis adres: "vanes" of "vanes.<freeZone>" → volledige naam; null als het geen gratis adres is (of het uit staat). */
-  const freeName = (raw: unknown): { domain: string } | { error: string } | null => {
-    const z = cfg.freeZone;
-    if (!z) return null;
-    const v = normDomain(raw);
-    const label = v.endsWith(`.${z}`) ? v.slice(0, -(z.length + 1)) : v.includes(".") ? null : v;
-    if (label === null) return null;
-    if (!/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(label) || label.length < 3) return { error: "Kies een naam van 3 tot 32 letters, cijfers of streepjes" };
-    if (RESERVED_LABELS.has(label) || /^xn--/.test(label)) return { error: "Deze naam is gereserveerd. Kies een andere." };
-    return { domain: `${label}.${z}` };
+  /**
+   * Zone voor gratis adressen: die van de centrale adressendienst (BROKER_ADRES_URL) of de eigen BROKER_FREE_ZONE.
+   * null = uit, of de adressendienst is nog niet bereikbaar geweest.
+   */
+  const freeZone = async (): Promise<string | null> => {
+    if (!ctx.apis.adres) return cfg.freeZone;
+    try { return await ctx.apis.adres.zoneName(); }
+    catch (e) { console.error(`[dienst] adressendienst: ${(e as Error).message}`); return null; }
   };
-  /** Vrij als er geen lopende bestelling voor is en de zone (nog) niet bestaat. */
-  const freeAvailable = async (domain: string) => {
+  if (ctx.apis.adres) void freeZone();
+  /** Gratis adres: "vanes" of "vanes.<zone>" → volledige naam; null als het geen gratis adres is (of het uit staat). */
+  const freeName = (raw: unknown, z: string | null): { domain: string; label: string } | { error: string } | null => {
+    if (!z) return null;
+    const p = parseFreeName(normDomain(raw), z);
+    return p && !("error" in p) ? { domain: p.naam, label: p.label } : p;
+  };
+  /** Vrij als er geen lopende bestelling voor is en de naam (zone) nog niet bestaat; met de adressendienst vraagt die het na. */
+  const freeAvailable = async (domain: string, label: string) => {
     if (db.prepare("SELECT 1 FROM orders WHERE domain = ? AND status NOT IN ('awaiting_payment','failed')").get(domain)) return false;
+    if (ctx.apis.adres) return (await ctx.apis.adres.check(label)).vrij;
     return !(await ctx.apis.desec.getZone(domain));
   };
+  /** Met de adressendienst maar zonder zone (dienst onbereikbaar) en een naam zonder punt: dan liever eerlijk melden. */
+  const adresDown = (raw: unknown, z: string | null) => !!ctx.apis.adres && !z && !normDomain(raw).includes(".");
 
   const auth = (req: FastifyRequest): CustomerRow | null => {
     const m = /^Bearer ([0-9a-f]{64})$/i.exec(req.headers.authorization ?? "");
@@ -147,7 +190,7 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
       bundles: cfg.bundles.map(publicBundle),
       termsUrl: brand.termsUrl,
       privacyUrl: brand.privacyUrl,
-      freeZone: cfg.freeZone,
+      freeZone: await freeZone(),
       brand,
     };
   });
@@ -187,11 +230,13 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
 
   // ── Domein controleren ──
   app.get<{ Querystring: { name?: string } }>("/v1/domains/check", async (req, reply) => {
-    const sub = freeName(req.query.name);
+    const z = await freeZone();
+    if (adresDown(req.query.name, z)) return httpError(reply, 502, "De adressendienst is nu even niet bereikbaar. Probeer het zo opnieuw.");
+    const sub = freeName(req.query.name, z);
     if (sub) {
       if ("error" in sub) return httpError(reply, 400, sub.error);
       if (!limits.checkIp.ok(req.ip)) return httpError(reply, 429, "Even rustig aan: probeer het over een minuut opnieuw.");
-      try { return { domain: sub.domain, available: await freeAvailable(sub.domain), price: null, free: true }; }
+      try { return { domain: sub.domain, available: await freeAvailable(sub.domain, sub.label), price: null, free: true }; }
       catch (e) { console.error(`[dienst] adrescheck: ${(e as Error).message}`); return httpError(reply, 502, "De controle werkt nu even niet. Probeer het zo opnieuw."); }
     }
     const domain = normDomain(req.query.name);
@@ -217,17 +262,32 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     const mode = b.domain?.mode as DomainMode;
     if (!["register", "transfer", "own", "sub"].includes(mode)) return httpError(reply, 400, "Kies of je een nieuwe domeinnaam wilt, er een verhuist of je eigen domeinnaam houdt");
     let domain: string;
+    const z = await freeZone();
+    // Overstappen met een gratis adres: de overdrachtscode van de klant (uit het pakket bij de vorige aanbieder).
+    const rawTransfer = b.domain?.transferCode ?? b.transferCode;
+    const transferCode = typeof rawTransfer === "string" ? rawTransfer.trim() : "";
+    if (transferCode && (mode !== "sub" || !ctx.apis.adres)) return httpError(reply, 400, "Een overdrachtscode hoort bij een gratis adres van de adressendienst; die gebruikt deze dienst niet");
+    if (transferCode && !/^[A-Za-z0-9-]{16,40}$/.test(transferCode)) return httpError(reply, 400, "Deze overdrachtscode klopt niet");
     if (mode === "sub") {
-      const sub = freeName(b.domain?.name);
+      if (adresDown(b.domain?.name, z)) return httpError(reply, 502, "De adressendienst is nu even niet bereikbaar. Probeer het zo opnieuw.");
+      const sub = freeName(b.domain?.name, z);
       if (!sub) return httpError(reply, 400, "Gratis adressen staan uit bij deze dienst");
       if ("error" in sub) return httpError(reply, 400, sub.error);
       domain = sub.domain;
-      try { if (!(await freeAvailable(domain))) return httpError(reply, 409, `${domain} is al in gebruik. Kies een andere naam.`); }
-      catch { return httpError(reply, 502, "De controle werkt nu even niet. Probeer het zo opnieuw."); }
+      try {
+        if (transferCode) {
+          if (!(await ctx.apis.adres!.verify(domain, transferCode))) return httpError(reply, 400, "Deze overdrachtscode klopt niet bij dit adres");
+        } else if (!(await freeAvailable(domain, sub.label))) return httpError(reply, 409, `${domain} is al in gebruik. Kies een andere naam.`);
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return httpError(reply, 404, `${domain} is niet in gebruik; bestel het als nieuw gratis adres`);
+        if (e instanceof ApiError && e.status === 429) return httpError(reply, 429, "Te veel pogingen. Probeer het later opnieuw.");
+        console.error(`[dienst] adrescheck: ${(e as Error).message}`);
+        return httpError(reply, 502, "De controle werkt nu even niet. Probeer het zo opnieuw.");
+      }
     } else {
       domain = normDomain(b.domain?.name);
       if (!DOMAIN.test(domain)) return httpError(reply, 400, "Dat is geen geldige domeinnaam (bijvoorbeeld: jouwnaam.nl)");
-      if (cfg.freeZone && (domain === cfg.freeZone || domain.endsWith(`.${cfg.freeZone}`))) return httpError(reply, 400, "Kies voor een adres van de dienst de optie Gratis adres");
+      if (z && (domain === z || domain.endsWith(`.${z}`))) return httpError(reply, 400, "Kies voor een adres van de dienst de optie Gratis adres");
     }
     const authCode = typeof b.domain?.authCode === "string" ? b.domain.authCode.trim() : "";
     if (mode === "transfer" && !authCode) return httpError(reply, 400, "Vul de verhuiscode (autorisatiecode) van je huidige registrar in");
@@ -264,8 +324,10 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
       catch (e) { if (e instanceof SupportError) return httpError(reply, e.status, e.message); throw e; }
     }
     const id = crypto.randomBytes(8).toString("hex");
-    db.prepare("INSERT INTO orders (id, customer_id, bundle, domain, domain_mode, status, amount, input_enc, created_at, invite_code) VALUES (?, ?, ?, ?, ?, 'awaiting_payment', ?, ?, ?, ?)")
-      .run(id, c.id, bundle.id, domain, mode, bundle.monthly.value, ctx.secrets.seal({ registrant, authCode: authCode || undefined }, `input:${id}`), Date.now(), inviteCode);
+    // Gratis adres via de adressendienst: vastleggen bij de bestelling, ook als de instelling later verandert.
+    const state = mode === "sub" && ctx.apis.adres ? { adres: "centraal" } : {};
+    db.prepare("INSERT INTO orders (id, customer_id, bundle, domain, domain_mode, status, amount, input_enc, state, created_at, invite_code) VALUES (?, ?, ?, ?, ?, 'awaiting_payment', ?, ?, ?, ?, ?)")
+      .run(id, c.id, bundle.id, domain, mode, bundle.monthly.value, ctx.secrets.seal({ registrant, authCode: authCode || undefined, transferCode: transferCode || undefined }, `input:${id}`), JSON.stringify(state), Date.now(), inviteCode);
     initSteps(db, id, mode);
     try {
       let mcid = c.mollie_customer_id;
@@ -288,7 +350,7 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
       if (!p?.id || !checkoutUrl) throw new Error("Mollie gaf geen betaallink terug");
       db.prepare("UPDATE orders SET mollie_payment_id = ? WHERE id = ?").run(p.id, id);
       setImmediateStep(id);
-      event(db, id, "order-created", { bundle: bundle.id, mode, ...(inviteCode ? { invite: inviteCode } : {}) });
+      event(db, id, "order-created", { bundle: bundle.id, mode, ...(inviteCode ? { invite: inviteCode } : {}), ...(transferCode ? { adres: "overnemen" } : {}) });
       return { orderId: id, checkoutUrl };
     } catch (e) {
       console.error(`[dienst] betaling aanmaken: ${(e as Error).message}`);
@@ -382,7 +444,7 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
 
   app.get("/betaald", async (_req, reply) => reply.type("text/html; charset=utf-8").header("cache-control", "no-store").send(PAID_PAGE));
 
-  // ── DNS-proxy: het cluster praat "deSEC" met zijn eigen token, wij met het echte ──
+  // ── DNS-proxy: het cluster praat "deSEC" met zijn eigen token, wij met het echte (of dat van het gratis adres) ──
   const proxy = async (req: FastifyRequest<{ Params: { zone: string; "*"?: string } }>, reply: FastifyReply) => {
     const zone = req.params.zone.toLowerCase();
     const sub = req.params["*"] ?? "";
@@ -395,7 +457,7 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     const query = q >= 0 ? req.url.slice(q) : "";
     const body = req.body === undefined || req.method === "GET" || req.method === "HEAD" ? undefined : JSON.stringify(req.body);
     try {
-      const r = await ctx.apis.desec.forward(req.method, `/domains/${zone}/${sub}${query}`, body);
+      const r = await desecFor(ctx, o).forward(req.method, `/domains/${zone}/${sub}${query}`, body);
       const text = await r.text();
       reply.code(r.status);
       if (r.status === 204 || !text) return reply.send();
@@ -414,9 +476,10 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     const txt = String(req.body?.txt ?? "");
     if (req.body?.subdomain !== "_acme" || !/^[A-Za-z0-9_-]{43}$/.test(txt)) return httpError(reply, 400, "Ongeldig verzoek");
     try {
-      const cur = (await ctx.apis.desec.getRrset(o.domain, "_acme", "TXT")) as { records?: string[] } | null;
+      const desec = desecFor(ctx, o);
+      const cur = (await desec.getRrset(o.domain, "_acme", "TXT")) as { records?: string[] } | null;
       const keep = (cur?.records ?? []).filter((r) => r !== `"${txt}"`).slice(-1);
-      await ctx.apis.desec.putRrsets(o.domain, [{ subname: "_acme", type: "TXT", ttl: 3600, records: [...keep, `"${txt}"`] }]);
+      await desec.putRrsets(o.domain, [{ subname: "_acme", type: "TXT", ttl: 3600, records: [...keep, `"${txt}"`] }]);
       return { txt };
     } catch (e) {
       return httpError(reply, 502, `DNS-dienst niet bereikbaar: ${(e as Error).message}`);
@@ -468,18 +531,21 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
   };
 
   return {
-    app, ctx,
+    app, ctx, backup,
     runLoop: loop,
     async idle() { while (pending.size) await Promise.allSettled([...pending]); },
     startLoops() {
       timers.push(setInterval(() => ctx.track(loop()), cfg.loopMs));
       timers.push(setInterval(() => ctx.track(runGuard(ctx)), cfg.guardMs));
       ctx.track(loop());
+      backup?.start();
     },
     async close() {
       for (const t of timers) clearInterval(t);
       await app.close();
       while (pending.size) await Promise.allSettled([...pending]);
+      // Bij stoppen (bijv. een update) nog één back-up, behalve na het overdragen.
+      if (backup?.started && !backup.retired) { backup.stop(); await backup.run().catch(() => {}); }
       db.close();
     },
   };

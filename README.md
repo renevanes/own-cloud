@@ -52,6 +52,11 @@ Bewaar het bestand `~/.eigen-cloud/kluis.json` gerust in je back-up of synchroni
 
 **Abonnement beheren** doe je in de console zelf (paneel *Abonnement* op het overzicht): facturen bekijken en afdrukken, een andere bundel kiezen (je cloud krijgt meteen de nieuwe aantallen servers), je betaalmethode wijzigen, een mislukte incasso alsnog betalen, opzeggen of het opzeggen terugdraaien, en de verhuiscode van je domein opvragen. In de app opent de betaalpagina van Mollie in de app zelf en springt je bank-app vanzelf open.
 
+**Zelf aanbieder worden?** Op het overzicht van de console staat **Aanbieder worden**: vul je bedrijfsgegevens in,
+koppel je accounts (Scaleway, Mollie, deSEC, mail) en de console zet je eigen Eigen Cloud Dienst op een server bij
+Scaleway, op `dienst.<jouw domein>`, met elk uur een versleutelde back-up en automatische updates. Zie
+[BROKER.md](BROKER.md#opzetten-vanuit-de-app-zonder-terminal).
+
 **Bijwerken gaat vanzelf**: servers werken zichzelf rollend bij (zie [CLUSTER.md](CLUSTER.md)) en de Android-app haalt nieuwe versies op van ghcr.io, of van je eigen cloud als dat niet lukt.
 
 Meer over hoe het cluster werkt: [CLUSTER.md](CLUSTER.md).

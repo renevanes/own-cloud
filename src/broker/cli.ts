@@ -11,13 +11,15 @@
  *   npm run dienst:cli -- eigenaar <e-mailadres>
  *   npm run dienst:cli -- medewerkers
  *   npm run dienst:cli -- tweede-stap-wissen <e-mailadres>
+ *   npm run dienst:cli -- sleutel
+ *   npm run dienst:cli -- adres-vrijgeven <id> [--zeker]
  * Gebruikt dezelfde omgevingsvariabelen (en datamap) als de dienst zelf.
  */
-import { loadConfig } from "./config.js";
+import { loadConfig, loadEnvFile } from "./config.js";
 import { createBroker } from "./app.js";
 import { type OrderRow, type CustomerRow, getOrder, orderState } from "./db.js";
 import { getSteps } from "./context.js";
-import { retryOrder, suspendOrder, resumeOrder, cleanupOrder } from "./ops.js";
+import { retryOrder, suspendOrder, resumeOrder, cleanupOrder, releaseAdres } from "./ops.js";
 import { runGuard } from "./guard.js";
 import { type InvoiceRow, euro } from "./invoice.js";
 import { type StaffRow, ensureOwner, staffByEmail, resetSecondFactor, audit, staffView, ROLE_LABELS } from "./staff.js";
@@ -30,6 +32,8 @@ const STATE: Record<string, string> = { wait: "  ", busy: "… ", done: "✓ ", 
 const when = (ms: number | null) => (ms ? new Date(ms).toLocaleString("nl-NL", { timeZone: "Europe/Amsterdam" }) : "-");
 
 const [cmd, arg, ...rest] = process.argv.slice(2);
+// Op een server die de app opzette staan de instellingen in BROKER_ENV_FILE (docker exec erft die variabele).
+loadEnvFile();
 const broker = await createBroker(loadConfig());
 const { ctx } = broker;
 const need = () => {
@@ -156,6 +160,22 @@ try {
       console.log(`Authenticator-app en toestellen van ${s.email} gewist; bij de volgende keer inloggen stelt hij ze opnieuw in.`);
       break;
     }
+    case "sleutel": {
+      console.log(`Publieke sleutel van deze aanbieder (Ed25519, uit ${ctx.cfg.dataDir}/aanbieder.key):\n\n  ${ctx.cfg.providerPublicKey}\n`);
+      console.log("Zet hem bij je regel in aanbieders.json (via een pull request), met als url precies BROKER_PUBLIC_URL:\n");
+      console.log(JSON.stringify({ naam: ctx.cfg.brandName, url: ctx.cfg.publicUrl, sleutel: ctx.cfg.providerPublicKey }, null, 2));
+      break;
+    }
+    case "adres-vrijgeven": {
+      const o = need();
+      const sure = rest.includes("--zeker");
+      const r = await releaseAdres(ctx, o.id, sure);
+      if (!sure) {
+        console.log("Dit zou er gebeuren (voer uit met --zeker):");
+        for (const l of r.plan) console.log(`  - ${l}`);
+      } else for (const l of r.done) console.log(`  ✓ ${l}`);
+      break;
+    }
     default:
       console.log(`Gebruik: npm run dienst:cli -- <opdracht>
 
@@ -169,7 +189,9 @@ try {
   facturen [<id>]       alle facturen (of die van één bestelling)
   eigenaar <e-mail>     eerste (of extra) eigenaar maken voor het beheer
   medewerkers           alle medewerkers met hun rol
-  tweede-stap-wissen <e-mail>  telefoon kwijt: vingerafdruk en authenticator-app opnieuw laten instellen`);
+  tweede-stap-wissen <e-mail>  telefoon kwijt: vingerafdruk en authenticator-app opnieuw laten instellen
+  sleutel               publieke sleutel van deze aanbieder (voor aanbieders.json en de adressendienst)
+  adres-vrijgeven <id> [--zeker]  gratis adres van een opgezegde bestelling teruggeven aan de adressendienst`);
   }
 } catch (e) {
   console.error(`Mislukt: ${(e as Error).message}`);

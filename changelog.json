@@ -1,5 +1,15 @@
 [
   {
+    "version": "1.9",
+    "date": "2026-10-11",
+    "changes": [
+      "Voor aanbieders: je eigen Eigen Cloud Dienst opzetten vanuit de app (Aanbieder worden op het overzicht): bedrijfsgegevens, accounts, adres, en de app zet de dienst op een eigen server met elk uur een back-up en automatische updates",
+      "Gratis adressen komen nu van een gedeelde adressendienst: je adres gaat mee als je overstapt naar een andere aanbieder",
+      "In het beheer van je dienst: Op de lijst, om jezelf als aanbieder in de app te laten zien",
+      "Een uitnodigingslink van een aanbieder opent een pagina met uitleg en een knop die de app opent"
+    ]
+  },
+  {
     "version": "1.8",
     "date": "2026-10-11",
     "changes": [

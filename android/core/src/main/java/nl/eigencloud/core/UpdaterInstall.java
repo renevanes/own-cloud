@@ -40,11 +40,12 @@ final class UpdaterInstall {
             + "sed -i -E \"s|^(    image: ).*(  # eigen-app)$|\\1$APP\\2|\" \"$COMPOSE\"\n"
             + "[ \"$HAS_CADDY\" = 1 ] && sed -i -E \"s|^(    image: ).*(  # eigen-caddy)$|\\1$CADDY\\2|\" \"$COMPOSE\"\n"
             + "(cd \"$ROOT\" && docker compose up -d) >/dev/null 2>&1\n"
+            + "HEALTH_URL=\"${HEALTH_URL:-http://127.0.0.1:$PORT/cluster/health}\"; CADDY_HEALTH_URL=\"${CADDY_HEALTH_URL-http://127.0.0.1:3000/healthz}\"\n"
             + "healthy() {\n"
             + "  local body\n"
-            + "  body=$(curl -fsS --max-time 3 \"http://127.0.0.1:$PORT/cluster/health\" 2>/dev/null) || return 1\n"
+            + "  body=$(curl -fsS --max-time 3 \"$HEALTH_URL\" 2>/dev/null) || return 1\n"
             + "  python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]).get(\"version\")==sys.argv[2] else 1)' \"$body\" \"$VERSION\" || return 1\n"
-            + "  if [ \"$HAS_CADDY\" = 1 ]; then curl -fsS --max-time 3 http://127.0.0.1:3000/healthz >/dev/null 2>&1 || return 1; fi\n"
+            + "  if [ \"$HAS_CADDY\" = 1 ] && [ -n \"$CADDY_HEALTH_URL\" ]; then curl -fsS --max-time 3 \"$CADDY_HEALTH_URL\" >/dev/null 2>&1 || return 1; fi\n"
             + "}\n"
             + "ok=0\n"
             + "for _ in $(seq 1 $((HEALTH_SECONDS / 3))); do if healthy; then ok=1; break; fi; sleep 3; done\n"
@@ -85,6 +86,12 @@ final class UpdaterInstall {
             + "EOF\n"
             + "systemctl daemon-reload && systemctl enable --now eigen-update.path\n"
             + "echo '{\"v\":1}' > /opt/eigen/data/updater.json";
+
+    /** Alleen het updatescript (updaterScript in cloudinit.ts), ook gebruikt op de server van een Dienst. */
+    static String script() {
+        int a = TEMPLATE.indexOf("<<'UPDATER'\n") + "<<'UPDATER'\n".length();
+        return TEMPLATE.substring(a, TEMPLATE.indexOf("\nUPDATER\n", a));
+    }
 
     /** Het installatiestuk voor de user-data (prefix = toegestane registry-map, bijv. "ghcr.io/renevanes/"). */
     static String text(String prefix, String clusterPort) {

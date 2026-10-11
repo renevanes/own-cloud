@@ -121,6 +121,18 @@ export function registerAdmin(app: FastifyInstance, ctx: Ctx, httpError: HttpErr
   });
 
   // ── Overzicht ──
+  // Aanmelden voor de openbare lijst van aanbieders: de regel voor aanbieders.json, met de sleutel van deze dienst.
+  app.get("/v1/admin/lijst", admin("brand", async () => {
+    const b = getBrand(ctx);
+    const entry = { naam: b.name, url: ctx.cfg.publicUrl, land: "NL", contact: b.contact.email ?? "", omschrijving: "", sleutel: ctx.cfg.providerPublicKey };
+    let opLijst = false;
+    try {
+      const r = await fetch(process.env.EIGEN_AANBIEDERS_URL || "https://raw.githubusercontent.com/renevanes/own-cloud/main/aanbieders.json", { signal: AbortSignal.timeout(10_000) });
+      if (r.ok) opLijst = ((await r.json()) as { url?: string }[]).some((a) => (a.url ?? "").replace(/\/$/, "") === ctx.cfg.publicUrl);
+    } catch { /* lijst niet bereikbaar */ }
+    return { entry, opLijst, editUrl: "https://github.com/renevanes/own-cloud/edit/main/aanbieders.json" };
+  }));
+
   app.get("/v1/admin/overview", admin("announcements.read", async (s) => {
     const out: Record<string, unknown> = { staff: staffView(ctx, s), permissions: PERMISSIONS[s.role] };
     if (can(s.role, "customers.read")) {

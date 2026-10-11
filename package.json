@@ -14,7 +14,9 @@
     "eigen": "tsx src/cluster/cli.ts",
     "beheer": "tsx src/console/server.ts",
     "dienst": "tsx src/broker/main.ts",
-    "dienst:cli": "tsx src/broker/cli.ts"
+    "dienst:cli": "tsx src/broker/cli.ts",
+    "adressen": "tsx src/adressen/main.ts",
+    "adressen:cli": "tsx src/adressen/cli.ts"
   },
   "keywords": [],
   "author": "",

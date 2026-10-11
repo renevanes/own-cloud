@@ -71,7 +71,7 @@ if (NATIVE) {
   }, true);
 }
 
-let state = null, config = null, timer = null, dienstTimer = null;
+let state = null, config = null, timer = null, dienstTimer = null, aanbiederTimer = null;
 
 const BASE_STEPS = [
   { id: "jij", label: "Jij en je adres" },
@@ -100,6 +100,7 @@ async function boot() {
 async function render() {
   clearInterval(timer);
   clearTimeout(dienstTimer);
+  clearInterval(aanbiederTimer);
   $("#lockBtn").hidden = !state.unlocked;
   if (!state.vault) return renderStart();
   if (!state.unlocked) return renderLock();
@@ -1212,9 +1213,207 @@ async function helpPanel(box, fail) {
   });
 }
 
+
+// ═════════ Aanbieder worden: je eigen Eigen Cloud Dienst ═════════
+
+const A_STEPS = [["bedrijf", "Bedrijf"], ["accounts", "Accounts"], ["adres", "Adres"], ["opzetten", "Opzetten"]];
+const A_HELP = {
+  scaleway: `Maak in de Scaleway-console onder IAM een applicatie "eigen-cloud-dienst" met de rechten ProjectManager, IAMManager, InstancesFullAccess, ObjectStorageFullAccess en TransactionalEmailFullAccess, en maak daarvoor een API-sleutel. Het organisatie-ID staat bij Organisatie → Instellingen. <a href="https://console.scaleway.com/iam/applications" target="_blank" rel="noopener">IAM openen</a>`,
+  mollie: `Voor de betalingen van je klanten. Begin met de testsleutel (test_…); later zet je hier de live-sleutel. <a href="https://my.mollie.com/dashboard/developers/api-keys" target="_blank" rel="noopener">Sleutels bij Mollie</a>`,
+  desec: `Voor de DNS van je klanten. Maak bij deSEC een token dat domeinen mag aanmaken. <a href="https://desec.io/tokens" target="_blank" rel="noopener">Tokens bij deSEC</a>`,
+  smtp: `Voor inlogcodes, facturen en meldingen. Leeg laten = via de mail van je eigen cloud.`,
+  openprovider: `Alleen nodig als klanten via jou een domein kopen. Zet bij Openprovider het IP-adres van je server op de lijst. <a href="https://cp.openprovider.eu" target="_blank" rel="noopener">Openprovider</a>`,
+  adres: `Gratis adressen (naam.eigencloud.nl) voor je klanten, via de centrale adressendienst. Zie ADRESSEN.md.`,
+};
+
+function openBeheer(url) {
+  if (NATIVE?.openDienst) NATIVE.openDienst(url.replace(/\/beheer$/, ""));
+  else if (NATIVE) NATIVE.openUrl(url);
+  else window.open(url, "_blank", "noopener");
+}
+
+async function aStep(step) {
+  await api("/api/aanbieder/stap", { method: "POST", body: { step } });
+  renderAanbieder();
+}
+
+/** Op het overzicht: "Aanbieder worden", de stappen, of "Je dienst" met status en knoppen. */
+async function renderAanbieder(msg) {
+  const box = $("#aanbieder");
+  if (!box) return;
+  clearInterval(aanbiederTimer);
+  let a;
+  try { a = await api("/api/aanbieder"); } catch { return; }
+  if (!a.started) {
+    box.innerHTML = `<h2>Aanbieder worden</h2><div class="panel"><p style="margin:0">Draai zelf een Eigen Cloud Dienst: mensen nemen dan bij jou een cloud, met jouw prijzen en jouw naam, en betalen via je eigen Mollie. De console zet de Dienst op een eigen server bij Scaleway, maakt elk uur een back-up en houdt hem bij.</p>
+      <div><button class="btn" id="aStart">Aanbieder worden</button></div></div>`;
+    $("#aStart").onclick = () => aStep("bedrijf").catch(() => {});
+    return;
+  }
+  if (a.step === "klaar") return aanbiederKlaar(box, a, msg);
+  const i = A_STEPS.findIndex(([id]) => id === a.step);
+  const head = `<h2>Aanbieder worden <small class="muted">· stap ${i + 1} van ${A_STEPS.length}: ${esc(A_STEPS[i][1])}</small></h2>`;
+  const nav = (canNext, nextLabel = "Volgende") => `<div class="actions" style="margin:0"><button type="button" class="btn" id="aPrev">${i > 0 ? "Vorige" : a.server || a.removed ? "Terug" : "Stoppen"}</button><button class="btn primary" ${canNext === false ? "disabled" : ""}>${nextLabel}</button></div>`;
+  const wire = () => {
+    $("#aPrev").onclick = () => {
+      if (i === 0 && !a.server && !a.removed && !confirm("Stoppen met aanbieder worden? Wat je hebt ingevuld, wordt vergeten.")) return;
+      (i > 0 ? aStep(A_STEPS[i - 1][0]) : aStep(a.server || a.removed ? "klaar" : "uit")).catch((e) => formMsg($("#af"), e.message));
+    };
+  };
+  const co = a.company ?? {};
+  if (a.step === "bedrijf") {
+    box.innerHTML = `${head}<form class="fields panel" id="af"><p class="muted" style="margin:0">Deze gegevens komen op de facturen aan je klanten. De eigenaar krijgt de eerste inlogcode voor het beheer van je Dienst.</p>
+      <label>Bedrijfsnaam<input name="name" required value="${esc(co.name ?? "")}"></label>
+      <label>Adres<textarea name="address" rows="2" placeholder="Blaak 10&#10;3011 TA Rotterdam">${esc((co.address ?? []).join("\n"))}</textarea></label>
+      <div class="row"><label>KvK-nummer<input name="kvk" inputmode="numeric" value="${esc(co.kvk ?? "")}"></label><label>Btw-nummer<input name="vat" placeholder="NL001234567B01" value="${esc(co.vat ?? "")}"></label></div>
+      <label>E-mailadres van de eigenaar<input type="email" name="email" required value="${esc(co.email ?? a.defaultEmail ?? "")}"></label>
+      <p class="msg"></p>${nav()}</form>`;
+    wire();
+    $("#af").onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      try { await busy($("button.primary", f), () => api("/api/aanbieder/bedrijf", { method: "POST", body: { name: f.elements.name.value, address: f.address.value, kvk: f.kvk.value, vat: f.vat.value, email: f.email.value } })); await aStep("accounts"); }
+      catch (err) { formMsg(f, err.message); }
+    };
+    return;
+  }
+  if (a.step === "accounts") {
+    const ac = a.accounts ?? {};
+    const field = (name, label, value, extra = "") => `<label>${label}<input name="${name}" value="${esc(value ?? "")}" autocomplete="off" autocapitalize="off" spellcheck="false" ${extra}></label>`;
+    box.innerHTML = `${head}<form class="fields panel" id="af"><p class="muted" style="margin:0">Je Dienst gebruikt je eigen accounts. Elke sleutel wordt meteen gecontroleerd; ze worden versleuteld in je kluis bewaard.</p>
+      <h3 style="margin:0">Scaleway</h3><small class="muted">${A_HELP.scaleway}</small>
+      <div class="row">${field("scalewaySecretKey", "Geheime sleutel", ac.scalewaySecretKey, 'placeholder="8-4-4-4-12 tekens"')}${field("scalewayOrgId", "Organisatie-ID", ac.scalewayOrgId)}</div>
+      <h3 style="margin:0">Mollie</h3><small class="muted">${A_HELP.mollie}</small>
+      ${field("mollieKey", "API-sleutel", ac.mollieKey, 'placeholder="test_…"')}
+      <h3 style="margin:0">deSEC</h3><small class="muted">${A_HELP.desec}</small>
+      ${field("desecToken", "Token", ac.desecToken)}
+      <h3 style="margin:0">Mail versturen</h3><small class="muted">${A_HELP.smtp}</small>
+      <label class="check"><input type="checkbox" name="smtpCloud" ${!ac.smtp || ac.smtpFromCloud ? "checked" : ""}> Via de mail van mijn eigen cloud${ac.smtpFromCloud ? ` (${esc(ac.smtp)})` : ""}</label>
+      <div class="row">${field("smtpUrl", "Andere mailserver", "", `placeholder="${ac.smtp && !ac.smtpFromCloud ? `Nu ${esc(ac.smtp)}; leeg = zo laten` : "smtp://gebruiker:wachtwoord@smtp.tem.scaleway.com:587"}"`)}${field("mailFrom", "Afzender", ac.mailFrom, 'type="email"')}</div>
+      <details ${ac.openproviderUser || ac.adresUrl ? "open" : ""}><summary>Optioneel: domeinen verkopen en gratis adressen</summary><div class="fields" style="margin-top:10px">
+        <small class="muted">${A_HELP.openprovider}</small>
+        <div class="row">${field("openproviderUser", "Openprovider-gebruiker", ac.openproviderUser)}${field("openproviderPass", "Wachtwoord", ac.openproviderPass, 'type="password"')}</div>
+        <small class="muted">${A_HELP.adres}</small>
+        ${field("adresUrl", "Adressendienst", ac.adresUrl, 'placeholder="https://adressen.eigencloud.nl"')}
+      </div></details>
+      <ul class="results" id="aChecks"></ul>
+      <p class="msg"></p>${nav(undefined, a.ready.accounts ? "Controleren en verder" : "Controleren")}</form>`;
+    wire();
+    $("#af").smtpUrl.oninput = (e) => { if (e.target.value.trim()) $("#af").smtpCloud.checked = false; };
+    $("#af").onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const body = Object.fromEntries(["scalewaySecretKey", "scalewayOrgId", "mollieKey", "desecToken", "mailFrom", "openproviderUser", "openproviderPass", "adresUrl"].map((n) => [n, f[n].value]));
+      // Mailserver: leeg laten = de bewaarde houden (het wachtwoord staat er niet in het scherm bij).
+      if (f.smtpCloud.checked && !f.smtpUrl.value.trim()) body.smtpUrl = "";
+      else if (f.smtpUrl.value.trim()) body.smtpUrl = f.smtpUrl.value;
+      try {
+        const r = await busy($("button.primary", f), () => api("/api/aanbieder/accounts", { method: "POST", body }));
+        $("#aChecks").innerHTML = resultItems(r.checks);
+        if (r.ok) { formMsg(f, "Alles werkt.", true); setTimeout(() => aStep("adres").catch(() => {}), 900); }
+        else formMsg(f, "Nog niet alles werkt; pas aan wat rood is en controleer opnieuw.");
+      } catch (err) { formMsg(f, err.message); }
+    };
+    return;
+  }
+  if (a.step === "adres") {
+    const d = a.dns ?? {};
+    box.innerHTML = `${head}<form class="fields panel" id="af"><p class="muted" style="margin:0">Op dit adres vinden je klanten en de app je Dienst, en log je in op het beheer. ${a.defaultUrl ? `Je cloud zet het adres onder ${esc(config.domain)} zelf in je DNS.` : ""}</p>
+      <label>Adres van je Dienst<input name="url" value="${esc(a.url ?? a.defaultUrl ?? "")}" autocapitalize="off" spellcheck="false" required><small>Een adres onder een ander domein kan ook; dan zet je het record zelf.</small></label>
+      ${a.server ? `<p class="note warn" style="margin:0">Een nieuw adres gaat pas in na <b>Opnieuw opzetten</b>.${d.host ? "" : ""}</p>` : ""}
+      <p class="msg"></p>${nav()}</form>`;
+    wire();
+    $("#af").onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      try { await busy($("button.primary", f), () => api("/api/aanbieder/adres", { method: "POST", body: { url: f.url.value } })); await aStep("opzetten"); }
+      catch (err) { formMsg(f, err.message); }
+    };
+    return;
+  }
+  // opzetten
+  const missing = [!a.ready.bedrijf && "je bedrijfsgegevens", !a.ready.accounts && "je accounts", !a.ready.adres && "het adres"].filter(Boolean);
+  box.innerHTML = `${head}<form class="fields panel" id="af">
+    <p style="margin:0">${a.server ? `Je Dienst krijgt een <b>nieuwe server</b> met de nieuwe instellingen. De huidige server maakt eerst een laatste back-up; de nieuwe zet die terug. Een paar minuten is de Dienst niet bereikbaar.` : `De console maakt bij Scaleway een project <b>eigen-cloud-dienst</b> met een kleine server in Amsterdam (DEV1-S) en opslag voor de back-ups in Parijs. De Dienst staat daarna op <b>${esc(a.url ?? "")}</b>.`}</p>
+    <p class="muted" style="margin:0"><small>Elk uur een versleutelde back-up, 30 dagen niet te wissen. De server werkt zichzelf 's nachts bij naar de nieuwste versie en zet de vorige terug als dat misgaat.</small></p>
+    ${missing.length ? `<p class="note warn" style="margin:0">Nog niet klaar: ${esc(missing.join(", "))}.</p>` : ""}
+    <ul class="results" id="aSteps"></ul>
+    <p class="msg"></p>${nav(!missing.length, a.server ? "Opnieuw opzetten" : "Dienst opzetten")}</form>`;
+  wire();
+  $("#af").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try {
+      const r = await busy($("button.primary", f), () => api("/api/aanbieder/opzetten", { method: "POST" }));
+      $("#aSteps").innerHTML = resultItems(r.steps);
+      setTimeout(() => renderAanbieder({ ok: true, text: r.replaced ? "De nieuwe server start op; over een paar minuten is je Dienst weer bereikbaar." : "Je Dienst start op. Dat duurt meestal 3 à 5 minuten." }), 1500);
+    } catch (err) { if (err.data?.steps) $("#aSteps").innerHTML = resultItems(err.data.steps); formMsg(f, err.message); }
+  };
+}
+
+function aanbiederKlaar(box, a, msg) {
+  if (a.removed && !a.server) {
+    box.innerHTML = `<h2>Je dienst</h2><div class="panel"><p style="margin:0">Je Dienst is verwijderd. De back-ups staan nog in <b>${esc(a.backup?.bucket ?? "je opslag")}</b>; met <b>Opnieuw opzetten</b> komt alles terug op een nieuwe server.</p>
+      <div class="actions" style="margin:0"><button class="btn primary" id="aAgain">Opnieuw opzetten</button><button class="btn" id="aEdit">Instellingen wijzigen</button></div><p class="msg" id="amsg2"></p></div>`;
+    $("#aAgain").onclick = () => aStep("opzetten").catch(() => {});
+    $("#aEdit").onclick = () => aStep("bedrijf").catch(() => {});
+    return;
+  }
+  const h = a.lastHealth;
+  const show = (s) => {
+    const dot = !s ? "" : s.reachable ? (s.closing ? "verhuist" : "bereikbaar") : "niet bereikbaar";
+    $("#aStatus").innerHTML = `<ul class="results">
+      <li class="${s?.reachable ? "" : "meh"}">${esc(a.url)} ${esc(dot)}${s?.version ? `<small>Versie ${esc(s.version)}${s.uptime != null ? ` · draait ${s.uptime < 3600 ? Math.max(1, Math.round(s.uptime / 60)) + " minuten" : Math.round(s.uptime / 3600) + " uur"}` : ""}</small>` : s?.error ? `<small>${esc(s.error)}${a.server?.createdAt && Date.now() - a.server.createdAt < 15 * 60_000 ? " — de server start nog op" : ""}</small>` : ""}</li>
+      <li class="${s?.lastBackupAt ? (s.backup === "fout" ? "bad" : "") : "meh"}">Back-up${s?.lastBackupAt ? `: ${time(s.lastBackupAt)}` : ": nog geen"}${s?.backup === "fout" ? "<small>De laatste poging mislukte</small>" : ""}</li>
+      ${s?.dns ? `<li class="${s.dns.ok ? "" : "meh"}">${esc(s.dns.host)} wijst ${s.dns.ok ? "naar je server" : s.dns.have?.length ? `naar ${esc(s.dns.have.join(", "))}` : "nog nergens heen"}${s.dns.ok ? "" : `<small>${a.dns?.managed ? "Je cloud zet dit record zelf; DNS-wijzigingen kunnen tot een uur duren." : `Zet bij je DNS een A-record: ${esc(s.dns.host)} → ${esc(s.dns.want ?? "")}`}</small>`}</li>` : ""}
+    </ul>`;
+  };
+  box.innerHTML = `<h2>Je dienst</h2><div class="panel">
+    <div><b>${esc(a.company?.name ?? "")}</b><br><span class="muted">${esc(a.url ?? "")} · server ${esc(a.server?.ipv4 ?? "")} in Amsterdam${a.backup ? ` · back-ups in ${esc(a.backup.bucket)}` : ""}</span></div>
+    <div id="aStatus"><p class="muted" style="margin:0">Status ophalen…</p></div>
+    <div class="actions" style="margin:0">
+      <button class="btn primary" id="aOpen">Beheer openen</button>
+      <button class="btn" id="aEdit">Instellingen wijzigen</button>
+      <button class="btn" id="aAgain">Opnieuw opzetten</button>
+      <button class="btn danger" id="aDel">Dienst verwijderen</button>
+    </div>
+    <p class="muted" style="margin:0"><small>Log in op het beheer met <b>${esc(a.company?.email ?? "")}</b>; je krijgt een code per mail. Je sleutel voor de lijst van aanbieders (aanbieders.json) staat in het beheer onder <i>Op de lijst</i>.</small></p>
+    <div id="aExtra"></div>
+    <p class="msg ${msg?.ok ? "ok" : msg ? "err" : ""}" id="amsg2">${esc(msg?.text ?? "")}</p></div>`;
+  if (h) show(h);
+  const refresh = async () => { try { show(await api("/api/aanbieder/status")); } catch { /* volgende keer */ } };
+  refresh();
+  aanbiederTimer = setInterval(refresh, 30_000);
+  const m = $("#amsg2");
+  $("#aOpen").onclick = () => openBeheer(a.beheerUrl);
+  $("#aEdit").onclick = () => aStep("bedrijf").catch((e) => { m.textContent = e.message; m.className = "msg err"; });
+  $("#aAgain").onclick = async (e) => {
+    if (!confirm("Je Dienst opnieuw opzetten op een nieuwe server?\n\nDe huidige server maakt eerst een laatste back-up; de nieuwe zet die terug. Een paar minuten is de Dienst niet bereikbaar.")) return;
+    try {
+      const r = await busy(e.target, () => api("/api/aanbieder/opzetten", { method: "POST" }));
+      $("#aExtra").innerHTML = `<ul class="results">${resultItems(r.steps)}</ul>`;
+      m.textContent = "De nieuwe server start op."; m.className = "msg ok";
+    } catch (err) { if (err.data?.steps) $("#aExtra").innerHTML = `<ul class="results">${resultItems(err.data.steps)}</ul>`; m.textContent = err.message; m.className = "msg err"; }
+  };
+  $("#aDel").onclick = () => {
+    const host = (a.url ?? "").replace(/^https:\/\//, "");
+    $("#aExtra").innerHTML = `<form class="fields" id="adf"><p class="note warn" style="margin:0">De server van je Dienst gaat weg. Je klanten kunnen dan niet meer inloggen, bestellen of betalen; hun clouds blijven wel draaien. Er komt eerst nog een laatste back-up; de back-ups blijven bewaard, zodat je de Dienst later terug kunt zetten.</p>
+      <label>Typ <b>${esc(host)}</b> om te bevestigen<input name="confirm" autocomplete="off" autocapitalize="off" spellcheck="false" required></label>
+      <div><button class="btn danger">Definitief verwijderen</button></div></form>`;
+    $("#adf").onsubmit = async (ev) => {
+      ev.preventDefault();
+      try {
+        const r = await busy($("#adf button"), () => api("/api/aanbieder/verwijderen", { method: "POST", body: { confirm: ev.target.confirm.value } }));
+        renderAanbieder({ ok: true, text: `Verwijderd.${r.finalBackup ? "" : " De laatste back-up lukte niet; de vorige blijft bewaard."}` });
+      } catch (err) { m.textContent = err.message; m.className = "msg err"; }
+    };
+  };
+}
+
 async function renderDash() {
-  root.innerHTML = `<div class="dash"><div class="mapwrap" id="map"></div><section><div id="side"><p class="muted">Status ophalen…</p></div>${config?.dienst?.orderId ? `<div id="abo"></div>` : ""}</section></div>`;
+  root.innerHTML = `<div class="dash"><div class="mapwrap" id="map"></div><section><div id="side"><p class="muted">Status ophalen…</p></div>${config?.dienst?.orderId ? `<div id="abo"></div>` : ""}<div id="aanbieder"></div></section></div>`;
   if (config?.dienst?.orderId) renderAbo();
+  renderAanbieder();
   const draw = async () => {
     let s;
     try { s = await api("/api/status"); } catch { return; }

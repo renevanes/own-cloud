@@ -454,7 +454,9 @@ public final class Admin {
         if (con == null) return settings;
         settings.put("mail_relay", con.get("mailRelay") != null ? con.get("mailRelay") : "");
         settings.put("spf_extra", con.get("spfExtra") != null ? con.get("spfExtra") : "");
-        settings.put("extra_dns", Json.stringify(con.get("extraDns") != null ? con.get("extraDns") : Json.list()));
+        List<Object> extra = new ArrayList<>(con.get("extraDns") != null ? Json.asList(con.get("extraDns")) : Json.list());
+        extra.addAll(aanbiederDns(c));
+        settings.put("extra_dns", Json.stringify(extra));
         if (Json.truthy(con.get("alertEmail"))) settings.put("alert_email", con.get("alertEmail"));
         // Abonnement bij een aanbieder: hoeveel gebruikers, en waar de cloud zijn technische gezondheid meldt.
         settings.put("max_users", Json.jsString(con.get("maxUsers") != null ? con.get("maxUsers") : (Object) 0L));
@@ -465,6 +467,34 @@ public final class Admin {
         settings.put("dienst_report", Json.truthy(orderId) && Json.truthy(Json.path(con, "dienst", "applied")) && Json.truthy(token) && !url.isEmpty()
                 ? Json.stringify(Json.obj("url", url, "orderId", orderId, "token", token)) : "");
         return settings;
+    }
+
+    /**
+     * DNS records for a provider's own Eigen Cloud Dienst that the cloud publishes (aanbiederDns in src/cluster/admin.ts):
+     * A/AAAA for the Dienst's address when it is under the cloud's domain; empty values remove a record.
+     */
+    public static List<Object> aanbiederDns(Map<String, Object> c) {
+        List<Object> out = new ArrayList<>();
+        Map<String, Object> a = Json.map(Json.map(c, "console"), "aanbieder");
+        String d = Json.truthy(c.get("domain")) ? Json.jsString(c.get("domain")) : null;
+        if (a == null || d == null) return out;
+        for (Object sub : Json.listAt(a, "dnsRemove")) {
+            out.add(Json.obj("sub", sub, "type", "A", "value", ""));
+            out.add(Json.obj("sub", sub, "type", "AAAA", "value", ""));
+        }
+        String host = "";
+        try { host = Json.truthy(a.get("url")) ? new java.net.URI(Json.jsString(a.get("url"))).getHost() : ""; } catch (java.net.URISyntaxException | RuntimeException e) { host = ""; }
+        if (host == null) host = "";
+        String sub = !host.isEmpty() && host.endsWith("." + d) ? host.substring(0, host.length() - d.length() - 1) : null;
+        boolean removed = Json.truthy(a.get("removed"));
+        Object ipv4 = Json.path(a, "server", "ipv4"), ipv6 = Json.path(a, "server", "ipv6");
+        if (sub != null && (removed || Json.truthy(ipv4))) {
+            final String s = sub;
+            out.removeIf(x -> s.equals(Json.str(x, "sub")));
+            out.add(Json.obj("sub", sub, "type", "A", "value", removed || ipv4 == null ? "" : ipv4));
+            out.add(Json.obj("sub", sub, "type", "AAAA", "value", removed || ipv6 == null ? "" : ipv6));
+        }
+        return out;
     }
 
     /** {@link #pushAdminConfig(Map, String)} without a build-default service. */

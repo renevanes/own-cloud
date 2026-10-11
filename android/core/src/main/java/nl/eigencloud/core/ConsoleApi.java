@@ -632,6 +632,40 @@ public final class ConsoleApi {
                 }
             }
 
+            // ── Aanbieder worden: je eigen Eigen Cloud Dienst opzetten en bijhouden ──
+            case "GET /api/aanbieder":
+                return ok(Aanbieder.view(c));
+            case "POST /api/aanbieder/stap": {
+                Map<String, Object> r = Aanbieder.setStep(c, Json.str(b, "step") == null ? "" : Json.str(b, "step"));
+                save();
+                return ok(r);
+            }
+            case "POST /api/aanbieder/bedrijf": {
+                Map<String, Object> r = Aanbieder.saveBedrijf(c, b);
+                save();
+                return ok(r);
+            }
+            case "POST /api/aanbieder/accounts": {
+                Map<String, Object> r = Aanbieder.saveAccounts(c, b);
+                save();
+                return ok(r);
+            }
+            case "POST /api/aanbieder/adres": {
+                Map<String, Object> r = Aanbieder.saveAdres(c, b);
+                save();
+                return ok(r);
+            }
+            case "POST /api/aanbieder/opzetten":
+                try {
+                    return ok(Aanbieder.opzetten(c, aanbiederDeps()));
+                } catch (Aanbieder.SetupException e) {
+                    return err(400, e.getMessage(), "steps", e.steps);
+                }
+            case "GET /api/aanbieder/status":
+                return ok(Aanbieder.status(c, aanbiederDeps()));
+            case "POST /api/aanbieder/verwijderen":
+                return ok(Aanbieder.verwijderen(c, b, aanbiederDeps()));
+
             case "GET /api/checklist":
                 return ok(Console.checklist(c));
 
@@ -692,6 +726,18 @@ public final class ConsoleApi {
             return ok(Json.obj("ok", true));
         }
         return err(404, "Onbekend: " + key);
+    }
+
+    /** Wat Aanbieder nodig heeft: het opslag-endpoint per regio (uit de catalogus) en bewaren. */
+    private Aanbieder.Deps aanbiederDeps() {
+        return new Aanbieder.Deps() {
+            @Override public String storeEndpoint(String region) {
+                for (Object r : Json.listAt(catalog.storeOffer("scaleway"), "regions")) if (region.equals(Json.str(r, "id"))) return Json.str(r, "endpoint");
+                return "https://s3." + region + ".scw.cloud";
+            }
+
+            @Override public void save() throws IOException { ConsoleApi.this.save(); }
+        };
     }
 
     /** JS {@code Number(v ?? 0)} for a JSON value: a number, or null for NaN (as JSON.stringify writes it). */

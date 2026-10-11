@@ -163,3 +163,5 @@ dialog::backdrop { background: rgb(0 0 0 / .4); }
   .login { margin-top: 3vh; }
 }
 @media (max-width: 380px) { .cards { grid-template-columns: 1fr; } }
+pre.code { background: var(--panel); border: 1.5px solid var(--line); border-radius: var(--radius-s); padding: 12px 14px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+ol.steps { padding-left: 22px; display: grid; gap: 8px; }

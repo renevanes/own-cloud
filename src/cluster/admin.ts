@@ -202,7 +202,30 @@ export async function prepareStore(cfg: StoreConfig): Promise<StepResult[]> {
 }
 
 /** Stuurt gewijzigde beheerinstellingen naar het draaiende cluster (ondertekend). */
-type ConsolePart = { mailRelay?: string; spfExtra?: string; alertEmail?: string; extraDns?: unknown[]; maxUsers?: number; dienst?: { url?: string; orderId?: string; applied?: boolean } };
+type ConsolePart = { mailRelay?: string; spfExtra?: string; alertEmail?: string; extraDns?: unknown[]; maxUsers?: number; dienst?: { url?: string; orderId?: string; applied?: boolean };
+  aanbieder?: { url?: string; removed?: boolean; dnsRemove?: string[]; server?: { ipv4?: string; ipv6?: string } | null } };
+
+/**
+ * DNS-records voor de Eigen Cloud Dienst van een aanbieder die de cloud zelf publiceert (extra_dns): A/AAAA voor het
+ * adres van de Dienst als dat onder het domein van de cloud valt (bijv. dienst.vanes.nl). Na verwijderen, of voor een
+ * vorig adres, lege waarden: dan haalt de cloud het record weg. Alleen zolang er een server is (of was).
+ */
+export function aanbiederDns(c: { domain?: string } & { console?: ConsolePart }): { sub: string; type: "A" | "AAAA"; value: string }[] {
+  const a = c.console?.aanbieder, d = c.domain;
+  if (!a || !d) return [];
+  const subOf = (host: string) => (host.endsWith(`.${d}`) ? host.slice(0, -(d.length + 1)) : null);
+  const out: { sub: string; type: "A" | "AAAA"; value: string }[] = [];
+  for (const sub of a.dnsRemove ?? []) out.push({ sub, type: "A", value: "" }, { sub, type: "AAAA", value: "" });
+  let host = "";
+  try { host = a.url ? new URL(a.url).hostname : ""; } catch { /* geen geldig adres */ }
+  const sub = host ? subOf(host) : null;
+  if (sub && (a.removed || a.server?.ipv4)) {
+    const keep = out.filter((x) => x.sub !== sub);
+    out.length = 0;
+    out.push(...keep, { sub, type: "A", value: a.removed ? "" : a.server?.ipv4 ?? "" }, { sub, type: "AAAA", value: a.removed ? "" : a.server?.ipv6 ?? "" });
+  }
+  return out;
+}
 
 /** Instellingen die de beheerconsole aan de cloud doorgeeft (bij de start en na elke wijziging). */
 export function consoleSettings(c: ClusterConfig & { console?: ConsolePart }, defaultDienst = ""): Record<string, string> {
@@ -211,7 +234,7 @@ export function consoleSettings(c: ClusterConfig & { console?: ConsolePart }, de
   if (!con) return settings;
   settings.mail_relay = con.mailRelay ?? "";
   settings.spf_extra = con.spfExtra ?? "";
-  settings.extra_dns = JSON.stringify(con.extraDns ?? []);
+  settings.extra_dns = JSON.stringify([...(con.extraDns ?? []), ...aanbiederDns(c)]);
   if (con.alertEmail) settings.alert_email = con.alertEmail;
   // Abonnement bij een aanbieder: hoeveel gebruikers, en waar de cloud zijn technische gezondheid meldt.
   settings.max_users = String(con.maxUsers ?? 0);
