@@ -41,13 +41,18 @@ versie al bestaat.
 
 ## Automatische updates
 
-Elke versie op `main` wordt door GitHub Actions gebouwd en gepubliceerd. GitHub Actions zet hem als pakket `eigen-cloud-app` op ghcr.io; de app
-kijkt elke paar uur, downloadt een nieuwe versie via wifi, controleert de SHA-256 en of hij met dezelfde sleutel is
-ondertekend, en installeert hem zelf. Vanaf Android 12 gebeurt dat zonder tik (na de eerste keer en nadat je de app
-eenmalig toestemming geeft om apps te installeren); op oudere Android-versies krijg je een melding om bij te werken.
-Zet het pakket `eigen-cloud-app` op ghcr.io één keer op **Public** (GitHub → je profiel → Packages). Lukt ghcr.io
-niet, dan haalt de app de update van je eigen cloud (`/app/update.json` en `/app/eigen-cloud.apk`, ingelogd; elke
-server-image bevat de app van dezelfde build), met dezelfde SHA-256- en handtekeningcontrole. De vaste ondertekensleutel staat in `android/signing/` (lees de README daar).
+Elke versie op `main` wordt door GitHub Actions gebouwd en gepubliceerd. De app kijkt bij het openen (hooguit eens per
+half uur) en op de achtergrond (elke paar uur), ook als je cloud nog niet draait. Hij zoekt op drie plekken en neemt
+de hoogste versie:
+
+1. de nieuwste **release op GitHub** (`update.json` en `Eigen-Cloud-vX.Y.apk`), zonder inloggen (de repository is openbaar);
+2. het pakket `eigen-cloud-app` op **ghcr.io** (als dat op Public staat);
+3. **je eigen cloud** (`/app/update.json`, ingelogd; elk server-image bevat de app van dezelfde build).
+
+Hij controleert altijd de SHA-256 en of de nieuwe versie met dezelfde sleutel is ondertekend. Via wifi installeert hij
+zichzelf (vanaf Android 12 zonder tik, nadat je één keer *apps installeren* hebt toegestaan); anders zie je
+*Nieuwe versie* met wat er nieuw is en een knop **Bijwerken**. Bij elke versie meldt GitHub Actions of de app en de
+servers hun updates zonder inloggen kunnen ophalen. De vaste ondertekensleutel staat in `android/signing/`.
 
 ## Installeren
 

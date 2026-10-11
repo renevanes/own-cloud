@@ -46,6 +46,8 @@ final class Updater {
         java.util.List<String> notes = new java.util.ArrayList<>();
         /** Van je eigen cloud in plaats van ghcr.io (als die niet bereikbaar of niet openbaar is). */
         CloudApi viaCloud;
+        /** Rechtstreeks uit een GitHub-release (openbare repository). */
+        String apkUrl;
 
         Release(long code, String version, String apkDigest, long size) {
             this.code = code;
@@ -69,8 +71,75 @@ final class Updater {
         return r;
     }
 
-    /** Nieuwste versie: eerst ghcr.io, anders je eigen cloud. */
+    /** Nieuwste versie: uit de releases op GitHub, anders ghcr.io, anders je eigen cloud. De hoogste wint. */
     static Release newest(Context c) throws IOException {
+        Release best = null;
+        IOException firstErr = null;
+        try {
+            best = fromGitHub();
+        } catch (IOException e) {
+            firstErr = e;
+        }
+        try {
+            Release other = newestRegistryOrCloud(c);
+            if (best == null || other.code > best.code) best = other;
+        } catch (IOException e) {
+            if (best == null) throw new IOException((firstErr != null ? firstErr.getMessage() + "; " : "") + e.getMessage());
+        }
+        return best;
+    }
+
+    /** update.json van de nieuwste release (werkt zonder inloggen zodra de repository openbaar is). */
+    static Release fromGitHub() throws IOException {
+        String base = "https://github.com/" + BuildConfig.UPDATE_REPO + "/releases";
+        byte[] info = getFollowing(base + "/latest/download/update.json", 64 * 1024);
+        Map<String, Object> j = Json.parseObject(Bytes.utf8(info));
+        Number code = Json.num(j, "versionCode"), size = Json.num(j, "size");
+        String sha = Json.str(j, "sha256"), version = Json.str(j, "version");
+        if (code == null || version == null || sha == null || !sha.matches("[0-9a-f]{64}")) throw new IOException("onvolledige update-informatie op GitHub");
+        Release r = new Release(code.longValue(), version, "sha256:" + sha, size == null ? -1 : size.longValue());
+        String apk = Json.str(j, "apk");
+        if (apk == null || !apk.matches("[A-Za-z0-9._-]+\\.apk")) apk = "Eigen-Cloud-v" + version + ".apk";
+        r.apkUrl = base + "/download/v" + version + "/" + apk;
+        r.notes = WhatsNew.notesFrom(j, r.version);
+        return r;
+    }
+
+    /** Klein bestand ophalen en omleidingen volgen (alleen https). */
+    private static byte[] getFollowing(String url, int max) throws IOException {
+        for (int hop = 0; hop < 6; hop++) {
+            HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+            c.setInstanceFollowRedirects(false);
+            c.setConnectTimeout(15_000);
+            c.setReadTimeout(20_000);
+            try {
+                int st = c.getResponseCode();
+                if (st >= 300 && st < 400) {
+                    String loc = c.getHeaderField("location");
+                    if (loc == null || !loc.startsWith("https://")) throw new IOException("Ongeldige omleiding");
+                    url = loc;
+                    continue;
+                }
+                if (st == 404) throw new IOException("Geen release gevonden op GitHub (is de repository openbaar?)");
+                if (st != 200) throw new IOException("GitHub antwoordt " + st);
+                try (InputStream in = c.getInputStream()) {
+                    java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                    byte[] buf = new byte[8192];
+                    int k;
+                    while ((k = in.read(buf)) > 0) {
+                        if (out.size() + k > max) throw new IOException("update-informatie te groot");
+                        out.write(buf, 0, k);
+                    }
+                    return out.toByteArray();
+                }
+            } finally {
+                c.disconnect();
+            }
+        }
+        throw new IOException("Te veel omleidingen");
+    }
+
+    private static Release newestRegistryOrCloud(Context c) throws IOException {
         IOException first;
         try {
             Release g = latest();
@@ -136,13 +205,17 @@ final class Updater {
     }
 
     private static void download(String tok, String digest, File out, long max) throws IOException {
-        String url = REGISTRY + "/v2/" + BuildConfig.UPDATE_IMAGE + "/blobs/" + digest;
+        downloadUrl(REGISTRY + "/v2/" + BuildConfig.UPDATE_IMAGE + "/blobs/" + digest, tok, digest, out, max);
+    }
+
+    /** Downloaden met omleidingen; het token gaat alleen naar ghcr.io. Controleert de SHA-256. */
+    private static void downloadUrl(String url, String tok, String digest, File out, long max) throws IOException {
         for (int hop = 0; hop < 5; hop++) {
             HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
             c.setInstanceFollowRedirects(false);
             c.setConnectTimeout(20_000);
             c.setReadTimeout(60_000);
-            if (url.startsWith(REGISTRY)) c.setRequestProperty("authorization", "Bearer " + tok);
+            if (tok != null && url.startsWith(REGISTRY)) c.setRequestProperty("authorization", "Bearer " + tok);
             int st = c.getResponseCode();
             if (st >= 300 && st < 400) {
                 String loc = c.getHeaderField("location");
@@ -167,7 +240,7 @@ final class Updater {
             } finally {
                 c.disconnect();
             }
-            // In een OCI-registry is de naam van een blob zijn SHA-256: zo weten we zeker dat het klopt.
+            // De verwachte SHA-256 komt uit update.json of (bij ghcr.io) uit de naam van de blob.
             if (!("sha256:" + Bytes.hex(sha.digest())).equals(digest)) throw new IOException("Controle van de download mislukt (SHA-256 klopt niet)");
             return;
         }
@@ -225,8 +298,10 @@ final class Updater {
         //noinspection ResultOfMethodCallIgnored
         dir.mkdirs();
         File apk = new File(dir, "eigen-cloud.apk");
+        long max = r.size > 0 ? r.size : 200L * 1024 * 1024;
         if (r.viaCloud != null) downloadFromCloud(r, apk);
-        else download(token(), r.apkDigest, apk, r.size > 0 ? r.size : 200L * 1024 * 1024);
+        else if (r.apkUrl != null) downloadUrl(r.apkUrl, null, r.apkDigest, apk, max);
+        else download(token(), r.apkDigest, apk, max);
         PackageManager pm = c.getPackageManager();
         PackageInfo mine, theirs;
         try { mine = pm.getPackageInfo(c.getPackageName(), sigFlag()); } catch (PackageManager.NameNotFoundException e) { throw new IOException(e); }

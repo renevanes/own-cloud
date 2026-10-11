@@ -101,7 +101,7 @@ jobs:
           apk = open("out/eigen-cloud.apk", "rb").read()
           log = json.load(open("changelog.json", encoding="utf-8"))
           info = {"version": os.environ["V"], "versionCode": int(os.environ["CODE"]), "sha256": hashlib.sha256(apk).hexdigest(),
-                  "size": len(apk), "commit": os.environ["GITHUB_SHA"], "date": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "size": len(apk), "apk": "Eigen-Cloud-v" + os.environ["V"] + ".apk", "commit": os.environ["GITHUB_SHA"], "date": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                   "changelog": log[:10]}
           json.dump(info, open("out/update.json", "w", encoding="utf-8"), ensure_ascii=False)
           notes = "\n".join("- " + c for c in log[0]["changes"])
@@ -141,19 +141,26 @@ jobs:
             T=$(curl -sS "https://ghcr.io/token?service=ghcr.io&scope=repository:$IMG:pull" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))' 2>/dev/null || true)
             CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" -H "Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json" "https://ghcr.io/v2/$IMG/manifests/latest")
             if [ "$CODE" = 200 ]; then echo "$P: openbaar, updates werken"
-            else echo "::warning title=Pakket $P is niet openbaar::Telefoons en servers kunnen $P niet ophalen (HTTP $CODE). Zet het één keer op Public: github.com/users/${{ github.repository_owner }}/packages/container/package/$P/settings → Change visibility → Public."; fi
+            else echo "::warning title=Pakket $P is niet openbaar::Telefoons en servers kunnen $P niet ophalen (HTTP $CODE). Zet het één keer op Public: github.com/users/${{ github.repository_owner }}/packages/container/$P/settings → Danger Zone → Change visibility → Public."; fi
           done
       - name: GitHub Release (elke versie een eigen release, met de APK)
         env: { GH_TOKEN: "${{ github.token }}", V: "${{ needs.versie.outputs.name }}" }
         run: |
           cp art/out/eigen-cloud.apk "Eigen-Cloud-v$V.apk"
           cp art/out/eigen-cloud.apk "Eigen-Cloud.apk"
+          cp art/out/update.json update.json
+          # update.json in elke release: daar kijkt de app als eerste (zonder inloggen, als de repository openbaar is)
           if gh release view "v$V" >/dev/null 2>&1; then
             # Opnieuw gedraaid voor dezelfde commit: bestanden vervangen
-            gh release upload "v$V" "Eigen-Cloud-v$V.apk" "Eigen-Cloud.apk" --clobber
+            gh release upload "v$V" "Eigen-Cloud-v$V.apk" "Eigen-Cloud.apk" update.json --clobber
           else
-            gh release create "v$V" "Eigen-Cloud-v$V.apk" "Eigen-Cloud.apk" --target "$GITHUB_SHA" --title "Eigen Cloud $V" --notes-file art/out/notes.md --latest
+            gh release create "v$V" "Eigen-Cloud-v$V.apk" "Eigen-Cloud.apk" update.json --target "$GITHUB_SHA" --title "Eigen Cloud $V" --notes-file art/out/notes.md --latest
           fi
+      - name: Kan de app de release zonder inloggen vinden?
+        run: |
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -L "https://github.com/${{ github.repository }}/releases/latest/download/update.json")
+          if [ "$CODE" = 200 ]; then echo "Releases openbaar: de app haalt updates rechtstreeks van GitHub"
+          else echo "::warning title=Releases niet openbaar::De app kan update.json niet zonder inloggen ophalen (HTTP $CODE). Maak de repository openbaar, of zet het pakket eigen-cloud-app op Public."; fi
 
   images:
     needs: [versie, test, apk]
