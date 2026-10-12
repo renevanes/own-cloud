@@ -3,7 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { simpleParser, type AddressObject, type ParsedMail } from "mailparser";
 import { db } from "../db.js";
-import { paths } from "../config.js";
+import { paths, config } from "../config.js";
+import { fsyncFile, reserveSpace } from "../work.js";
+import { getUser } from "../users.js";
 import { blobWritten, relData } from "../blobs.js";
 
 export type Folder = "inbox" | "sent" | "archive" | "trash" | "spam" | "drafts";
@@ -15,6 +17,9 @@ export interface StoreOptions {
   isStarred?: boolean;
   /** Van wie is dit bericht (standaard de eigenaar). */
   userId?: number;
+  dedupKey?: string;
+  reserved?: boolean;
+  inbound?: boolean;
 }
 
 interface Addr { name: string; address: string }
@@ -48,17 +53,36 @@ function snippetOf(text: string | undefined) {
 /** Bewaart een ruw RFC 822-bericht. Geeft het nieuwe id terug, of null als het al bestond. */
 export async function storeRawMessage(raw: Buffer, opts: StoreOptions = {}): Promise<number | null> {
   const m = await simpleParser(raw, { skipImageLinks: true });
-  const userId = opts.userId ?? 1;
-
-  if (m.messageId) {
-    const exists = db.prepare("SELECT id FROM messages WHERE message_id = ? AND user_id = ?").get(m.messageId, userId);
-    if (exists) return null;
+  let userId = opts.userId ?? 1;
+  if (getUser(userId)?.status === "removed") {
+    if (opts.inbound) userId = 1;
+    else throw Object.assign(new Error("Dit account is verwijderd"), { statusCode: 401 });
   }
+
+  const messageId = m.messageId ?? `<incoming-${opts.dedupKey ?? crypto.createHash("sha256").update(raw).digest("hex")}@eigen-cloud>`;
+  {
+    const exists = db.prepare("SELECT id,raw_path FROM messages WHERE message_id = ? AND user_id = ?").get(messageId, userId) as { id: number; raw_path: string | null } | undefined;
+    if (exists) {
+      const sha = crypto.createHash("sha256").update(raw).digest("hex");
+      if (exists.raw_path?.endsWith(sha + ".eml")) {
+        const rawFile = path.join(config.dataDir, exists.raw_path);
+        if (!fs.existsSync(rawFile)) { fs.mkdirSync(path.dirname(rawFile), { recursive: true }); fs.writeFileSync(rawFile, raw); fsyncFile(rawFile); blobWritten(exists.raw_path); }
+        for (const att of m.attachments) {
+          const hash = crypto.createHash("sha256").update(att.content).digest("hex"), file = path.join(paths.mailAttachments, hash.slice(0, 2), hash);
+          if (!fs.existsSync(file)) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, att.content); fsyncFile(file); blobWritten(relData(file)); }
+        }
+      }
+      return null;
+    }
+  }
+  const release = opts.reserved ? () => {} : reserveSpace(userId, raw.length + m.attachments.reduce((n, a) => n + a.size, 0));
+  try {
 
   const sha = crypto.createHash("sha256").update(raw).digest("hex");
   const rawPath = path.join(paths.mailRaw, sha.slice(0, 2), sha + ".eml");
   fs.mkdirSync(path.dirname(rawPath), { recursive: true });
   if (!fs.existsSync(rawPath)) fs.writeFileSync(rawPath, raw);
+  fsyncFile(rawPath);
 
   const from = addrs(m.from)[0];
   const date = m.date?.getTime() ?? Date.now();
@@ -69,6 +93,7 @@ export async function storeRawMessage(raw: Buffer, opts: StoreOptions = {}): Pro
     const aPath = path.join(paths.mailAttachments, aSha.slice(0, 2), aSha);
     fs.mkdirSync(path.dirname(aPath), { recursive: true });
     if (!fs.existsSync(aPath)) fs.writeFileSync(aPath, att.content);
+    fsyncFile(aPath);
     return { filename: att.filename ?? "bijlage", mime: att.contentType, size: att.size, rel: relData(aPath) };
   });
 
@@ -84,7 +109,7 @@ export async function storeRawMessage(raw: Buffer, opts: StoreOptions = {}): Pro
   return db.transaction(() => {
     const id = Number(
       insert.run({
-        message_id: m.messageId ?? null,
+        message_id: messageId,
         thread_key: tk,
         folder: opts.folder ?? "inbox",
         labels: JSON.stringify(opts.labels ?? []),
@@ -111,4 +136,5 @@ export async function storeRawMessage(raw: Buffer, opts: StoreOptions = {}): Pro
     }
     return id;
   })();
+  } finally { release(); }
 }

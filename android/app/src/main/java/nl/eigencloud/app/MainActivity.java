@@ -236,6 +236,7 @@ public final class MainActivity extends Activity {
     private String[] permissionsFor(String flag) {
         switch (flag) {
             case Prefs.BACKUP_PHOTOS:
+                if (Build.VERSION.SDK_INT >= 34) return new String[]{"android.permission.READ_MEDIA_IMAGES", "android.permission.READ_MEDIA_VIDEO", "android.permission.READ_MEDIA_VISUAL_USER_SELECTED", "android.permission.ACCESS_MEDIA_LOCATION"};
                 if (Build.VERSION.SDK_INT >= 33) return new String[]{"android.permission.READ_MEDIA_IMAGES", "android.permission.READ_MEDIA_VIDEO", "android.permission.ACCESS_MEDIA_LOCATION"};
                 if (Build.VERSION.SDK_INT >= 29) return new String[]{Manifest.permission.READ_EXTERNAL_STORAGE, "android.permission.ACCESS_MEDIA_LOCATION"};
                 return new String[]{Manifest.permission.READ_EXTERNAL_STORAGE};
@@ -252,6 +253,7 @@ public final class MainActivity extends Activity {
     }
 
     private boolean granted(String[] perms) {
+        for (String p : perms) if (p.equals("android.permission.READ_MEDIA_IMAGES")) return PhotoBackup.permitted(this);
         for (String p : perms) {
             if (p.equals("android.permission.ACCESS_MEDIA_LOCATION")) continue; // fijn, niet nodig
             if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) return false;

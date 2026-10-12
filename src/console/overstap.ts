@@ -18,6 +18,8 @@ import { rpc } from "../cluster/transport.js";
 import { keysFor } from "../cluster/config.js";
 import { clusterStatus, consoleSettings, findLeader, probeCluster, pushAdminConfig, readManifest, saveAdminCopy, sendJob } from "../cluster/admin.js";
 import * as extras from "./extras.js";
+import { copyStores } from "./transferCopy.js";
+import { transferPreview } from "./transferPreview.js";
 
 // ───────── Toestand ─────────
 
@@ -47,7 +49,7 @@ export interface OverstapState {
   orderId?: string;
   bundle?: string;
   checkoutUrl?: string;
-  bestelling?: { status: string; steps: { id: string; label: string; state: string; detail?: string }[]; error?: string };
+  bestelling?: { status: string; steps: { id: string; label: string; state: string; detail?: string }[]; error?: string; monthly?: { value: string; currency: string } };
   /** Zelf beheren: je eigen Scaleway-sleutel en deSEC-token. */
   zelf?: { accessKey: string; secretKey: string; projectId: string; desecToken: string };
   schatting?: { bytes: number; objects: number };
@@ -182,6 +184,7 @@ export function view(c: AdminConfig) {
     // Terug kan zolang je cloud nog niet bij de nieuwe plek draait.
     kanTerug: (stap === "mislukt" && !o.gedaan.includes("wekken")) || (stap === "terug" && !!o.fout),
     klaar: o.klaar ?? null,
+    preview: transferPreview(o, readyToSwitch(o), minutesOffline(o)),
   };
 }
 
@@ -292,7 +295,7 @@ export async function refresh(c: AdminConfig) {
   const r = await extras.dienstCall(`/v1/orders/${o.orderId}`, { token: o.token, base: o.naar }).catch(() => null);
   if (!r) return false;
   const before = JSON.stringify(o.bestelling ?? null);
-  o.bestelling = { status: r.status, steps: r.steps ?? [], ...(r.error ? { error: r.error } : {}) };
+  o.bestelling = { status: r.status, steps: r.steps ?? [], ...(r.error ? { error: r.error } : {}), ...(r.monthly ? { monthly: r.monthly } : {}) };
   o.stap = stapOf(o);
   return JSON.stringify(o.bestelling) !== before;
 }
@@ -317,47 +320,7 @@ export async function zelf(c: AdminConfig, b: { accessKey?: string; secretKey?: 
 
 // ───────── Opslag kopiëren ─────────
 
-export interface CopyProgress { objects: number; bytes: number; done: number; doneBytes: number; skipped: number }
-
-/**
- * Alle objecten van A's opslag naar de nieuwe opslag (per doel de bron met hetzelfde doel: replica → replica,
- * back-up → back-up). Hervatbaar: wat al met dezelfde grootte bestaat onder db/ en blobs/ (die veranderen nooit)
- * wordt overgeslagen; de rest (manifest, configuratie, images) altijd opnieuw. Daarna controleren.
- */
-export async function copyStores(from: ObjectStore[], to: ObjectStore[], onProgress: (p: CopyProgress) => void = () => {}) {
-  const p: CopyProgress = { objects: 0, bytes: 0, done: 0, doneBytes: 0, skipped: 0 };
-  const pairs = to.map((t) => ({ to: t, from: from.find((f) => f.purpose === t.purpose) ?? from.find((f) => f.purpose === "replica") ?? from[0] }));
-  const plans: { from: ObjectStore; to: ObjectStore; src: { key: string; size: number }[]; dst: Map<string, number> }[] = [];
-  for (const pr of pairs) {
-    const src = (await pr.from.list("")).filter((x) => !SKIP.some((s) => x.key.startsWith(s)));
-    const dst = new Map((await pr.to.list("")).map((x) => [x.key, x.size]));
-    plans.push({ ...pr, src, dst });
-    p.objects += src.length;
-    p.bytes += src.reduce((a, x) => a + x.size, 0);
-  }
-  onProgress({ ...p });
-  for (const plan of plans) {
-    const queue = [...plan.src];
-    const worker = async () => {
-      for (let obj = queue.shift(); obj; obj = queue.shift()) {
-        const fixed = /^(db|blobs)\//.test(obj.key);
-        if (fixed && plan.dst.get(obj.key) === obj.size) { p.skipped++; p.done++; p.doneBytes += obj.size; onProgress({ ...p }); continue; }
-        const body = await plan.from.get(obj.key);
-        if (body) await plan.to.put(obj.key, body, obj.size);
-        p.done++;
-        p.doneBytes += obj.size;
-        onProgress({ ...p });
-      }
-    };
-    await Promise.all([worker(), worker(), worker(), worker()]);
-    // Controle: alles wat (nog) in de bron staat, staat er nu ook, even groot.
-    const after = new Map((await plan.to.list("")).map((x) => [x.key, x.size]));
-    const still = new Map((await plan.from.list("")).map((x) => [x.key, x.size]));
-    const missing = plan.src.filter((x) => still.get(x.key) === x.size && after.get(x.key) !== x.size);
-    if (missing.length) throw new Error(`${missing.length} ${missing.length === 1 ? "bestand ontbreekt" : "bestanden ontbreken"} in ${plan.to.name} na het kopiëren (bijv. ${missing[0].key})`);
-  }
-  return p;
-}
+export { copyStores, type CopyProgress } from "./transferCopy.js";
 
 // ───────── Plekken ─────────
 

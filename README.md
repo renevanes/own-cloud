@@ -4,9 +4,9 @@ Je eigen vervanger voor Gmail, Google Agenda en Google Foto's, op servers die ji
 
 | Onderdeel | Wat het doet |
 |---|---|
-| **Mail** | Eigen SMTP-server ontvangt mail voor je domein, versturen met DKIM-handtekening (direct of via relay), mappen, Gmail-labels, gesprekken, zoeken (full-text), bijlagen. HTML-mail wordt veilig getoond: geen scripts, externe afbeeldingen standaard geblokkeerd. |
-| **Agenda** | Meerdere agenda's, terugkerende afspraken (blijven goed over zomer-/wintertijd), losse herhaling verwijderen, herinneringen, `.ics` import/export, **privé iCal-feed** om op je telefoon te abonneren. |
-| **Foto's** | Upload (ook slepen), automatische thumbnails, EXIF-datum/camera/GPS, tijdlijn per maand, favorieten, albums, video's met spoelen, ontdubbeling op inhoud. |
+| **Mail** | Eigen SMTP-server, DKIM, mappen, Gmail-labels, gesprekken, zoeken en bijlagen; bewaarde concepten en Postvak uit met status per ontvanger. Optionele spamcontrole en mailregels. HTML-mail heeft geen scripts; externe afbeeldingen zijn standaard geblokkeerd. |
+| **Agenda en contacten** | Meerdere agenda's, terugkerende afspraken, herinneringen, `.ics` import/export, privé iCal-feed, contacten en CalDAV/CardDAV voor andere apps. Agenda's kunnen gedeeld worden. |
+| **Foto's** | Upload, thumbnails, EXIF/GPS, tijdlijn, favorieten, gedeelde albums, video's, ontdubbeling, kaart, handmatige tags en lokale tekstherkenning. |
 | **Overstappen** | Sleep je Google Takeout-zips in de browser: mail (met labels), agenda's en foto's (met Google's metadata en albums) komen er in één keer in. Hervat vanzelf na een verbroken verbinding. |
 | **Gezondheid** | Controleert elk kwartier je DNS, mailbeveiliging (SPF, DKIM, DMARC, reverse DNS), certificaat, back-ups en servers. Repareert wat kan zelf, en mailt je anders wat er moet gebeuren. |
 | **Tijdmachine** | Kies een moment in het verleden en zet per ongeluk verwijderde of veranderde mails, afspraken en foto's terug. |
@@ -202,8 +202,13 @@ en daarna `scripts/publish.sh` (zie [android/README.md](android/README.md#versie
 
 ## Gezin en extra gebruikers
 
-Iedereen in je cloud heeft een eigen mailadres (`naam@jouwdomein`), wachtwoord, agenda's en foto's; niemand kan bij
-die van een ander. De eerste gebruiker is de eigenaar: die voegt onder **Instellingen → Gebruikers** mensen toe (met
+Account biedt een authenticator, herstelcodes, apparaatbeheer en aparte sync-wachtwoorden.
+Offline opslag is optioneel en alleen geschikt voor een vertrouwd apparaat. Met Export
+download je je eigen gegevens en originelen, inclusief een controlelijst van alle bestanden.
+Zie [de overgang en functies van 1.17](RELEASE-1.17.md) en [het toegangs- en versleutelingsmodel](TRUST.md).
+
+Iedereen in je cloud heeft een eigen mailadres (`naam@jouwdomein`), wachtwoord, agenda's en foto's. Gebruikers zien
+elkaars gegevens alleen via geaccepteerde gedeelde agenda's of albums. De eerste gebruiker is de eigenaar: die voegt onder **Instellingen → Gebruikers** mensen toe (met
 een eerste wachtwoord of een uitnodigingslink), zet wachtwoorden opnieuw, schakelt iemand uit of verwijdert iemand
 met al zijn gegevens. Servers, domein, mailinstellingen en Gmail-koppeling blijven bij de eigenaar. Het maximum komt
 uit de instelling `max_users` (leeg of 0 = onbeperkt). Mail naar onbekende adressen op je domein komt zoals altijd
@@ -217,8 +222,8 @@ Zie **[CLUSTER.md](CLUSTER.md)**: Eigen Cloud als cluster over meerdere Europese
 
 - **Spamfilter** — nu komt alles in de inbox. Volgende stap: SPF/DKIM-controle bij ontvangst en/of Rspamd ervoor zetten.
 - **Live-test bij de aanbieders** — de koppelingen met Hetzner, Scaleway, UpCloud, Exoscale en OVHcloud volgen hun API-documentatie maar zijn nog niet tegen echte accounts gedraaid (zie [PROVIDERS.md](PROVIDERS.md) wat per aanbieder nog onzeker is). De console test inloggen en prijzen ophalen meteen bij het koppelen.
-- **IMAP/CalDAV** — nodig als je ook bestaande mail-/agenda-apps wilt gebruiken in plaats van de eigen webapp of app.
+- **IMAP** — CalDAV/CardDAV zijn beschikbaar; bestaande IMAP-mailapps worden nog niet ondersteund.
 - **Directe push-meldingen** — de app kijkt nu elk kwartier zelf (zonder Google-diensten). Sneller kan met een eigen push-dienst zoals UnifiedPush/ntfy.
-- **Agenda op de telefoon bewerken** — de telefoonagenda volgt de cloud nu alleen (lezen); wijzigen doe je in de app.
+- **Native Android-agendasynchronisatie in twee richtingen** — de ingebouwde synchronisatie leest alleen; wijzigen kan in de Eigen Cloud-app of met een aparte CalDAV-client.
 - **iPhone-app** — nu alleen de webapp op het startscherm.
-- **Gezichten/zoeken op inhoud** in foto's.
+- **Automatische gezichtsherkenning** — tags en lokale tekstherkenning zijn beschikbaar; gezichten worden nog niet automatisch herkend.

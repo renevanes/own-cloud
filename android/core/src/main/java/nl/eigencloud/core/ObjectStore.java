@@ -1,6 +1,8 @@
 package nl.eigencloud.core;
 
 import java.io.IOException;
+import java.io.File;
+import java.nio.file.Files;
 import java.util.List;
 import java.util.Map;
 
@@ -31,6 +33,14 @@ public interface ObjectStore {
 
     /** Object contents, or null when it does not exist. */
     byte[] getBuffer(String key) throws IOException;
+
+    /** Streaming variants are implemented by both production stores. Defaults support small test adapters. */
+    default void download(String key, File dest) throws IOException {
+        byte[] body = getBuffer(key);
+        if (body == null) throw new IOException("Bronbestand ontbreekt: " + key);
+        Files.write(dest.toPath(), body);
+    }
+    default void putFile(String key, File file) throws IOException { put(key, Files.readAllBytes(file.toPath())); }
 
     boolean head(String key) throws IOException;
 

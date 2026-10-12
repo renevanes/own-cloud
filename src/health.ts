@@ -60,6 +60,7 @@ export interface ClusterInfo {
   snapshotEveryH: number;
   stores: { name: string; country?: string | null; purpose: string; lag: number | null }[];
   lastDrill: { ts: number; ok: boolean; message: string } | null;
+  recovery?: { pendingBlobs: number; oldestPendingAt: number | null; verified: boolean; verifiedAt: number | null };
   drillEveryDays: number;
   dataReady: number;
   witnessReady: number;
@@ -292,6 +293,11 @@ export async function runChecks(cluster: ClusterInfo | null): Promise<Check[]> {
   checks.push({ id: "backup.spread", group: "Back-up", title: "Back-ups verspreid", status: spreadOk ? "ok" : "warn",
     detail: spreadOk ? `${cluster.stores.length} opslagplaatsen in ${countries.size} landen, waarvan ${cluster.stores.filter((s) => s.purpose === "backup").length} onveranderbare back-up` : "Aanbevolen: minstens 2 opslagplaatsen in 2 landen, waarvan één alleen voor back-ups" });
   const drillAge = cluster.lastDrill ? (Date.now() - cluster.lastDrill.ts) / 864e5 : null;
+  if (cluster.recovery) {
+    const r = cluster.recovery, age = r.oldestPendingAt ? Date.now() - r.oldestPendingAt : 0;
+    checks.push({ id: "backup.files", group: "Back-up", title: "Bestanden naar de opslag", status: age > 30 * 60_000 ? "warn" : "ok",
+      detail: r.pendingBlobs ? `${r.pendingBlobs} bestanden wachten; oudste ${Math.floor(age / 60_000)} minuten` : "Geen bestanden in de uploadwachtrij" });
+  }
   const drillOk = !!cluster.lastDrill?.ok && drillAge! < cluster.drillEveryDays * 2;
   checks.push({ id: "backup.drill", group: "Back-up", title: "Herstel getest (brandoefening)", status: cluster.lastDrill && !cluster.lastDrill.ok ? "fail" : drillOk ? "ok" : "warn",
     detail: cluster.lastDrill ? `${cluster.lastDrill.ok ? "Geslaagd" : "Mislukt"} — ${Math.round(drillAge! * 24) < 24 ? "vandaag" : Math.round(drillAge!) + " dagen geleden"}` : "Nog nooit getest",

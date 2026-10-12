@@ -68,7 +68,7 @@ function dkimOptions(from = mailSettings().from) {
 }
 
 /** Stelt het bericht samen (met DKIM-handtekening als er een sleutel is). */
-async function compose(mail: OutgoingMail, from: string): Promise<Buffer> {
+export async function compose(mail: OutgoingMail, from: string, messageId = `<${crypto.randomUUID()}@${config.hostname}>`): Promise<Buffer> {
   const builder = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: "windows" });
   const info = await builder.sendMail({
     from,
@@ -81,14 +81,14 @@ async function compose(mail: OutgoingMail, from: string): Promise<Buffer> {
     inReplyTo: mail.inReplyTo,
     references: mail.references,
     attachments: mail.attachments,
-    messageId: `<${crypto.randomUUID()}@${config.hostname}>`,
+    messageId,
     dkim: dkimOptions(from),
   });
   return info.message as Buffer;
 }
 
 /** Aflevering rechtstreeks bij de MX-server van elk ontvangend domein. */
-async function deliverDirect(raw: Buffer, recipients: string[], from = mailSettings().from) {
+export async function deliverDirect(raw: Buffer, recipients: string[], from = mailSettings().from) {
   const byDomain = new Map<string, string[]>();
   for (const r of recipients) {
     const d = r.split("@")[1].toLowerCase();
@@ -99,32 +99,40 @@ async function deliverDirect(raw: Buffer, recipients: string[], from = mailSetti
     let mxs = (await dns.resolveMx(domain).catch(() => [])).sort((a, b) => a.priority - b.priority).map((m) => m.exchange);
     if (!mxs.length) mxs = [domain];
     let ok = false;
+    let lastError: Error | undefined;
     for (const host of mxs) {
       try {
         const t = nodemailer.createTransport({ host, port: 25, name: config.hostname, secure: false, tls: { rejectUnauthorized: false }, connectionTimeout: 20000 });
-        await t.sendMail({ envelope: { from: envelopeFrom(from), to: rcpts }, raw });
+        const delivered = await t.sendMail({ envelope: { from: envelopeFrom(from), to: rcpts }, raw });
+        if (!delivered.accepted?.length) throw Object.assign(new Error("Ontvanger niet geaccepteerd"), { responseCode: 550 });
         ok = true;
         break;
       } catch (e) {
+        const error = e as Error & { responseCode?: number; code?: string };
+        // A disconnect may follow acceptance of DATA. Only an explicit rejection or
+        // a failure before connecting makes trying another MX safe.
+        if (!error.responseCode && !["EDNS", "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED"].includes(error.code ?? "")) throw e;
+        lastError = error;
         errors.push(`${host}: ${(e as Error).message}`);
       }
     }
-    if (!ok) throw new Error(`Aflevering aan ${domain} mislukt — ${errors.join("; ")}`);
+    if (!ok) throw Object.assign(lastError ?? new Error(), { message: `Aflevering aan ${domain} mislukt — ${errors.join("; ")}` });
   }
 }
 
 export async function sendMail(mail: OutgoingMail, userId = OWNER_ID): Promise<number | null> {
-  const { from, relay: relayUrl } = senderFor(userId);
-  const raw = await compose(mail, from);
-  const recipients = [...mail.to, ...(mail.cc ?? []), ...(mail.bcc ?? [])];
-  if (!recipients.length) throw new Error("Geen ontvangers");
+  const { enqueueMail, processOutbox } = await import("./outbox.js");
+  const queued = await enqueueMail(mail, userId);
+  await processOutbox(queued.id);
+  const { db } = await import("../db.js");
+  return (db.prepare("SELECT sent_id FROM mail_outbox WHERE id=?").get(queued.id) as { sent_id: number | null }).sent_id;
+}
 
-  if (relayUrl) {
-    await nodemailer.createTransport(relayUrl).sendMail({ envelope: { from: envelopeFrom(from), to: recipients }, raw });
-  } else {
-    await deliverDirect(raw, recipients, from);
-  }
-  return storeRawMessage(raw, { folder: "sent", isRead: true, userId });
+export async function deliverPrepared(raw: Buffer, recipient: string, from: string, userId: number) {
+  const relay = senderFor(userId).relay;
+  if (!relay) return deliverDirect(raw, [recipient], from);
+  const result = await nodemailer.createTransport(relay).sendMail({ envelope: { from: envelopeFrom(from), to: [recipient] }, raw });
+  if (!result.accepted?.length) throw Object.assign(new Error("Ontvanger niet geaccepteerd"), { responseCode: 550 });
 }
 
 /** Systeemmelding (bijv. gezondheidsalarm) naar een extern adres. Wordt niet in 'Verzonden' bewaard. */

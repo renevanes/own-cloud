@@ -4,6 +4,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.FileInputStream;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -50,6 +52,13 @@ public final class FsStore implements ObjectStore {
     }
 
     @Override public boolean head(String key) throws IOException { return p(key).exists(); }
+    @Override public void download(String key, File dest) throws IOException { Files.copy(p(key).toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING); }
+    @Override public void putFile(String key, File file) throws IOException {
+        File dest = p(key); dest.getParentFile().mkdirs();
+        File tmp = new File(dest.getPath() + "." + Bytes.hex(Bytes.random(4)) + ".tmp");
+        try { Files.copy(file.toPath(), tmp.toPath(), StandardCopyOption.REPLACE_EXISTING); if (!tmp.renameTo(dest)) throw new IOException("Schrijven mislukt: " + dest); }
+        finally { tmp.delete(); }
+    }
 
     @Override
     public List<Entry> list(String prefix) throws IOException {

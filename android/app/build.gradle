@@ -6,9 +6,20 @@ plugins {
 // (scripts/bump.sh). Het wijzigingslog (changelog.json) gaat mee in de app voor "Wat is er nieuw".
 def versionProps = new Properties()
 file("../../VERSION").withInputStream { versionProps.load(it) }
-def signingProps = new Properties()
-def signingFile = file("../signing/signing.properties")
-if (signingFile.exists()) signingFile.withInputStream { signingProps.load(it) }
+def signingReady = ["ANDROID_KEYSTORE", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD"].every { System.getenv(it) }
+def verifyReleaseSigner = {
+    if (!signingReady) throw new GradleException("Release signing requires all four ANDROID_KEYSTORE credentials from protected CI secrets. The public legacy key must not be used.")
+    def releaseStore = java.security.KeyStore.getInstance(file(System.getenv("ANDROID_KEYSTORE")), System.getenv("ANDROID_KEYSTORE_PASSWORD").toCharArray())
+    def certificate = releaseStore.getCertificate(System.getenv("ANDROID_KEY_ALIAS"))
+    def fingerprint = certificate == null ? "" : java.security.MessageDigest.getInstance("SHA-256").digest(certificate.encoded).encodeHex().toString().toUpperCase()
+    def expected = file("../signing/certificate-sha256.txt").text.trim().replace(":", "").toUpperCase()
+    if (fingerprint != expected) throw new GradleException("The CI key does not match android/signing/certificate-sha256.txt. Review the signer migration before publishing.")
+}
+if (gradle.startParameter.taskNames.any { it.toLowerCase().contains("release") }) verifyReleaseSigner()
+gradle.taskGraph.whenReady { graph ->
+    if (graph.allTasks.any { task -> task.name.toLowerCase().contains("release") && task.name.matches("(?i)(assemble|bundle|package|validateSigning).*Release.*") }) verifyReleaseSigner()
+}
+
 
 android {
     namespace "nl.eigencloud.app"
@@ -39,17 +50,11 @@ android {
 
     signingConfigs {
         release {
-            // Voorkeur: repository-secrets (zie android/signing/README.md); anders de vaste sleutel in android/signing.
-            if (System.getenv("ANDROID_KEYSTORE")) {
+            if (signingReady) {
                 storeFile file(System.getenv("ANDROID_KEYSTORE"))
                 storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
                 keyAlias System.getenv("ANDROID_KEY_ALIAS")
                 keyPassword System.getenv("ANDROID_KEY_PASSWORD")
-            } else if (signingProps.getProperty("storeFile")) {
-                storeFile file("../signing/" + signingProps.getProperty("storeFile"))
-                storePassword signingProps.getProperty("storePassword")
-                keyAlias signingProps.getProperty("keyAlias")
-                keyPassword signingProps.getProperty("keyPassword")
             }
         }
     }
@@ -67,7 +72,7 @@ android {
     }
 
     lint {
-        abortOnError false // eerste builds: lint-rapport bekijken in de Actions-artefacten
+        abortOnError true
         disable "SetJavaScriptEnabled", "AddJavascriptInterface", "QueryAllPackagesPermission", "GradleDependency", "OldTargetApi"
     }
 }

@@ -153,6 +153,8 @@ export function openDb(dataDir: string) {
       kind TEXT NOT NULL, version INTEGER NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL,
       created_by TEXT, announcement_id TEXT, PRIMARY KEY (kind, version));
   `);
+  if (!(db.prepare("PRAGMA table_info(health)").all() as { name: string }[]).some((c) => c.name === "recovery"))
+    db.exec("ALTER TABLE health ADD COLUMN recovery TEXT NOT NULL DEFAULT '{}'");
   return db;
 }
 

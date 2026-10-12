@@ -19,6 +19,7 @@ import { readKit } from "./provision.js";
 import { getBrand, updateBrand, saveLogo, getLogo, putBundle, deleteBundle, publicBundle, saveCosts, LOGO_MAX, hostedDoc, ownLinks } from "./brand.js";
 import { placementOptions, placementSizes, checkPlacement, checkStorage, fillCosts } from "./placement.js";
 import { registerJuridisch } from "./juridisch.js";
+import { operationsOverview } from "./operations.js";
 import {
   type Perm, type Role, type StaffRow, ROLES, ROLE_LABELS, PERMISSIONS, can, StaffError, staffFromRequest, staffView, audit,
   addStaff, setRole, removeStaff, resetSecondFactor, getStaff, mailInvite,
@@ -245,6 +246,7 @@ export function registerAdmin(app: FastifyInstance, ctx: Ctx, httpError: HttpErr
       out.unhealthy = (db.prepare("SELECT h.*, o.domain FROM health h JOIN orders o ON o.id = h.order_id WHERE h.flagged_at IS NOT NULL OR (h.healthy = 0 AND o.status IN ('ready','payment_problem')) ORDER BY h.reported_at").all() as (HealthRow & { domain: string })[])
         .map((h) => ({ orderId: h.order_id, domain: h.domain, ...healthView(h) }));
     }
+    out.operations = operationsOverview(ctx, s.role, (o) => priceAndMargin(ctx, o.amount, bundleOf(ctx, o.bundle)));
     return out;
   }));
 

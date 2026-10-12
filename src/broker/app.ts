@@ -410,7 +410,7 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     const c = needAuth(req, reply); if (!c) return;
     const o = ownOrder(c, req.params.id);
     if (!o) return httpError(reply, 404, "Deze bestelling bestaat niet");
-    return { id: o.id, bundle: o.bundle, domain: o.domain, domainMode: o.domain_mode, status: o.status, steps: getSteps(db, o.id), ...(o.error ? { error: o.error } : {}), endsAt: o.ends_at };
+    return { id: o.id, bundle: o.bundle, domain: o.domain, domainMode: o.domain_mode, status: o.status, steps: getSteps(db, o.id), monthly: { value: o.amount, currency: "EUR" }, ...(o.error ? { error: o.error } : {}), endsAt: o.ends_at };
   });
 
   app.get<{ Params: { id: string } }>("/v1/orders/:id/kit", async (req, reply) => {

@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import ICAL from "ical.js";
 import { db } from "../db.js";
 import { config } from "../config.js";
-import { utcToWall, type EventRow } from "./recurrence.js";
+import { utcToWall, validateRecurrence, type EventRow } from "./recurrence.js";
 
 type ICALTime = InstanceType<typeof ICAL.Time>;
 
@@ -14,10 +14,14 @@ function timeToMs(t: ICALTime): number {
 export interface ImportResult { added: number; updated: number; skipped: number }
 
 /** Importeert een .ics-bestand (bijv. Google Agenda-export uit Takeout) in een agenda. */
-export function importIcs(text: string, calendarId: number, userId = 1): ImportResult {
+export function importIcs(text: string, calendarId: number, userId = 1, opts: { preserveAfter?: number } = {}): ImportResult {
   const cal = db.prepare("SELECT 1 FROM calendars WHERE id = ? AND user_id = ?").get(calendarId, userId);
   if (!cal) throw Object.assign(new Error("Onbekende agenda"), { statusCode: 400 });
-  const root = new ICAL.Component(ICAL.parse(text));
+  let root: ICAL.Component;
+  try {
+    root = new ICAL.Component(ICAL.parse(text));
+    if (root.name !== "vcalendar") throw new Error();
+  } catch { throw Object.assign(new Error("Ongeldig agendabestand"), { statusCode: 400 }); }
   for (const vtz of root.getAllSubcomponents("vtimezone")) {
     try { ICAL.TimezoneService.register(vtz); } catch { /* al geregistreerd */ }
   }
@@ -49,6 +53,7 @@ export function importIcs(text: string, calendarId: number, userId = 1): ImportR
         for (const p of v.getAllProperties("exdate")) for (const val of p.getValues() as ICALTime[]) exdates.push(timeToMs(val));
 
         let reminder: number | null = null;
+        validateRecurrence(recur && !ev.recurrenceId ? recur.toString() : null, tzid);
         const alarm = v.getFirstSubcomponent("valarm");
         const trig = alarm?.getFirstPropertyValue("trigger") as { toSeconds?: () => number } | null;
         if (trig?.toSeconds) reminder = Math.round(-trig.toSeconds() / 60);
@@ -61,7 +66,8 @@ export function importIcs(text: string, calendarId: number, userId = 1): ImportR
           if (v.getFirstPropertyValue("status") === "CANCELLED") { result.skipped++; continue; }
         }
 
-        const existed = db.prepare("SELECT 1 FROM events WHERE uid = ? AND user_id = ?").get(uid, userId);
+        const existed = db.prepare("SELECT updated FROM events WHERE uid = ? AND user_id = ?").get(uid, userId) as { updated: number } | undefined;
+        if (existed && opts.preserveAfter !== undefined && existed.updated >= opts.preserveAfter) { result.skipped++; continue; }
         upsert.run({
           uid, calendar_id: calendarId, title: ev.summary || "(zonder titel)", description: ev.description || null, location: ev.location || null,
           start, end, all_day: allDay ? 1 : 0, tz: tzid, rrule: recur && !ev.recurrenceId ? recur.toString() : null,
@@ -113,7 +119,7 @@ export function exportIcs(events: EventRow[], name = "Eigen Agenda"): string {
   const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//eigen-cloud//NL", `X-WR-CALNAME:${esc(name)}`, "CALSCALE:GREGORIAN"];
   for (const e of events) {
     const [uid, rec] = e.uid.split("#");
-    lines.push("BEGIN:VEVENT", `UID:${uid.includes("@") ? uid : uid + "@" + config.hostname}`, `DTSTAMP:${utcStamp(Date.now())}`);
+    lines.push("BEGIN:VEVENT", `UID:${uid}`, `DTSTAMP:${utcStamp(e.updated ?? e.start)}`);
     if (rec) lines.push(`RECURRENCE-ID:${e.all_day ? dateStamp(Number(rec)) : utcStamp(Number(rec))}`);
     if (e.all_day) lines.push(`DTSTART;VALUE=DATE:${dateStamp(e.start)}`, `DTEND;VALUE=DATE:${dateStamp(e.end)}`);
     else if (e.tz) {

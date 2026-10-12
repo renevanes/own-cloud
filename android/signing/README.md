@@ -1,21 +1,41 @@
-# Ondertekensleutel van de app
+# Ondertekening en overgang naar een nieuwe sleutel
 
-Android installeert een update alleen als hij met **dezelfde sleutel** is ondertekend als de geïnstalleerde app.
-Deze sleutel (`eigen-release.jks`) is daarom vast. Raak hem niet kwijt: met een andere sleutel moet iedereen de
-app eerst verwijderen en opnieuw installeren.
+De eerder gepubliceerde sleutel is blootgesteld. Gebruik hem niet voor nieuwe releases.
+Hij staat nog in oude Git-commits; verwijderen trekt eerdere kopieën niet in.
 
-**Tijdelijk staat hij in deze (privé) repository**, zodat de builds meteen met een vaste sleutel werken. Iedereen
-met leestoegang tot de repository kan er APK's mee ondertekenen. Netter, en nodig als de repository ooit openbaar
-wordt:
+Release-builds gebruiken uitsluitend ANDROID_KEYSTORE, ANDROID_KEYSTORE_PASSWORD,
+ANDROID_KEY_ALIAS en ANDROID_KEY_PASSWORD. Zonder alle vier stopt de build.
+GitHub Actions verwacht ANDROID_KEYSTORE_BASE64 plus de drie wachtwoord/alias-secrets.
+Sla de nieuwe sleutel ook versleuteld buiten GitHub op. Debug-builds hebben hun eigen sleutel.
 
-1. GitHub → repository → Settings → Secrets and variables → Actions → *New repository secret*:
-   - `ANDROID_KEYSTORE_BASE64` = uitvoer van `base64 -w0 android/signing/eigen-release.jks`
-   - `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` = uit `signing.properties`
-2. Bewaar het `.jks`-bestand en het wachtwoord ook buiten GitHub (bijvoorbeeld bij je herstelblad).
-3. Verwijder daarna `eigen-release.jks` en `signing.properties` uit de repository. Het is dezelfde sleutel, dus
-   updates blijven gewoon werken.
+Maak de sleutel buiten de repository met scripts/android-signing.sh. Het script toont geen
+wachtwoorden of sleutelinhoud. Voeg de waarden zelf toe onder GitHub → Settings → Secrets
+and variables → Actions. Gebruik een uniek wachtwoord en bescherm de release-branch.
 
-De build gebruikt de secrets als die er zijn, anders dit bestand.
+Voor versie 1.17 is een nieuwe sleutel gemaakt. De openbare SHA-256-vingerafdruk staat in
+[certificate-sha256.txt](certificate-sha256.txt); Gradle weigert een andere sleutel, ook bij
+samengestelde taken zoals `assemble`. Het private sleutelbestand en de wachtwoorden horen
+uitsluitend in een veilige externe back-up en de vier GitHub Actions-secrets.
 
-Vingerafdruk (SHA-256) van het certificaat:
-`86:31:E4:B1:B1:D8:B8:06:8F:13:58:FF:E3:4F:07:3F:AF:2F:29:01:2E:D8:9A:FB:56:8B:84:19:1B:E3:DD:FB`
+Een private JSON met de vier secret-namen kan met `chmod 600` worden beschermd en met
+`python3 scripts/android-ci-secrets.py /veilige/map/ci-secrets.json --repo renevanes/own-cloud`
+worden geïnstalleerd. Dit gebruikt je ingelogde GitHub CLI en stuurt waarden via stdin;
+het toont de waarden niet. `ANDROID_KEYSTORE_BASE64` is base64 van het volledige nieuwe
+PKCS12-keystorebestand. Lokaal gebruik je het bestandspad als `ANDROID_KEYSTORE`.
+Maak je later een andere sleutel, leg dan bewust ook de nieuwe certificaatvingerafdruk vast.
+
+## Bestaande installaties
+
+De updater accepteert uitsluitend dezelfde ondertekenaar. Een blootgestelde oude sleutel
+is geen betrouwbare basis om een nieuwe ondertekenaar automatisch goed te keuren.
+
+1. Inventariseer bestaande installaties en maak een versleutelde kluis-export.
+2. Publiceer de nieuwe certificaatvingerafdruk via een onafhankelijk gecontroleerd kanaal.
+3. Installeer de nieuwe APK na controle. Weigert Android de gewijzigde ondertekening,
+   verwijder dan de oude app en installeer opnieuw.
+4. Herstel de kluis en meld de cloud opnieuw aan; cloudgegevens blijven op de servers.
+5. Trek oude app-sessies in via Account → Apparaten; controleer foto-back-up en agenda-sync.
+
+De updater accepteert geen willekeurige certificaten uit netwerkmetadata en schakelt de
+handtekeningcontrole nooit uit. De testinstallaties mogen voor deze overgang schoon worden hersteld.
+Zie [RELEASE-1.17.md](../../RELEASE-1.17.md) voor de servermigratie en beperkingen van terugzetten.

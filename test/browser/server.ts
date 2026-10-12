@@ -1,0 +1,23 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+process.env.NODE_ENV = "test";
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "eigen-browser-"));
+process.env.DATA_DIR = path.join(tmp, "data"); process.env.MAIL_FROM = "owner@browser.test"; process.env.MAIL_DOMAINS = "browser.test";
+const { buildApp } = await import("../../src/server.js");
+const { setPassword, createToken } = await import("../../src/auth.js");
+const { db } = await import("../../src/db.js");
+const { storeRawMessage } = await import("../../src/mail/store.js");
+const app = await buildApp();
+app.post("/__test/reset", async () => {
+  db.pragma("foreign_keys=OFF");
+  for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'messages_fts%' AND name NOT LIKE '\\_%' ESCAPE '\\'").all() as { name: string }[]) db.prepare(`DELETE FROM "${row.name}"`).run();
+  db.pragma("foreign_keys=ON");
+  setPassword("browser-test-password");
+  const token = createToken();
+  const id = await storeRawMessage(Buffer.from('From: attacker@outside.test\r\nTo: "<img src=x onerror=window.headerXss=1>" <owner@browser.test>\r\nSubject: Header safety\r\nMessage-ID: <browser-xss@browser.test>\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<img src=x onerror="parent.bodyXss=1;parent.EigenPhone.set(\'backupPhotos\',false)"><p>Message body</p>'));
+  return { token, id };
+});
+await app.listen({ port: 4137, host: "127.0.0.1" });
+const close = async () => { await app.close(); db.close(); fs.rmSync(tmp, { recursive: true, force: true }); process.exit(0); };
+process.on("SIGTERM", () => void close()); process.on("SIGINT", () => void close());

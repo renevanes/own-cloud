@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { storeRawMessage, type Folder, type StoreOptions } from "../mail/store.js";
+import { config } from "../config.js";
 
 const SYSTEM_LABELS = new Set(["inbox", "opened", "unread", "sent", "starred", "important", "archived", "spam", "trash", "drafts", "draft", "chat", "postvak in", "verzonden", "gelezen", "ongelezen", "met ster", "belangrijk", "gearchiveerd", "prullenbak", "concepten"]);
 
@@ -51,6 +52,7 @@ export async function* readMbox(file: string): AsyncGenerator<Buffer> {
   let current: Buffer[] = [];
   let leftover: Buffer = Buffer.alloc(0);
   let started = false;
+  let bytes = 0;
 
   const flush = function* () {
     if (current.length) {
@@ -60,6 +62,7 @@ export async function* readMbox(file: string): AsyncGenerator<Buffer> {
       yield msg;
     }
     current = [];
+    bytes = 0;
   };
 
   for await (const chunk of fs.createReadStream(file, { highWaterMark: 1 << 20 })) {
@@ -71,18 +74,24 @@ export async function* readMbox(file: string): AsyncGenerator<Buffer> {
       if (line[0] === 0x46 /* F */ && fromLine.test(line.toString("latin1").trimEnd())) {
         yield* flush();
         started = true;
-      } else if (started) current.push(line);
+      } else if (started) {
+        bytes += line.length;
+        if (bytes > config.maxMessageBytes) throw new Error("Een bericht in het mbox-bestand is te groot");
+        current.push(line);
+      }
       pos = nl + 1;
     }
     leftover = buf.subarray(pos);
+    if (bytes + leftover.length > config.maxMessageBytes) throw new Error("Een bericht in het mbox-bestand is te groot");
   }
   if (leftover.length && started) current.push(leftover);
   yield* flush();
 }
 
-export async function importGmailMbox(file: string, onProgress?: (n: { done: number; added: number; skipped: number; failed: number }) => void, userId = 1) {
+export async function importGmailMbox(file: string, onProgress?: (n: { done: number; added: number; skipped: number; failed: number }) => void, userId = 1, cancelled = () => false) {
   const stats = { done: 0, added: 0, skipped: 0, failed: 0 };
   for await (const raw of readMbox(file)) {
+    if (cancelled()) throw new Error("IMPORT_CANCELLED");
     try {
       const id = await storeRawMessage(raw, { ...gmailLabelsToOptions(raw), userId });
       id ? stats.added++ : stats.skipped++;

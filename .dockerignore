@@ -3,3 +3,7 @@ dist
 data
 .env
 .git
+
+android/**/build
+playwright-report
+test-results

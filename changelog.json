@@ -1,5 +1,24 @@
 [
   {
+    "version": "1.17",
+    "date": "2026-10-12",
+    "changes": [
+      "Je kunt concepten bewaren en ziet in Postvak uit welke ontvangers je bericht hebben gekregen.",
+      "Je kunt een authenticator-app en herstelcodes gebruiken, apparaten uitloggen en aparte sync-wachtwoorden maken.",
+      "Je agenda en contacten werken met apps die CalDAV en CardDAV ondersteunen.",
+      "Je kunt agenda’s en fotoalbums delen met andere gebruikers van je cloud.",
+      "Je kunt al je eigen gegevens en originele bestanden in één keer downloaden.",
+      "Bij overstappen zie je de maandprijs en worden alle gekopieerde bestanden gecontroleerd.",
+      "Foto’s hebben een kaart, tags en tekstherkenning op je eigen server.",
+      "Je kunt gekozen gegevens offline bewaren en wijzigingen later synchroniseren, met controle op conflicten.",
+      "Imports blijven bewaard na een herstart; je kunt ze stoppen, opnieuw proberen en uploads verwijderen.",
+      "Mail en wijzigingen krijgen pas een bevestiging nadat de benodigde gegevens veilig gekopieerd zijn.",
+      "Back-upcontroles controleren alle bestanden en kiezen een compleet herstelpunt.",
+      "Aanbieders zien verouderde meldingen, herstelcontroles, mislukte werkzaamheden, betalingen en marges samen.",
+      "De Android-app krijgt een nieuwe ondertekening. Bewaar je kluis en herstelblad en installeer deze testversie opnieuw."
+    ]
+  },
+  {
     "version": "1.16",
     "date": "2026-10-12",
     "changes": [

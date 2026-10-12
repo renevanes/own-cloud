@@ -23,7 +23,7 @@ export interface NodeInfo { version: string; updater: boolean; result: UpdateRes
  * "overstap" = kent adminOverride bij het wekken (overstappen naar een andere aanbieder).
  * Oudere servers melden geen features.
  */
-export const FEATURES = ["users", "overstap"];
+export const FEATURES = ["users", "overstap", "review-v1"];
 export interface UpdateResult { id: string; version: string; ok: boolean; rolledBack: boolean; saved?: boolean; error: string | null; at: number }
 export type UpdateMode = "auto" | "melden" | "uit";
 
@@ -124,7 +124,9 @@ export async function latestRelease(svc: ClusterService): Promise<Release> {
   const app = await resolveImage(appRef.replace(/@sha256:[0-9a-f]{64}$/, ":latest"));
   if (!app.version) throw new Error("het image heeft geen versielabel");
   const caddyRef = (svc.cfg.image as { caddyRef?: string }).caddyRef;
-  const caddy = caddyRef ? await resolveImage(caddyRef.replace(/@sha256:[0-9a-f]{64}$/, ":latest")) : null;
+  const caddyRepo = caddyRef ? parseRef(caddyRef) : null;
+  const caddy = caddyRepo ? await resolveImage(`${caddyRepo.registry}/${caddyRepo.repo}:v${app.version}`) : null;
+  if (caddy && caddy.version !== app.version) throw new Error("De server en webserver horen niet bij dezelfde uitgave");
   return { version: app.version, image: app.pinned, caddyImage: caddy?.pinned ?? null };
 }
 
@@ -166,6 +168,12 @@ export function usersBlocked(svc: ClusterService): string | null {
     .filter((n) => n.id !== svc.self.id && !(infos[n.id]?.features ?? []).includes("users"));
   if (!behind.length) return null;
   return "Je servers worden nog bijgewerkt. Gebruikers toevoegen kan zodra alle servers de nieuwste versie draaien.";
+}
+
+export function featuresBlocked(svc: ClusterService): string | null {
+  const infos = nodeInfos(svc);
+  const behind = svc.nodes("kind='data' AND status IN ('syncing','ready')").some((n) => n.id !== svc.self.id && !(infos[n.id]?.features ?? []).includes("review-v1"));
+  return behind ? "Je servers worden nog bijgewerkt. Nieuwe mogelijkheden komen beschikbaar zodra alle dataservers klaar zijn." : null;
 }
 
 /** Versie per server ophalen (leider). Schrijft alleen bij een verandering, om de replicatie rustig te houden. */

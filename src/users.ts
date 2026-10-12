@@ -41,7 +41,7 @@ function ownerUser(): User {
   const address = ownAddress().toLowerCase();
   const localpart = address.split("@")[0] ?? "";
   const name = getSetting("owner_name") || (localpart ? localpart[0].toUpperCase() + localpart.slice(1) : "Eigenaar");
-  return { id: OWNER_ID, name, address, localpart, owner: true, status: "active", sessionGen: 0 };
+  return { id: OWNER_ID, name, address, localpart, owner: true, status: "active", sessionGen: Number(getSetting("owner_session_gen") ?? 0) };
 }
 
 function fromRow(r: UserRow): User {
@@ -120,6 +120,9 @@ export function storageUsage(): Map<number, Usage> {
   for (const r of db.prepare("SELECT user_id, COALESCE(SUM(size), 0) AS n FROM messages GROUP BY user_id").all() as { user_id: number; n: number }[]) get(r.user_id).mail += r.n;
   for (const r of db.prepare("SELECT m.user_id, COALESCE(SUM(a.size), 0) AS n FROM attachments a JOIN messages m ON m.id = a.message_id GROUP BY m.user_id").all() as { user_id: number; n: number }[]) get(r.user_id).mail += r.n;
   for (const r of db.prepare("SELECT user_id, COALESCE(SUM(size), 0) AS n FROM photos GROUP BY user_id").all() as { user_id: number; n: number }[]) get(r.user_id).photos += r.n;
+  for (const r of db.prepare("SELECT user_id, COALESCE(SUM(length(CAST(mail AS BLOB))),0) AS n FROM mail_drafts GROUP BY user_id").all() as { user_id: number; n: number }[]) get(r.user_id).mail += r.n;
+  for (const r of db.prepare("SELECT user_id, COALESCE(SUM(received),0) AS n FROM import_uploads GROUP BY user_id").all() as { user_id: number; n: number }[]) get(r.user_id).mail += r.n;
+  for (const r of db.prepare("SELECT user_id, COALESCE(SUM(size),0) AS n FROM mail_outbox GROUP BY user_id").all() as { user_id: number; n: number }[]) get(r.user_id).mail += r.n;
   for (const u of out.values()) u.total = u.mail + u.photos;
   return out;
 }
@@ -155,8 +158,13 @@ export function deleteUserData(userId: number) {
     ...(db.prepare("SELECT a.path AS p FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.user_id = ?").all(userId) as { p: string }[]),
     ...(db.prepare("SELECT path AS p FROM photos WHERE user_id = ?").all(userId) as { p: string }[]),
     ...(db.prepare("SELECT thumb_path AS p FROM photos WHERE user_id = ? AND thumb_path IS NOT NULL").all(userId) as { p: string }[]),
+    ...(db.prepare("SELECT raw_path AS p FROM mail_outbox WHERE user_id = ?").all(userId) as { p: string }[]),
+    ...(db.prepare("SELECT c.path AS p FROM import_chunks c JOIN import_uploads u ON u.id = c.upload_id WHERE u.user_id = ?").all(userId) as { p: string }[]),
   ].map((r) => r.p);
   const counts = db.transaction(() => {
+    db.prepare("DELETE FROM resource_shares WHERE owner_id = ? OR member_id = ?").run(userId, userId);
+    for (const table of ["auth_sessions", "user_mfa", "app_credentials", "contacts", "mail_drafts", "mail_outbox", "mail_rules", "import_jobs", "import_uploads", "api_operations", "_resource_reservations"])
+      db.prepare(`DELETE FROM ${table} WHERE user_id = ?`).run(userId);
     db.prepare("DELETE FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE user_id = ?)").run(userId);
     const c = {
       messages: db.prepare("DELETE FROM messages WHERE user_id = ?").run(userId).changes,
@@ -179,6 +187,8 @@ export function removeUnreferencedFiles(rels: string[]) {
   const used = (p: string) =>
     !!db.prepare("SELECT 1 FROM messages WHERE raw_path = ? LIMIT 1").get(p) ||
     !!db.prepare("SELECT 1 FROM attachments WHERE path = ? LIMIT 1").get(p) ||
+    !!db.prepare("SELECT 1 FROM mail_outbox WHERE raw_path = ? LIMIT 1").get(p) ||
+    !!db.prepare("SELECT 1 FROM import_chunks WHERE path = ? LIMIT 1").get(p) ||
     !!db.prepare("SELECT 1 FROM photos WHERE path = ? OR thumb_path = ? LIMIT 1").get(p, p);
   for (const p of new Set(rels)) {
     if (!p || path.isAbsolute(p) || p.includes("..") || used(p)) continue;

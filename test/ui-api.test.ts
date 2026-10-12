@@ -56,7 +56,10 @@ test("instellingen: relay wordt gemaskeerd opgeslagen, wachtwoord wijzigen, test
   assert.match(received, /To: rene@extern\.example/);
 
   assert.equal((await call("POST", "/api/settings/password", { current: "fout", next: "nieuw-wachtwoord-1" })).statusCode, 400);
-  assert.equal((await call("POST", "/api/settings/password", { current: "eerste-wachtwoord", next: "nieuw-wachtwoord-1" })).statusCode, 200);
+  const changed = await call("POST", "/api/settings/password", { current: "eerste-wachtwoord", next: "nieuw-wachtwoord-1" });
+  assert.equal(changed.statusCode, 200);
+  assert.equal((await call("GET", "/api/me")).statusCode, 401, "oude eigenaarsessie is ingetrokken");
+  auth = { authorization: "Bearer " + changed.json().token };
   assert.equal((await app.inject({ method: "POST", url: "/api/login", payload: { password: "nieuw-wachtwoord-1" } })).statusCode, 200);
   const qr = await call("GET", "/api/settings/ical-qr");
   assert.match(qr.body, /<svg/);

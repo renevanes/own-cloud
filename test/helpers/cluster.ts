@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import crypto from "node:crypto";
 import Database from "better-sqlite3";
 import { randomKeyHex } from "../../src/cluster/crypto.js";
 import { DEFAULT_POLICY, type ClusterConfig } from "../../src/cluster/config.js";
@@ -72,16 +73,22 @@ export async function waitFor<T>(what: string, fn: () => Promise<T | null | unde
   throw new Error(`Timeout: ${what}${lastErr ? " (" + (lastErr as Error).message + ")" : ""}`);
 }
 
+const pendingOperations = new Map<string, string>();
 export async function api(url: string, p: string, opts: { method?: string; body?: unknown; token?: string } = {}) {
+  const method = opts.method ?? "GET", mutating = !["GET", "HEAD"].includes(method);
+  const fingerprint = crypto.createHash("sha256").update(JSON.stringify([p, method, opts.token, opts.body])).digest("hex");
+  const key = pendingOperations.get(fingerprint) ?? crypto.randomUUID();
+  if (mutating) pendingOperations.set(fingerprint, key);
   const r = await fetch(url + p, {
     method: opts.method ?? "GET",
-    headers: { ...(opts.body ? { "content-type": "application/json" } : {}), ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}) },
+    headers: { ...(opts.body ? { "content-type": "application/json" } : {}), ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}), ...(mutating ? { "idempotency-key": key } : {}) },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
     signal: AbortSignal.timeout(10_000),
   });
   const text = await r.text();
   let json: any = null;
   try { json = JSON.parse(text); } catch { /* */ }
+  if (r.ok || r.status < 500 && !json?.uncertain) pendingOperations.delete(fingerprint);
   return { status: r.status, json, text };
 }
 

@@ -375,7 +375,8 @@ async function overzicht() {
       <span class="sub">${h.flagReason === "silent" ? `Niets gehoord sinds ${dt(h.reportedAt)}` : `Niet gezond sinds ${dt(h.unhealthySince)}`}${h.problems?.length ? ` — ${esc(h.problems.join("; "))}` : ""}</span>
       <span class="end">${h.flagged ? `<span class="chip bad">Klant ziet een bericht</span>` : `<span class="chip warn">Nog binnen de wachttijd</span>`}</span></a></li>`).join("")}</ul>`;
   }
-  root.innerHTML = html;
+  const { renderOperations } = await import("./operations.js");
+  root.innerHTML = html + renderOperations(o.operations, { esc, dt, euro });
 }
 
 // ───────── Klanten ─────────

@@ -20,11 +20,11 @@ final class UpdateCheck {
     private static final long EVERY = 30 * 60_000L;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     /** Er staat een activiteit van de app op het scherm (dan mag de installatie meteen om bevestiging vragen). */
-    static volatile Activity visible;
+    static volatile java.lang.ref.WeakReference<Activity> visible = new java.lang.ref.WeakReference<>(null);
     private static volatile boolean busy;
 
     static void resumed(Activity a) {
-        visible = a;
+        visible = new java.lang.ref.WeakReference<>(a);
         // Terug uit "apps installeren toestaan" na een tik op Bijwerken: nu installeren.
         if (Prefs.str(a, "update.pendingInstall") != null && Updater.canInstall(a)) {
             Prefs.setStr(a, "update.pendingInstall", null);
@@ -58,12 +58,12 @@ final class UpdateCheck {
     }
 
     static void paused(Activity a) {
-        if (visible == a) visible = null;
+        if (visible.get() == a) visible.clear();
     }
 
     /** Dialoog met wat er nieuw is en een knop Bijwerken; "Later" vraagt het pas de volgende dag weer. */
     private static void offer(Activity a, String version) {
-        if (a.isFinishing() || visible != a) return;
+        if (a.isFinishing() || visible.get() != a) return;
         String later = Prefs.str(a, "update.later");
         if (later != null && later.startsWith(version + "@") && System.currentTimeMillis() - Long.parseLong(later.substring(version.length() + 1)) < 20 * 3_600_000L) return;
         String notes = Prefs.str(a, "update.notes");

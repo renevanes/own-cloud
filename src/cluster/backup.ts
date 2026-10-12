@@ -9,6 +9,7 @@ import Database from "better-sqlite3";
 import { DecryptStream, EncryptStream, decryptBuffer, encryptBuffer } from "./crypto.js";
 import { applyEntries, lastSeqTerm, type Entry } from "./changelog.js";
 import { migrateUserSchema } from "../userSchema.js";
+import { migrateFeatures } from "../migrations.js";
 import type { ObjectStore } from "./stores.js";
 
 const gzip = promisify(zlib.gzip);
@@ -74,13 +75,30 @@ export async function listChain(store: ObjectStore) {
 /** Hoogste seq die een opslag zeker aaneengesloten heeft (voor hervatten van uploads door een nieuwe leider). */
 export async function storedUpTo(store: ObjectStore): Promise<number> {
   const { snapshots, segments } = await listChain(store);
-  return Math.max(0, ...segments.map((s) => s.end), ...snapshots.map((s) => s.seq));
+  let best = 0;
+  for (const snap of snapshots) {
+    if (segments.some((s) => s.end <= snap.seq && s.termMax > snap.term)) continue;
+    let through = snap.seq;
+    for (const s of segments) if (s.start <= through + 1 && s.end > through) through = s.end;
+    best = Math.max(best, through);
+  }
+  return best;
 }
 
-async function readSegment(store: ObjectStore, dbKey: Buffer, key: string): Promise<Entry[]> {
-  const buf = await store.getBuffer(key);
-  if (!buf) throw new Error(`Segment ${key} ontbreekt`);
-  return JSON.parse((await gunzip(await decryptBuffer(dbKey, buf))).toString("utf8"));
+export async function chainHealth(store: ObjectStore) {
+  const { snapshots, segments } = await listChain(store);
+  const recoverable = await storedUpTo(store);
+  const advertised = Math.max(0, ...snapshots.map((s) => s.seq), ...segments.map((s) => s.end));
+  return { recoverable, advertised, gap: advertised > recoverable, lastSnapshotAt: Math.max(0, ...snapshots.map((s) => s.ts)), snapshots: snapshots.length, segments: segments.length };
+}
+
+async function readSegment(store: ObjectStore, dbKey: Buffer, ref: SegmentRef): Promise<Entry[]> {
+  const buf = await store.getBuffer(ref.key);
+  if (!buf || buf.length > 64 * 1024 ** 2) throw new Error(`Segment ${ref.key} ontbreekt of is te groot`);
+  const entries = JSON.parse((await gunzip(await decryptBuffer(dbKey, buf), { maxOutputLength: 128 * 1024 ** 2 })).toString("utf8")) as Entry[];
+  if (!Array.isArray(entries) || !entries.length || entries.some((e, i) => !Number.isSafeInteger(e.seq) || e.seq !== ref.start + i || !Number.isSafeInteger(e.term) || e.term < 0 || !Number.isSafeInteger(e.ts)) || entries.at(-1)!.seq !== ref.end ||
+      Math.min(...entries.map((e) => e.term)) !== ref.termMin || Math.max(...entries.map((e) => e.term)) !== ref.termMax) throw new Error(`Ongeldig segment: ${ref.key}`);
+  return entries;
 }
 
 export interface RestoreResult { seq: number; term: number; snapshot: string; snapshotSeq: number; applied: number; lastTs: number | null }
@@ -100,11 +118,13 @@ export async function restoreFromStore(store: ObjectStore, dbKey: Buffer, dest: 
 
   const loaded = new Map<string, Entry[]>();
   const load = async (seg: SegmentRef) => {
-    if (!loaded.has(seg.key)) loaded.set(seg.key, await readSegment(store, dbKey, seg.key));
+    if (!loaded.has(seg.key)) loaded.set(seg.key, await readSegment(store, dbKey, seg));
     return loaded.get(seg.key)!;
   };
 
+  const errors: string[] = [];
   for (const snap of candidates) {
+    try {
     // Prefix-maximum van termen tot en met snap.seq
     let baseMax = 0;
     const later: Entry[] = [];
@@ -122,7 +142,7 @@ export async function restoreFromStore(store: ObjectStore, dbKey: Buffer, dest: 
     // Geldige keten na de snapshot
     later.sort((a, b) => a.seq - b.seq || b.term - a.term);
     const valid: Entry[] = [];
-    let prefixMax = baseMax;
+    let prefixMax = Math.max(baseMax, snap.term);
     // eerst prefix-max per seq bepalen over álle entries (ook ongeldige), dan filteren
     const maxAt = new Map<number, number>();
     for (const e of later) { prefixMax = Math.max(prefixMax, e.term); maxAt.set(e.seq, prefixMax); }
@@ -144,11 +164,14 @@ export async function restoreFromStore(store: ObjectStore, dbKey: Buffer, dest: 
 
     const db = new Database(dest);
     try {
+      const actual = lastSeqTerm(db);
+      if (actual.seq !== snap.seq || actual.term !== snap.term) throw new Error("Snapshotnaam en inhoud komen niet overeen");
       db.pragma("journal_mode = WAL");
       db.pragma("recursive_triggers = ON");
       // Snapshot van een oudere versie: eerst het schema bijwerken, anders gaan nieuwere wijzigingen
       // (kolom user_id, tabel users) verloren of mislukt het toepassen. Alleen DDL, zie userSchema.ts.
       migrateUserSchema(db);
+      migrateFeatures(db);
       let seq = snap.seq;
       if (valid.length) {
         const r = applyEntries(db, snap.seq, snap.term, valid);
@@ -159,31 +182,40 @@ export async function restoreFromStore(store: ObjectStore, dbKey: Buffer, dest: 
       db.prepare("DELETE FROM blob_queue").run();
       const check = db.pragma("integrity_check", { simple: true });
       if (check !== "ok") throw new Error("Integriteitscontrole mislukt: " + check);
+      if ((db.pragma("foreign_key_check") as unknown[]).length) throw new Error("Verwijzingen in de database zijn beschadigd");
       return { seq, term: lastSeqTerm(db).term, snapshot: snap.key, snapshotSeq: snap.seq, applied: valid.length, lastTs: valid.at(-1)?.ts ?? snap.ts };
     } finally {
       db.close();
     }
+    } catch (e) { errors.push(`${snap.key}: ${(e as Error).message}`); }
   }
+  if (errors.length) throw new Error(errors.slice(0, 3).join("; "));
   return null;
 }
 
 /** Probeert opslagplaatsen op volgorde (meest recente eerst) tot herstel lukt. */
 export async function restoreFromAny(stores: ObjectStore[], dbKey: Buffer, dest: string, opts: { until?: number } = {}) {
-  const results: { store: ObjectStore; upTo: number }[] = [];
-  for (const s of stores) results.push({ store: s, upTo: await storedUpTo(s).catch(() => -1) });
-  results.sort((a, b) => b.upTo - a.upTo);
+  fs.mkdirSync(path.dirname(path.resolve(dest)), { recursive: true });
+  const tmp = fs.mkdtempSync(path.join(path.dirname(path.resolve(dest)), "restore-"));
+  let best: (RestoreResult & { store: string; file: string }) | null = null;
   const errors: string[] = [];
-  for (const { store, upTo } of results) {
-    if (upTo < 0) { errors.push(`${store.name}: onbereikbaar`); continue; }
-    try {
-      const r = await restoreFromStore(store, dbKey, dest, opts);
-      if (r) return { ...r, store: store.name };
-    } catch (e) {
-      errors.push(`${store.name}: ${(e as Error).message}`);
+  try {
+    for (const [i, store] of stores.entries()) {
+      const file = path.join(tmp, `${i}.sqlite`);
+      try {
+        const r = await restoreFromStore(store, dbKey, file, opts);
+        if (r && (!best || r.term > best.term || (r.term === best.term && (r.seq > best.seq || (r.seq === best.seq && (r.lastTs ?? 0) > (best.lastTs ?? 0)))))) best = { ...r, store: store.name, file };
+      } catch (e) { errors.push(`${store.name}: ${(e as Error).message}`); }
     }
+    if (errors.length) console.warn("Herstel: " + errors.join("; "));
+    if (!best) return null;
+    for (const suffix of ["", "-wal", "-shm"]) fs.rmSync(dest + suffix, { force: true });
+    fs.renameSync(best.file, dest);
+    const { file: _file, ...result } = best;
+    return result;
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
-  if (errors.length) console.warn("Herstel: " + errors.join("; "));
-  return null;
 }
 
 /** Opruimen in replica-opslag: oude snapshots en segmenten; back-upopslag wordt nooit opgeruimd. */

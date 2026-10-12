@@ -45,9 +45,9 @@ wait_for() { # wait_for <seconds> <command...>
 echo "== Compileren"
 rm -rf "$BUILD/classes" "$BUILD/test-classes" "$BUILD/java-out"
 mkdir -p "$BUILD/classes" "$BUILD/test-classes"
-if ! javac --release 11 -Xlint:all -Werror -encoding UTF-8 -d "$BUILD/classes" $(find "$HERE/src/main/java" -name '*.java') 2>&1 | grep -v '^Picked up'; then :; fi
+if ! javac --release 11 -Xlint:all -Werror -encoding UTF-8 -d "$BUILD/classes" $(find "$HERE/src/main/java" -name '*.java') > "$BUILD/javac-main.log" 2>&1; then cat "$BUILD/javac-main.log"; echo "FAIL compile (main)"; exit 1; fi
 if [ ! -f "$BUILD/classes/nl/eigencloud/core/Json.class" ]; then echo "FAIL compile (main)"; exit 1; fi
-javac --release 11 -encoding UTF-8 -cp "$BUILD/classes" -d "$BUILD/test-classes" $(find "$HERE/src/test/java" -name '*.java') 2>&1 | grep -v '^Picked up'
+if ! javac --release 11 -encoding UTF-8 -cp "$BUILD/classes" -d "$BUILD/test-classes" $(find "$HERE/src/test/java" -name '*.java') > "$BUILD/javac-test.log" 2>&1; then cat "$BUILD/javac-test.log"; echo "FAIL compile (tests)"; exit 1; fi
 if [ ! -f "$BUILD/test-classes/nl/eigencloud/core/T.class" ]; then echo "FAIL compile (tests)"; exit 1; fi
 echo "PASS compile"
 
@@ -101,6 +101,8 @@ jrun DnsTest
 jrun AdaptersTest
 jrun KeyCheckTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
 jrun VaultTest
+run golden-verify.ts npx tsx scripts/golden-verify.ts "$BUILD"
+# Verify time-bound proofs as soon as their three fixture producers have finished.
 jrun SmtpTest SMTP_INFO="$BUILD/smtp-info.json"
 jrun S3MotoTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
 jrun ConsoleApiTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
@@ -124,8 +126,7 @@ if wait_for 60 test -s "$BUILD/github-info.json"; then
 else
   echo "   nep-GitHub niet gestart:"; tail -30 "$BUILD/github.log"; RESULTS+=("FAIL GitHubTest"); FAILED=1
 fi
-run golden-verify.ts npx tsx scripts/golden-verify.ts "$BUILD"
-# Na golden-verify: die controleert berichten met een geldigheid van een paar minuten (sinds CryptoGoldenTest).
+# Langere integratietests volgen pas na de tijdgebonden interoperabiliteitscontrole.
 if [ "$DIENST_OK" -eq 1 ]; then
   jrun OverstapTest MOTO_URL="http://127.0.0.1:$MOTO_PORT" DIENST_INFO="$BUILD/dienst-info.json"
 else

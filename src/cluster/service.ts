@@ -117,10 +117,11 @@ export class ClusterService {
       if (this.raft.role === "leader") return null;
       return this.raft.leader()?.apiUrl ?? null;
     };
-    runtime.waitDurable = async () => (this.db ? this.raft.waitDurable(lastSeq(this.db)) : true);
+    runtime.waitDurable = async () => this.waitDurable();
     runtime.spool = (raw) => this.spool(raw);
     runtime.sleeping = () => this.getSetting("cluster_mode") === "sleeping";
     runtime.usersBlocked = () => updates.usersBlocked(this);
+    runtime.featuresBlocked = () => updates.featuresBlocked(this);
     // Stand van de Gmail-koppeling veranderd: MX wel/niet publiceren.
     gmailHooks.changed = () => { this.dnsDirty = true; };
   }
@@ -150,6 +151,55 @@ export class ClusterService {
     app.get("/cluster/health", async () => ({ ok: true, id: this.self.id, role: this.raft?.role, version: VERSION() }));
     await app.listen({ port: Number(process.env.CLUSTER_PORT ?? this.cfg.clusterPort), host: "0.0.0.0" });
     this.rpcServer = app;
+  }
+
+  /** Acknowledgement covers the captured database sequence and every referenced pending blob. */
+  async waitDurable(timeoutMs = 5000): Promise<boolean> {
+    if (!this.db) return true;
+    if (!this.raft.isLeader()) return false;
+    const seq = lastSeq(this.db);
+    const pending = (this.db.prepare("SELECT rel FROM blob_queue").all() as { rel: string }[]).map((x) => x.rel);
+    const persist = async () => {
+      const peers = this.raft.members.filter((m) => m.kind === "data" && m.id !== this.self.id);
+      const peerDurable = peers.length > 0 && await this.raft.waitDurable(seq, Math.min(timeoutMs, 750));
+      let everyBlobCopied = true;
+      for (const rel of pending) {
+        const abs = path.join(this.dataDir, rel);
+        if (!fs.existsSync(abs)) return false;
+        let copied = false;
+        for (const store of this.stores) {
+          try {
+            if (!(await store.head(`blobs/${rel}`))) await store.put(`blobs/${rel}`, fs.createReadStream(abs).pipe(new EncryptStream(this.keys.blobs!)), encryptedSize(fs.statSync(abs).size));
+            copied = true; break;
+          } catch { /* try the next independent store */ }
+        }
+        if (!copied) everyBlobCopied = false;
+      }
+      if (!everyBlobCopied) {
+        for (const peer of peers) {
+          try {
+            let ok = true;
+            for (let start = 0; start < pending.length; start += 250) {
+              const result = await rpc<{ ok: boolean }>(this.keys.cluster, peer.clusterUrl, { type: "persistBlobs", seq, rels: pending.slice(start, start + 250) }, timeoutMs);
+              if (!result.ok) { ok = false; break; }
+            }
+            if (ok) return true;
+          } catch { /* another data peer may be reachable */ }
+        }
+        return false;
+      }
+      if (!peerDurable) {
+        await this.uploadSegments();
+        for (const store of this.stores) if ((this.storeProgress.get(store.name) ?? 0) >= seq && !(await listChain(store)).snapshots.length) await this.snapshot([store]);
+        return this.stores.some((s) => (this.storeProgress.get(s.name) ?? 0) >= seq && this.raft.isLeader());
+      }
+      return true;
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const ok = await Promise.race([persist(), new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); })]);
+      return ok && this.raft.isLeader();
+    } finally { if (timer) clearTimeout(timer); }
   }
 
   // ───────── Register / leden ─────────
@@ -415,7 +465,13 @@ export class ClusterService {
     const rows = db.prepare("SELECT rel FROM blob_queue ORDER BY added LIMIT ?").all(max) as { rel: string }[];
     await Promise.all(rows.map(async ({ rel }) => {
       const abs = path.join(this.dataDir, rel);
-      if (!fs.existsSync(abs)) { db.prepare("DELETE FROM blob_queue WHERE rel = ?").run(rel); return; }
+      if (!fs.existsSync(abs)) {
+        if (this.referencedBlobs().includes(rel)) {
+          this.fetchQueue.add(rel);
+          if (this.due(`missing:${rel}`, 3600_000)) this.event("store", "Een lokaal bestand ontbreekt; herstel uit een andere kopie wordt geprobeerd", "warn");
+        } else db.prepare("DELETE FROM blob_queue WHERE rel = ?").run(rel);
+        return;
+      }
       const size = fs.statSync(abs).size;
       let allOk = true;
       for (const s of this.stores) {
@@ -435,6 +491,17 @@ export class ClusterService {
     return (this.db!.prepare("SELECT COUNT(*) AS n FROM blob_queue").get() as { n: number }).n;
   }
 
+  recoveryInfo() {
+    const pending = this.db!.prepare("SELECT COUNT(*) AS count, MIN(added) AS oldest FROM blob_queue").get() as { count: number; oldest: number | null };
+    const drill = this.db!.prepare("SELECT ts,level,data FROM cluster_events WHERE kind='drill' ORDER BY id DESC LIMIT 1").get() as { ts: number; level: string; data: string | null } | undefined;
+    let results: { store: string; ok: boolean; seq: number | null; lastTs: number | null; durationMs: number | null; checked: number | null; missing: number | null; damaged: number | null }[] = [];
+    try { results = JSON.parse(drill?.data ?? "[]").map((r: any) => ({ store: r.store, ok: !!r.ok, seq: r.seq ?? null, lastTs: r.lastTs ?? null, durationMs: r.durationMs ?? null, checked: r.blobs?.checked ?? null, missing: r.blobs?.missing ?? null, damaged: r.blobs?.damaged ?? null })); } catch { /* older events have no proof */ }
+    const successful = this.db!.prepare("SELECT MAX(ts) AS ts FROM cluster_events WHERE kind='drill' AND level='info'").get() as { ts: number | null };
+    return { pendingBlobs: pending.count, oldestPendingAt: pending.oldest, lastSuccessfulRestoreAt: successful.ts,
+      verifiedAt: drill?.ts ?? null, verified: drill?.level === "info" && results.length > 0 && results.every((r) => r.checked !== null), results,
+      stores: this.stores.map((s) => ({ name: s.name, contiguousSeq: this.storeProgress.get(s.name) ?? null, lag: this.storeProgress.has(s.name) ? Math.max(0, lastSeq(this.db!) - this.storeProgress.get(s.name)!) : null })) };
+  }
+
   private onEntryApplied(e: Entry) {
     for (const rel of blobRefs(e)) if (!fs.existsSync(path.join(this.dataDir, rel))) this.fetchQueue.add(rel);
   }
@@ -444,7 +511,8 @@ export class ClusterService {
     const rows = db.prepare(`
       SELECT raw_path AS p FROM messages WHERE raw_path IS NOT NULL
       UNION ALL SELECT path FROM attachments
-      UNION ALL SELECT path FROM photos UNION ALL SELECT thumb_path FROM photos WHERE thumb_path IS NOT NULL`).all() as { p: string }[];
+      UNION ALL SELECT path FROM photos UNION ALL SELECT thumb_path FROM photos WHERE thumb_path IS NOT NULL
+      UNION ALL SELECT raw_path FROM mail_outbox UNION ALL SELECT path FROM import_chunks`).all() as { p: string }[];
     return rows.map((r) => r.p).filter((p) => p && !path.isAbsolute(p));
   }
 
@@ -496,7 +564,9 @@ export class ClusterService {
         await pipeline(stream, dec, out);
         const m = SHA_IN_NAME.exec(rel);
         if (m && !rel.includes("/thumbs/") && hash.digest("hex") !== m[1]) throw new Error("hash klopt niet");
+        const fd = fs.openSync(tmp, "r"); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
         fs.renameSync(tmp, abs);
+        const directory = fs.openSync(path.dirname(abs), "r"); try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
         return true;
       } catch {
         fs.rmSync(tmp, { force: true });
@@ -590,8 +660,14 @@ export class ClusterService {
         if (!this.raft.isLeader()) return { ok: false };
         const { deliverInbound } = await import("../mail/inbound.js");
         await deliverInbound(Buffer.from(String(m.raw), "base64"));
-        await runtime.waitDurable();
-        return { ok: true };
+        return { ok: await runtime.waitDurable() };
+      }
+      case "persistBlobs": {
+        if (!this.db || !Array.isArray(m.rels) || m.rels.length > 250 || !Number.isSafeInteger(m.seq)) return { ok: false };
+        for (const rel of m.rels) {
+          if (typeof rel !== "string" || rel.length > 500 || path.isAbsolute(rel) || rel.includes("..") || !(await this.fetchBlob(rel))) return { ok: false };
+        }
+        return { ok: lastSeq(this.db) >= Number(m.seq) };
       }
       case "clusterSummary": {
         if (!this.raft.isLeader() || !this.db) return { leader: false, leaderId: this.raft.leaderId };
@@ -696,11 +772,20 @@ export class ClusterService {
     return d;
   }
 
-  spool(raw: Buffer) {
+  async spool(raw: Buffer): Promise<boolean> {
     const name = crypto.createHash("sha256").update(raw).digest("hex") + ".eml";
     const f = path.join(this.spoolDir(), name);
     fs.writeFileSync(f + ".tmp", raw);
+    const fd = fs.openSync(f + ".tmp", "r");
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.renameSync(f + ".tmp", f);
+    const leader = this.raft.leader();
+    if (!leader || leader.kind !== "data") return false;
+    try {
+      const r = await rpc<{ ok: boolean }>(this.keys.cluster, leader.clusterUrl, { type: "deliverMail", raw: raw.toString("base64") }, 15_000);
+      if (r.ok) fs.rmSync(f, { force: true });
+      return r.ok;
+    } catch { return false; }
   }
 
   private async flushSpool() {
@@ -712,7 +797,7 @@ export class ClusterService {
       if (this.raft.isLeader()) {
         const { deliverInbound } = await import("../mail/inbound.js");
         await deliverInbound(raw);
-        await runtime.waitDurable();
+        if (!(await runtime.waitDurable())) return;
       } else {
         const leader = this.raft.leader();
         if (!leader || leader.kind !== "data") return;
@@ -773,6 +858,7 @@ export class ClusterService {
       snapshotEveryH: pol.snapshotEveryHours,
       stores: this.stores.map((s) => ({ name: s.name, country: s.config.country, purpose: s.purpose, lag: this.storeProgress.has(s.name) ? Math.max(0, last - this.storeProgress.get(s.name)!) : null })),
       lastDrill: drill ? { ts: drill.ts, ok: drill.level === "info", message: drill.message } : null,
+      recovery: this.recoveryInfo(),
       drillEveryDays: pol.drillEveryDays,
       dataReady: ready.filter((n) => n.kind === "data").length,
       witnessReady: ready.filter((n) => n.kind === "witness").length,
@@ -895,6 +981,7 @@ export class ClusterService {
     const body = {
       version: VERSION(), healthy: bad.length === 0, problems: bad.map((c) => c.title).slice(0, 20), storageUsedBytes, users: countUsers(),
       nodes: this.nodes().map((n) => ({ id: n.id, region: n.region, status: n.status })),
+      recovery: this.recoveryInfo(),
     };
     const res = await request(`${r.url.replace(/\/$/, "")}/v1/orders/${r.orderId}/health`, {
       method: "POST", headers: { "content-type": "application/json", authorization: `Token ${r.token}` }, body: JSON.stringify(body), headersTimeout: 15_000, bodyTimeout: 15_000,

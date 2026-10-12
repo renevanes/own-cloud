@@ -10,10 +10,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import net from "node:net";
 import { fakeNodig, PERSONAL, ORG, USER } from "./helpers/fake-nodig.js";
 
 const f = await fakeNodig();
-Object.assign(process.env, f.env);
+Object.assign(process.env, f.env, { EIGEN_GITHUB_API: `${f.base}/github` });
 const aan = await import("../src/console/aanbieder.js");
 const nodig = await import("../src/console/benodigdheden.js");
 const doh = await import("../src/console/doh.js");
@@ -251,7 +252,12 @@ test("Wat je nodig hebt: van niets tot alles klaar", { timeout: 60_000 }, async 
   assert.deepEqual([statuses(l).voorwaarden, det(l, "voorwaarden")], ["bijna", "Je privacyverklaring ontbreekt nog"]);
   // Een Dienst die niet antwoordt: de lijst wacht niet langer dan nodigNet.waitMs.
   const reach1 = aan.aanbiederNet.reach;
-  aan.aanbiederNet.reach = () => "http://10.255.255.1:9";
+  // A remote unroutable IP can hang until the TCP timeout inside a container.
+  // Reject connections locally so this tests an unavailable service consistently.
+  const unavailable = net.createServer((socket) => socket.destroy());
+  await new Promise<void>((resolve) => unavailable.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve) => unavailable.close(() => resolve())));
+  aan.aanbiederNet.reach = () => `http://127.0.0.1:${(unavailable.address() as net.AddressInfo).port}`;
   const w0 = nodig.nodigNet.waitMs;
   nodig.nodigNet.waitMs = 300;
   const t0 = Date.now();

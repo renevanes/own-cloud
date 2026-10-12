@@ -173,7 +173,7 @@ public final class Overstap {
                 "log", new ArrayList<>(log.subList(Math.max(0, log.size() - 20), log.size())),
                 "fout", o.get("fout"),
                 "kanTerug", ("mislukt".equals(stap) && !gedaan(o, "wekken")) || ("terug".equals(stap) && has(o, "fout")),
-                "klaar", o.get("klaar"));
+                "klaar", o.get("klaar"), "preview", TransferPreview.preview(o, readyToSwitch(o), minutesOffline(o)));
     }
 
     // ───────── Beginnen, inloggen, bestellen ─────────
@@ -302,6 +302,7 @@ public final class Overstap {
     private static Map<String, Object> bestelling(Object r) {
         Map<String, Object> b = Json.obj("status", Json.str(r, "status"), "steps", Json.copy(Json.listAt(r, "steps")));
         if (Json.str(r, "error") != null) b.put("error", Json.str(r, "error"));
+        if (Json.map(r, "monthly") != null) b.put("monthly", Json.copy(Json.map(r, "monthly")));
         return b;
     }
 
@@ -340,9 +341,9 @@ public final class Overstap {
 
     /** Progress of {@link #copyStores}. */
     public static final class CopyProgress {
-        public long objects, bytes, done, doneBytes, skipped;
+        public long objects, bytes, done, doneBytes, skipped, verified;
 
-        public Map<String, Object> toJson() { return Json.obj("objects", objects, "bytes", bytes, "done", done, "doneBytes", doneBytes, "skipped", skipped); }
+        public Map<String, Object> toJson() { return Json.obj("objects", objects, "bytes", bytes, "done", done, "doneBytes", doneBytes, "skipped", skipped, "verified", verified); }
     }
 
     /** Receives progress updates. */
@@ -382,13 +383,8 @@ public final class Overstap {
                     try {
                         boolean fixed = e.key.startsWith("db/") || e.key.startsWith("blobs/");
                         Long have = dst.get(e.key);
-                        if (fixed && have != null && have == e.size) {
-                            synchronized (p) { p.skipped++; p.done++; p.doneBytes += e.size; if (l != null) l.progress(p); }
-                            continue;
-                        }
-                        byte[] body = f.getBuffer(e.key);
-                        if (body != null) t.put(e.key, body);
-                        synchronized (p) { p.done++; p.doneBytes += e.size; if (l != null) l.progress(p); }
+                        boolean skipped = TransferIO.copyVerified(f, t, e.key, e.size, fixed && have != null && have == e.size);
+                        synchronized (p) { if (skipped) p.skipped++; p.done++; p.doneBytes += e.size; p.verified++; if (l != null) l.progress(p); }
                     } catch (IOException ex) {
                         err.compareAndSet(null, ex);
                     } catch (RuntimeException ex) {
@@ -396,7 +392,7 @@ public final class Overstap {
                     }
                 }
             };
-            Thread[] ts = new Thread[4];
+            Thread[] ts = new Thread[2];
             for (int i = 0; i < ts.length; i++) { ts[i] = new Thread(worker, "eigen-kopie"); ts[i].start(); }
             for (Thread th : ts) {
                 try { th.join(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IOException("Onderbroken"); }

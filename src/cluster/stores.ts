@@ -68,7 +68,11 @@ export class FsStore implements ObjectStore {
     const tmp = `${f}.${crypto.randomBytes(4).toString("hex")}.tmp`;
     if (Buffer.isBuffer(body)) fs.writeFileSync(tmp, body);
     else await pipeline(body, fs.createWriteStream(tmp));
+    const fd = fs.openSync(tmp, "r");
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.renameSync(tmp, f);
+    const dirfd = fs.openSync(path.dirname(f), "r");
+    try { fs.fsyncSync(dirfd); } finally { fs.closeSync(dirfd); }
   }
   async get(key: string) {
     const f = this.p(key);

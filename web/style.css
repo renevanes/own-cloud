@@ -334,3 +334,21 @@ button.link { padding: 0; text-decoration: underline; text-underline-offset: 3px
 .invite-box p { margin: 0; }
 .danger-bg { background: var(--danger); color: #fff; }
 @media (max-width: 600px) { .user-list li { grid-template-columns: 1fr; } .user-list .acts { justify-content: start; } }
+/* Contacts, account tools and explicit offline controls. */
+.contacts { padding: 24px; overflow-y: auto; }
+.feature-list { list-style: none; padding: 0; margin: 18px 0; }
+.feature-list li { display: flex; gap: 12px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line, #d9ddd8); }
+.feature-list small { display: block; color: var(--muted, #626b67); font-size: .85em; margin-top: 4px; }
+.feature-list .stack { display: flex; flex-direction: column; align-items: stretch; }
+.feature-list .grow { text-align: left; }
+.wide-dialog { width: min(900px, calc(100vw - 24px)); max-height: 90vh; overflow-y: auto; }
+.photo-annotations { padding: 12px 24px; color: #fff; background: #202522; max-height: 36vh; overflow-y: auto; }
+.photo-annotations input { color: #202522; }
+.photo-annotations pre, .feature-list pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.photo-head { flex-wrap: wrap; }
+.photo-head input[type=search] { min-width: 200px; flex: 1; }
+.photo-map { display: block; width: 100%; height: auto; border: 1px solid #bac7cf; }
+.photo-map circle { cursor: pointer; }
+.photo-map circle:focus { stroke: #1b2e34; stroke-width: 3; }
+.settings-sec code { overflow-wrap: anywhere; }
+#offlineBanner { margin: 0; }

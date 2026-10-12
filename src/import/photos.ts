@@ -55,11 +55,12 @@ export function findSidecar(media: string, jsonsInDir: string[]): string | undef
 
 type PhotoImportStats = { done: number; added: number; duplicates: number; failed: number; withMetadata: number };
 
-export async function importTakeoutPhotos(root: string, onProgress?: (s: PhotoImportStats) => void, userId = 1) {
+export async function importTakeoutPhotos(root: string, onProgress?: (s: PhotoImportStats) => void, userId = 1, cancelled = () => false) {
   const stats: PhotoImportStats = { done: 0, added: 0, duplicates: 0, failed: 0, withMetadata: 0 };
   const jsonCache = new Map<string, string[]>();
 
   for (const file of walk(root)) {
+    if (cancelled()) throw new Error("IMPORT_CANCELLED");
     if (!isMediaFile(file)) continue;
     const dir = path.dirname(file);
     const folder = path.basename(dir);

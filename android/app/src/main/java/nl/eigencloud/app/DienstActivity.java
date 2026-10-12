@@ -279,7 +279,9 @@ public final class DienstActivity extends Activity {
         main.post(() -> prompt(sig, message));
     }
 
+    @android.annotation.TargetApi(28)
     private void prompt(Signature sig, byte[] message) {
+        if (Build.VERSION.SDK_INT < 28) { deliver("eigenDienstSigned", null, "Gebruik een authenticator-app op deze Android-versie."); return; }
         if (isFinishing() || isDestroyed()) { deliver("eigenDienstSigned", null, "Afgebroken"); return; }
         if (prompting != null) prompting.cancel();
         CancellationSignal cancel = new CancellationSignal();

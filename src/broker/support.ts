@@ -224,6 +224,7 @@ export async function staffReply(ctx: Ctx, s: StaffRow, t: TicketRow, body: any)
 export interface HealthRow {
   order_id: string; reported_at: number; version: string | null; healthy: number; problems: string; storage_used_bytes: number | null;
   users: number | null; nodes: string; unhealthy_since: number | null; flagged_at: number | null; flag_reason: string | null; announcement_id: string | null;
+  recovery?: string;
 }
 
 /** Alleen deze technische velden worden bewaard; al het andere in de melding wordt genegeerd. */
@@ -234,7 +235,13 @@ export function sanitizeHealth(b: any) {
   const num = (v: unknown) => (v === undefined || v === null ? null : Number.isFinite(Number(v)) && Number(v) >= 0 ? Math.floor(Number(v)) : null);
   const problems = Array.isArray(b.problems) ? b.problems.slice(0, 20).map((p: unknown) => s(p, 200)).filter(Boolean) : [];
   const nodes = Array.isArray(b.nodes) ? b.nodes.slice(0, 20).map((n: any) => ({ id: s(n?.id, 64), region: s(n?.region, 32), status: s(n?.status, 32) })) : [];
-  return { version: b.version === undefined ? null : s(b.version, 40), healthy: b.healthy as boolean, problems, storageUsedBytes: num(b.storageUsedBytes), users: num(b.users), nodes };
+  const r = b.recovery;
+  const recovery = r && typeof r === "object" ? {
+    pendingBlobs: num(r.pendingBlobs), oldestPendingAt: num(r.oldestPendingAt), lastSuccessfulRestoreAt: num(r.lastSuccessfulRestoreAt), verifiedAt: num(r.verifiedAt), verified: r.verified === true,
+    stores: Array.isArray(r.stores) ? r.stores.slice(0, 20).map((x: any) => ({ name: s(x.name, 64), lag: num(x.lag), contiguousSeq: num(x.contiguousSeq) })) : [],
+    results: Array.isArray(r.results) ? r.results.slice(0, 20).map((x: any) => ({ store: s(x.store, 64), ok: x.ok === true, seq: num(x.seq), lastTs: num(x.lastTs), durationMs: num(x.durationMs), checked: num(x.checked), missing: num(x.missing), damaged: num(x.damaged) })) : [],
+  } : null;
+  return { version: b.version === undefined ? null : s(b.version, 40), healthy: b.healthy as boolean, problems, storageUsedBytes: num(b.storageUsedBytes), users: num(b.users), nodes, ...(recovery ? { recovery } : {}) };
 }
 
 export function recordHealth(ctx: Ctx, o: OrderRow, h: ReturnType<typeof sanitizeHealth>) {
@@ -246,6 +253,7 @@ export function recordHealth(ctx: Ctx, o: OrderRow, h: ReturnType<typeof sanitiz
     healthy = excluded.healthy, problems = excluded.problems, storage_used_bytes = excluded.storage_used_bytes, users = excluded.users,
     nodes = excluded.nodes, unhealthy_since = excluded.unhealthy_since`)
     .run(o.id, now, h.version, h.healthy ? 1 : 0, JSON.stringify(h.problems), h.storageUsedBytes, h.users, JSON.stringify(h.nodes), since);
+  if (h.recovery) ctx.db.prepare("UPDATE health SET recovery=? WHERE order_id=?").run(JSON.stringify(h.recovery), o.id);
   if (prev && !!prev.healthy !== h.healthy) event(ctx.db, o.id, h.healthy ? "health-ok" : "health-problem", h.problems.slice(0, 5));
 }
 
@@ -255,6 +263,7 @@ export function healthView(r: HealthRow | undefined) {
     reportedAt: r.reported_at, version: r.version, healthy: !!r.healthy, problems: JSON.parse(r.problems) as string[],
     storageUsedBytes: r.storage_used_bytes, users: r.users, nodes: JSON.parse(r.nodes) as { id: string; region: string; status: string }[],
     unhealthySince: r.unhealthy_since, flagged: !!r.flagged_at, flaggedAt: r.flagged_at, flagReason: r.flag_reason,
+    recovery: JSON.parse(r.recovery ?? "{}") as { verified?: boolean; pendingBlobs?: number; oldestPendingAt?: number; verifiedAt?: number; results?: any[]; stores?: any[] },
   };
 }
 

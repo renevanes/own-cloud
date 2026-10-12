@@ -9,6 +9,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { transformSync } from "esbuild";
 import zlib from "node:zlib";
+import { transferPreview } from "../src/console/transferPreview.js";
 import { deriveKey, seal, sealJson, encryptBuffer } from "../src/cluster/crypto.js";
 import { sealMsg } from "../src/cluster/transport.js";
 import { keysFor, DEFAULT_POLICY, type ClusterConfig } from "../src/cluster/config.js";
@@ -484,6 +485,13 @@ const dienstBackup = {
 };
 
 const out = {
+  contractVersion: 1,
+  transferPreviews: [
+    { naarNaam: "Doel", stap: "gereed", gedaan: [], schatting: { objects: 12 }, bestelling: { monthly: { value: "15.00", currency: "EUR" } } },
+    { naarNaam: "Zelf", stap: "overzetten", gedaan: ["omzetten"], kopie: { objects: 3, done: 3, verified: 2 } },
+    { naarNaam: "Doel", stap: "klaar", gedaan: ["wekken"], kopie: { objects: 3, done: 3, verified: 3 } },
+    { naarNaam: "Doel", stap: "terug", gedaan: ["wekken"] },
+  ].map((state) => ({ state, ready: true, minutes: 17, out: transferPreview(state as never, true, 17) })),
   generated: new RealDate().toISOString(),
   streamKey: streamKey.toString("hex"), streams, dienstBackup,
   masterKey, derived, derived16, derived64, seals, sealJson: sealJsonOut, rpc, bootstrap,

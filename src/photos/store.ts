@@ -6,8 +6,10 @@ import { promisify } from "node:util";
 import sharp from "sharp";
 import exifr from "exifr";
 import { db } from "../db.js";
-import { paths } from "../config.js";
+import { paths, config } from "../config.js";
 import { blobWritten, relData } from "../blobs.js";
+import { boundedWork, fsyncFile, reserveSpace } from "../work.js";
+import { getUser, removeUnreferencedFiles } from "../users.js";
 
 const run = promisify(execFile);
 
@@ -39,17 +41,17 @@ async function hasFfmpeg() {
 
 async function makeThumb(src: string, dest: string, isVideo: boolean): Promise<{ ok: boolean; width?: number; height?: number }> {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
+  let tmp: string | undefined;
   try {
     let input = src;
-    let tmp: string | undefined;
     if (isVideo || [".heic", ".heif", ".dng"].includes(path.extname(src).toLowerCase())) {
       // Video's (en HEIC/DNG die sharp vaak niet kan lezen) via ffmpeg naar een tijdelijk frame.
       if (!(await hasFfmpeg())) {
         if (isVideo) return { ok: false };
       } else {
         tmp = dest + ".frame.jpg";
-        await run("ffmpeg", ["-y", "-loglevel", "error", ...(isVideo ? ["-ss", "1"] : []), "-i", src, "-frames:v", "1", tmp]).catch(() =>
-          run("ffmpeg", ["-y", "-loglevel", "error", "-i", src, "-frames:v", "1", tmp!]));
+        await run("ffmpeg", ["-nostdin", "-y", "-loglevel", "error", ...(isVideo ? ["-ss", "1"] : []), "-i", src, "-threads", "1", "-frames:v", "1", tmp], { timeout: 120_000 }).catch(() =>
+          run("ffmpeg", ["-nostdin", "-y", "-loglevel", "error", "-i", src, "-threads", "1", "-frames:v", "1", tmp!], { timeout: 120_000 }));
         input = tmp;
       }
     }
@@ -61,7 +63,7 @@ async function makeThumb(src: string, dest: string, isVideo: boolean): Promise<{
     return { ok: true, width: swap ? meta.height : meta.width, height: swap ? meta.width : meta.height };
   } catch {
     return { ok: false };
-  }
+  } finally { if (tmp) fs.rmSync(tmp, { force: true }); }
 }
 
 export interface PhotoMeta {
@@ -74,19 +76,31 @@ export interface PhotoMeta {
 }
 
 /** Voegt een foto/video toe vanaf een bestand. Geeft {id, duplicate} terug. */
-export async function addPhotoFromFile(src: string, meta: PhotoMeta = {}, opts: { move?: boolean; userId?: number } = {}) {
+export async function addPhotoFromFile(src: string, meta: PhotoMeta = {}, opts: { move?: boolean; userId?: number; reserved?: boolean } = {}) {
   const userId = opts.userId ?? 1;
   const filename = meta.filename ?? path.basename(src);
   const ext = path.extname(filename).toLowerCase();
   const isVideo = VIDEO_EXT.has(ext);
   const sha = await sha256File(src);
 
-  const existing = db.prepare("SELECT id FROM photos WHERE sha256 = ? AND user_id = ?").get(sha, userId) as { id: number } | undefined;
+  const existing = db.prepare("SELECT id,path,thumb_path,is_video FROM photos WHERE sha256 = ? AND user_id = ?").get(sha, userId) as { id: number; path: string; thumb_path: string | null; is_video: number } | undefined;
   if (existing) {
+    const original = path.join(config.dataDir, existing.path);
+    if (!fs.existsSync(original)) { fs.mkdirSync(path.dirname(original), { recursive: true }); await fs.promises.copyFile(src, original); fsyncFile(original); blobWritten(existing.path); }
+    if (existing.thumb_path && !fs.existsSync(path.join(config.dataDir, existing.thumb_path))) {
+      const thumb = path.join(config.dataDir, existing.thumb_path);
+      const repaired = await boundedWork("thumbnails", 2, () => makeThumb(original, thumb, !!existing.is_video));
+      if (repaired.ok) { fsyncFile(thumb); blobWritten(existing.thumb_path); }
+    }
+    if (getUser(userId)?.status !== "active" || !db.prepare("SELECT 1 FROM photos WHERE id=?").get(existing.id)) {
+      removeUnreferencedFiles([existing.path, existing.thumb_path ?? ""]); throw Object.assign(new Error("Dit account is niet meer actief"), { statusCode: 401 });
+    }
     addToAlbums(existing.id, meta.albums, userId);
     if (opts.move) fs.rmSync(src, { force: true });
     return { id: existing.id, duplicate: true };
   }
+  const release = opts.reserved ? () => {} : reserveSpace(userId, fs.statSync(src).size);
+  try {
 
   let exif: Record<string, unknown> | undefined;
   if (!isVideo) exif = await exifr.parse(src, { gps: true, pick: ["DateTimeOriginal", "CreateDate", "Make", "Model", "latitude", "longitude", "OffsetTimeOriginal"] }).catch(() => undefined);
@@ -109,7 +123,15 @@ export async function addPhotoFromFile(src: string, meta: PhotoMeta = {}, opts: 
   const thumbPath = path.join(paths.photoThumbs, sha.slice(0, 2), sha + ".webp");
   const thumb = other?.thumb_path && fs.existsSync(thumbPath)
     ? { ok: true, width: other.width ?? undefined, height: other.height ?? undefined }
-    : await makeThumb(dest, thumbPath, isVideo);
+    : await boundedWork("thumbnails", 2, () => makeThumb(dest, thumbPath, isVideo));
+
+  if (getUser(userId)?.status !== "active") {
+    removeUnreferencedFiles([relData(dest), relData(thumbPath)]);
+    throw Object.assign(new Error("Dit account is niet meer actief"), { statusCode: 401 });
+  }
+
+  fsyncFile(dest);
+  if (thumb.ok) fsyncFile(thumbPath);
 
   const camera = [exif?.Make, exif?.Model].filter(Boolean).join(" ") || null;
   const destRel = relData(dest);
@@ -126,6 +148,7 @@ export async function addPhotoFromFile(src: string, meta: PhotoMeta = {}, opts: 
   })();
   addToAlbums(id, meta.albums, userId);
   return { id, duplicate: false };
+  } finally { release(); }
 }
 
 function addToAlbums(photoId: number, albums: string[] | undefined, userId: number) {

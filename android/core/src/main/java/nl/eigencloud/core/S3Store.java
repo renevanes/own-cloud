@@ -1,6 +1,14 @@
 package nl.eigencloud.core;
 
 import java.io.IOException;
+import java.io.File;
+import java.io.InputStream;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.text.SimpleDateFormat;
@@ -205,6 +213,32 @@ public final class S3Store implements ObjectStore {
         if (r.status == 404) return false;
         if (r.status >= 300) throw new IOException(name + ": HEAD " + key + " → " + r.status);
         return true;
+    }
+
+    private HttpURLConnection streaming(String method, String key, Map<String, String> extra) throws IOException {
+        Map.Entry<String, Map<String, String>> signed = sign(method, key, none(), extra, System.currentTimeMillis());
+        HttpURLConnection c = (HttpURLConnection) new URL(signed.getKey()).openConnection();
+        c.setRequestMethod(method); c.setInstanceFollowRedirects(false); c.setConnectTimeout(timeoutMs); c.setReadTimeout(timeoutMs);
+        for (Map.Entry<String, String> h : signed.getValue().entrySet()) c.setRequestProperty(h.getKey(), h.getValue());
+        return c;
+    }
+    @Override public void download(String key, File dest) throws IOException {
+        HttpURLConnection c = streaming("GET", key, none());
+        try {
+            if (c.getResponseCode() != 200) throw new IOException(name + ": GET " + key + " → " + c.getResponseCode());
+            try (InputStream in = c.getInputStream(); OutputStream out = new FileOutputStream(dest)) { byte[] b = new byte[128 * 1024]; for (int n; (n = in.read(b)) != -1;) out.write(b, 0, n); }
+        } finally { c.disconnect(); }
+    }
+    @Override public void putFile(String key, File file) throws IOException {
+        MessageDigest md5;
+        try { md5 = MessageDigest.getInstance("MD5"); } catch (NoSuchAlgorithmException e) { throw new IOException(e); }
+        try (InputStream in = new FileInputStream(file)) { byte[] b = new byte[128 * 1024]; for (int n; (n = in.read(b)) != -1;) md5.update(b, 0, n); }
+        HttpURLConnection c = streaming("PUT", key, Http.headers("content-md5", Bytes.base64(md5.digest()), "content-length", String.valueOf(file.length())));
+        try {
+            c.setDoOutput(true); c.setFixedLengthStreamingMode(file.length());
+            try (InputStream in = new FileInputStream(file); OutputStream out = c.getOutputStream()) { byte[] b = new byte[128 * 1024]; for (int n; (n = in.read(b)) != -1;) out.write(b, 0, n); }
+            if (c.getResponseCode() >= 300) throw new IOException(name + ": PUT " + key + " → " + c.getResponseCode());
+        } finally { c.disconnect(); }
     }
 
     private static final Pattern CONTENTS = Pattern.compile("<Contents>([\\s\\S]*?)</Contents>");

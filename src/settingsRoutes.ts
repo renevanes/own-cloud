@@ -7,6 +7,8 @@ import { getSetting, setSetting } from "./db.js";
 import { mailSettings, sendNotice } from "./mail/send.js";
 import * as health from "./health.js";
 import { runtime } from "./cluster/runtime.js";
+import { secondFactor } from "./security/account.js";
+import { checkRateLimit } from "./security/rateLimit.js";
 
 /** Koppeling naar het cluster (alleen gezet in clustermodus). */
 export const clusterHealth: {
@@ -28,7 +30,7 @@ function maskRelay(url: string | undefined) {
 export function publicBase(req: FastifyRequest) {
   const d = health.domain();
   if (runtime.enabled && d) return `https://cloud.${d}`;
-  const proto = (req.headers["x-forwarded-proto"] as string) ?? req.protocol;
+  const proto = req.protocol;
   return `${proto}://${req.headers.host}`;
 }
 
@@ -87,12 +89,13 @@ export function settingsRoutes(app: FastifyInstance) {
   });
 
   /** Je eigen wachtwoord wijzigen (iedereen). Je krijgt meteen een nieuwe sessie. */
-  app.post<{ Body: { current: string; next: string } }>("/api/settings/password", async (req, reply) => {
+  app.post<{ Body: { current: string; next: string; code?: string } }>("/api/settings/password", async (req, reply) => {
     const id = uid(req);
+    checkRateLimit(`password:${id}`);
     const stored = passwordHashOf(id);
     if (!stored || !verifyPassword(req.body?.current ?? "", stored)) return reply.code(400).send({ error: "Je huidige wachtwoord klopt niet" });
+    if (!secondFactor(id, req.body.code ?? "")) return reply.code(400).send({ error: "Vul een geldige tweede inlogcode of herstelcode in" });
     try { setUserPassword(id, req.body.next ?? ""); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
-    if (id === OWNER_ID) return { ok: true };
     const token = createToken(getUser(id)!);
     setSessionCookie(reply, token);
     return { ok: true, token };

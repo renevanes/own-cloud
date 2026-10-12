@@ -1,0 +1,36 @@
+name: Voorstel controleren
+on:
+  pull_request: {}
+permissions:
+  contents: read
+concurrency:
+  group: checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  node:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: npm }
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg tesseract-ocr tesseract-ocr-eng
+      - run: npm ci
+      - run: npm run typecheck && npm run build && npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: npm }
+      - uses: actions/setup-java@v6
+        with: { distribution: temurin, java-version: 17 }
+      - uses: gradle/actions/setup-gradle@v6
+        with: { gradle-version: "8.9" }
+      - run: npm ci && pipx install "moto[server]"
+      - run: android/core/test.sh
+      - name: Android SDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" > /dev/null
+      - run: gradle --no-daemon :app:lintDebug :app:assembleDebug
+        working-directory: android

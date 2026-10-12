@@ -19,6 +19,9 @@ public class FormatsGoldenTest {
     public static void main(String[] args) {
         T.main("FormatsGoldenTest", () -> {
             Map<String, Object> g = T.golden();
+            T.eq(1, Json.num(g, "contractVersion").intValue(), "API contract version");
+            for (Object fixture : Json.listAt(g, "transferPreviews"))
+                T.eq(Json.stringify(Json.path(fixture, "out")), Json.stringify(TransferPreview.preview(Json.map(fixture, "state"), Json.truthy(Json.path(fixture, "ready")), Json.num(fixture, "minutes").intValue())), "transfer preview contract");
 
             // 4. AWS documented presign vector (virtual-hosted style).
             S3Store aws = new S3Store(Json.obj("name", "aws", "endpoint", "https://s3.amazonaws.com", "region", "us-east-1", "bucket", "examplebucket",

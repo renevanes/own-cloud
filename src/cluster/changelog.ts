@@ -241,6 +241,8 @@ export const BLOB_COLUMNS: Record<string, string[]> = {
   messages: ["raw_path"],
   attachments: ["path"],
   photos: ["path", "thumb_path"],
+  mail_outbox: ["raw_path"],
+  import_chunks: ["path"],
 };
 
 export function blobRefs(e: Entry): string[] {

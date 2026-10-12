@@ -174,7 +174,7 @@ public final class Extras {
 
     public static Object dienstCheck(String base, String name) throws IOException {
         // Zonder punt: een gratis adres van de dienst (naam.<zone>); de dienst controleert de naam zelf.
-        String raw = name == null ? "" : name.trim().toLowerCase();
+        String raw = name == null ? "" : name.trim().toLowerCase(Locale.ROOT);
         String d = raw.matches("^[a-z0-9-]+$") ? raw : normalizeDomain(name, "buy");
         return dienst(base, "GET", "/v1/domains/check?name=" + Bytes.encodeURIComponent(d), null, null);
     }

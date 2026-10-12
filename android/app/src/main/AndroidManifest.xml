@@ -6,6 +6,7 @@
     <!-- Foto-back-up: foto's en video's lezen, met de plaats waar ze gemaakt zijn -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
     <!-- Je cloud-agenda in de agenda-app van de telefoon -->
@@ -25,6 +26,7 @@
         android:theme="@style/Theme.Eigen"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
         android:networkSecurityConfig="@xml/network_security"
         android:supportsRtl="true">
 

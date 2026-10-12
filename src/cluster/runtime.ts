@@ -10,7 +10,7 @@ export const runtime = {
   /** Wacht tot de laatste wijziging ook op een tweede data-node staat. */
   waitDurable: async (): Promise<boolean> => true,
   /** Inkomende mail tijdelijk opslaan op een niet-leider (secundaire MX). */
-  spool: (_raw: Buffer): void => { throw new Error("Geen cluster"); },
+  spool: async (_raw: Buffer): Promise<boolean> => { throw new Error("Geen cluster"); },
   /** Cluster slaapt: inkomende mail tijdelijk weigeren (afzenders proberen het later opnieuw). */
   sleeping: (): boolean => false,
   /**
@@ -18,4 +18,5 @@ export const runtime = {
    * server de tabel users en de kolom user_id nog niet kennen). Geeft de reden terug, of null als het kan.
    */
   usersBlocked: (): string | null => null,
+  featuresBlocked: (): string | null => null,
 };

@@ -50,6 +50,7 @@ export function clusterRoutes(app: FastifyInstance) {
       providers: Object.keys(svc.cfg.providers),
       stores: svc.stores.map((s) => ({ name: s.name, purpose: s.purpose, country: s.config.country ?? null, uploadedSeq: svc!.storeProgress.get(s.name) ?? null })),
       blobQueue: svc.blobQueueLength(),
+      recovery: svc.recoveryInfo(),
       monthlyCost: nodes.filter((n) => n.status !== "removed" && n.status !== "failed").reduce((a, n) => a + (n.monthly_cost ?? 0), 0),
       nodes,
       jobs: db.prepare("SELECT id, type, params, status, error, created, updated FROM cluster_jobs ORDER BY created DESC LIMIT 20").all(),

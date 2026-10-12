@@ -145,7 +145,7 @@ public class OverstapTest {
                 T.eq(Json.obj("url", dienstA, "naam", Json.str(Extras.dienstBrand(dienstA), "name"), "domain", "overstap.nl", "mode", "own", "central", false), v.get("van"), "van A, eigen domein");
                 T.eq(true, v.get("dnsNodig"), "DNS moet mee");
                 T.eq(3L, Json.num(v, "schatting", "objects").longValue(), "drie bestanden (zonder bootstrap/)");
-                T.eq(Json.list("actief", "naar", "naarNaam", "stap", "started", "van", "email", "loggedIn", "orderId", "bundle", "checkoutUrl", "bestelling", "zelf", "dnsNodig", "schatting", "stappen", "kopie", "log", "fout", "kanTerug", "klaar"),
+                T.eq(Json.list("actief", "naar", "naarNaam", "stap", "started", "van", "email", "loggedIn", "orderId", "bundle", "checkoutUrl", "bestelling", "zelf", "dnsNodig", "schatting", "stappen", "kopie", "log", "fout", "kanTerug", "klaar", "preview"),
                         new ArrayList<Object>(v.keySet()), "velden in dezelfde volgorde als TS");
                 view();
                 int seenB = mails(control, "b");

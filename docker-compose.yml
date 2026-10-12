@@ -5,6 +5,7 @@ services:
     env_file: .env
     environment:
       - CLUSTER_PORT=7946
+      - RSPAMD_URL=${RSPAMD_URL:-}
     volumes:
       - ./data:/data
       - caddy_data:/caddy:ro          # certificaten van Caddy voor STARTTLS
@@ -26,5 +27,14 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
 
+  rspamd:
+    image: rspamd/rspamd:3.14
+    profiles: [spam]
+    restart: unless-stopped
+    expose: ["11333"]
+    volumes:
+      - rspamd_data:/var/lib/rspamd
+
 volumes:
   caddy_data:
+  rspamd_data:

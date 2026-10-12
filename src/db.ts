@@ -1,10 +1,12 @@
 import Database from "better-sqlite3";
 import { paths } from "./config.js";
 import { migrateUserSchema } from "./userSchema.js";
+import { migrateFeatures } from "./migrations.js";
 
 export const db = new Database(paths.db);
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
+db.pragma("synchronous = FULL");
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS settings (
@@ -127,6 +129,7 @@ const photoCols = (db.prepare("PRAGMA table_info(photos)").all() as { name: stri
 if (!photoCols.includes("deleted_at")) db.exec("ALTER TABLE photos ADD COLUMN deleted_at INTEGER");
 // Meerdere gebruikers: alleen schemawijzigingen (zie userSchema.ts en CLUSTER.md).
 migrateUserSchema(db);
+migrateFeatures(db);
 
 // ───────────── Cluster-register (gerepliceerd) ─────────────
 db.exec(`

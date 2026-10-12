@@ -1,19 +1,30 @@
 // Eigen Cloud — webclient (geen build-stap nodig)
 import { europeMap, MAP_CSS } from "/shared/europe.js";
+import { createFeatures } from "./features/index.js";
 document.head.insertAdjacentHTML("beforeend", `<style>${MAP_CSS}</style>`);
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
+const pendingRequests = new Map();
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    ...opts,
-    headers: opts.body && !(opts.body instanceof FormData) ? { "Content-Type": "application/json", ...opts.headers } : opts.headers,
-    body: opts.body && !(opts.body instanceof FormData) && typeof opts.body !== "string" ? JSON.stringify(opts.body) : opts.body,
-  });
-  if (res.status === 401 && path !== "/api/login") { showLogin(); throw new Error("Niet ingelogd"); }
+  const headers = new Headers(opts.headers ?? {}), method = opts.method ?? "GET";
+  const body = opts.body && !(opts.body instanceof FormData) && typeof opts.body !== "string" ? JSON.stringify(opts.body) : opts.body;
+  const mutation = !["GET", "HEAD"].includes(method) && !(opts.body instanceof FormData);
+  if (body && !(opts.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  let fingerprint;
+  if (mutation && !/^\/api\/(login|logout|invite|security|settings\/password)(?:\/|$)/.test(path)) {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([method, path, body, headers.get("If-Match"), headers.get("If-None-Match")])));
+    fingerprint = [...new Uint8Array(digest)].map((n) => n.toString(16).padStart(2, "0")).join("");
+    if (pendingRequests.size >= 100 && !pendingRequests.has(fingerprint)) throw new Error("Controleer eerst je nog niet bevestigde wijzigingen.");
+    headers.set("Idempotency-Key", pendingRequests.get(fingerprint) ?? headers.get("Idempotency-Key") ?? crypto.randomUUID());
+    pendingRequests.set(fingerprint, headers.get("Idempotency-Key"));
+  }
+  const res = await fetch(path, { ...opts, headers, body });
+  if (res.status === 401 && path !== "/api/login") { pendingRequests.clear(); showLogin(); throw new Error("Niet ingelogd"); }
   const data = res.headers.get("content-type")?.includes("json") ? await res.json() : await res.text();
-  if (!res.ok) throw new Error(data?.error || res.statusText);
+  if (fingerprint && (res.ok || res.status < 500 && !data?.uncertain)) pendingRequests.delete(fingerprint);
+  if (!res.ok) throw Object.assign(new Error(data?.error || res.statusText), { status: res.status, ...data });
   return data;
 }
 
@@ -30,6 +41,10 @@ const fmtTime = (ms) => new Date(ms).toLocaleTimeString("nl-NL", { hour: "2-digi
 /** Wie is er ingelogd: { id, name, address, owner }. Alleen de eigenaar beheert servers, domein en gebruikers. */
 let me = null;
 const isOwner = () => !!me?.owner;
+const features = createFeatures({ api, esc, me: () => me, reloadMail: () => { if (loaded.mail) { loadMessages(); loadFolders(); } }, reloadShared: async () => {
+  if (loaded.agenda) { cal.calendars = await api("/api/calendars"); loadCalendar(); }
+  if (loaded.fotos) { const rows = await api("/api/albums"); $("#albumFilter").innerHTML = '<option value="">Geen album</option>' + rows.map((a) => `<option value="${a.id}">${esc(a.name)} (${a.count})</option>`).join(""); }
+} });
 
 async function showLogin() {
   $("#app").hidden = true; $("#invite").hidden = true; $("#login").hidden = false;
@@ -43,6 +58,7 @@ let booted = false;
 async function boot() {
   try { me = (await api("/api/me")).user; } catch { return showLogin(); }
   $("#login").hidden = true; $("#invite").hidden = true; $("#app").hidden = false;
+  features.boot();
   document.documentElement.classList.toggle("not-owner", !isOwner());
   $$("[data-owner]").forEach((el) => (el.hidden = !isOwner()));
   $("#logout").title = `Uitloggen (${me.address})`;
@@ -57,12 +73,12 @@ async function boot() {
 }
 $("#loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const body = { password: $("#password").value };
+  const body = { password: $("#password").value, code: $("#loginCode").value };
   if (!$("#loginUser").hidden && $("#loginUser").value.trim()) body.user = $("#loginUser").value.trim();
   try { await api("/api/login", { method: "POST", body }); $("#password").value = ""; $("#loginError").textContent = ""; boot(); }
-  catch (err) { $("#loginError").textContent = err.message; }
+  catch (err) { $("#loginError").textContent = err.message; if (err.mfaRequired) { $("#loginFactor").hidden = false; $("#loginCode").focus(); } }
 });
-$("#logout").onclick = async () => { await api("/api/logout", { method: "POST" }); booted && location.reload(); showLogin(); };
+$("#logout").onclick = async () => { await features.clearOffline(); await api("/api/logout", { method: "POST" }); booted && location.reload(); showLogin(); };
 
 // ───────────── Uitnodiging (eenmalige link: zelf een wachtwoord kiezen) ─────────────
 async function showInvite(code) {
@@ -96,11 +112,11 @@ async function showInvite(code) {
 const loaded = {};
 function switchTab(target) {
   let [tab, sub] = String(target).split("/");
-  if (!["mail", "agenda", "fotos", "nodes", "instellingen"].includes(tab)) tab = "mail";
+  if (!["mail", "agenda", "fotos", "contacten", "nodes", "instellingen"].includes(tab)) tab = "mail";
   $$(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   $$(".tab").forEach((t) => (t.hidden = t.id !== "tab-" + tab));
   history.replaceState(null, "", "#" + tab + (sub ? "/" + sub : ""));
-  if (!loaded[tab]) { loaded[tab] = true; ({ mail: initMail, agenda: initAgenda, fotos: initPhotos, nodes: initNodes, instellingen: initSettings })[tab](); }
+  if (!loaded[tab]) { loaded[tab] = true; ({ mail: initMail, agenda: initAgenda, fotos: initPhotos, contacten: features.contacts, nodes: initNodes, instellingen: initSettings })[tab](); }
   if (tab === "instellingen") showSettings(sub || (isOwner() ? "gezondheid" : "account"));
 }
 window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (h.startsWith("instellingen")) switchTab(h); });
@@ -124,7 +140,7 @@ async function loadMessages(append = false) {
   else if (mail.label) p.set("label", mail.label);
   else if (mail.folder === "starred") p.set("starred", "1");
   else p.set("folder", mail.folder);
-  if (append && mail.items.length) p.set("before", mail.items.at(-1).date);
+  if (append && mail.items.length) { p.set("before", mail.items.at(-1).date); p.set("beforeId", mail.items.at(-1).id); }
   const rows = await api("/api/mail/messages?" + p);
   mail.items = append ? mail.items.concat(rows) : rows;
   $("#moreMail").hidden = rows.length < 50;
@@ -142,7 +158,7 @@ async function openMessage(id) {
   $$("#messages li").forEach((li) => li.classList.toggle("active", Number(li.dataset.id) === id));
   $(`#messages li[data-id="${id}"]`)?.classList.remove("unread");
   $("#tab-mail").classList.add("reading");
-  const to = JSON.parse(m.to_addrs || "[]").map((a) => a.name ? `${a.name} &lt;${esc(a.address)}&gt;` : esc(a.address)).join(", ");
+  const to = JSON.parse(m.to_addrs || "[]").map((a) => a.name ? `${esc(a.name)} &lt;${esc(a.address)}&gt;` : esc(a.address)).join(", ");
   const r = $("#reader");
   r.classList.remove("empty");
   r.innerHTML = `
@@ -194,34 +210,7 @@ async function openMessage(id) {
   };
 }
 
-function openCompose(pre = {}) {
-  const f = $("#composeForm");
-  f.reset();
-  for (const k of ["to", "subject", "text", "replyToId"]) if (pre[k] !== undefined) f.elements[k].value = pre[k];
-  $("#composeError").textContent = "";
-  $("#composeDlg").showModal();
-  (pre.to ? f.elements.text : f.elements.to).focus();
-  if (pre.text) f.elements.text.setSelectionRange(0, 0);
-}
-
-const fileToBase64 = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1]); r.onerror = rej; r.readAsDataURL(file); });
-
-$("#composeForm").addEventListener("submit", async (e) => {
-  if (e.submitter?.value !== "send") return;
-  e.preventDefault();
-  const f = e.target, btn = $("#sendBtn");
-  btn.disabled = true; btn.textContent = "Versturen…";
-  try {
-    const attachments = await Promise.all([...f.elements.files.files].map(async (file) => ({ filename: file.name, contentType: file.type, base64: await fileToBase64(file) })));
-    await api("/api/mail/send", { method: "POST", body: {
-      to: f.elements.to.value, cc: f.elements.cc.value ? f.elements.cc.value.split(",").map((s) => s.trim()) : undefined,
-      subject: f.elements.subject.value, text: f.elements.text.value, replyToId: Number(f.elements.replyToId.value) || undefined, attachments,
-    } });
-    $("#composeDlg").close();
-    if (mail.folder === "sent") loadMessages();
-  } catch (err) { $("#composeError").textContent = err.message; }
-  finally { btn.disabled = false; btn.textContent = "Versturen"; }
-});
+function openCompose(pre = {}) { return features.composer(pre); }
 
 function initMail() {
   const menu = document.createElement("button");
@@ -291,10 +280,13 @@ const toLocalInput = (ms, dateOnly) => {
 
 function openEvent(ev) {
   const f = $("#eventForm");
-  f.reset();
-  $("#calSelect").innerHTML = cal.calendars.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
+  f.reset(); f.dataset.revision = ev?.updated ?? ""; $("#eventError").textContent = "";
+  const writable = cal.calendars.filter((c) => c.role !== "read");
+  $("#calSelect").innerHTML = cal.calendars.filter((c) => c.role !== "read" || c.id === ev?.calendar_id).map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
+  const readOnly = !!ev && cal.calendars.find((c) => c.id === ev.calendar_id)?.role === "read";
+  f.querySelector('button[value="save"]').disabled = readOnly;
   $("#eventDlgTitle").textContent = ev?.id ? "Afspraak bewerken" : "Nieuwe afspraak";
-  $("#deleteEvent").hidden = !ev?.id;
+  $("#deleteEvent").hidden = !ev?.id || readOnly;
   const start = ev?.start ?? (() => { const d = new Date(cal.selected); d.setHours(new Date().getHours() + 1, 0, 0, 0); return d.getTime(); })();
   const end = ev?.end ?? start + 3600e3;
   const allDay = !!ev?.all_day;
@@ -305,7 +297,7 @@ function openEvent(ev) {
   for (const k of ["title", "location", "description", "id"]) f.elements[k].value = ev?.[k] ?? "";
   f.elements.rrule.value = ev?.rrule ?? "";
   if (ev?.rrule && !f.elements.rrule.value) { f.elements.rrule.add(new Option("Aangepast: " + ev.rrule, ev.rrule)); f.elements.rrule.value = ev.rrule; }
-  f.elements.calendar_id.value = ev?.calendar_id ?? cal.calendars[0]?.id;
+  f.elements.calendar_id.value = ev?.calendar_id ?? writable[0]?.id;
   f.elements.reminder_min.value = ev?.reminder_min ?? "";
   f.elements.occurrence.value = ev?.occurrence_start ?? "";
   $("#eventDlg").showModal();
@@ -325,10 +317,11 @@ $("#eventForm").addEventListener("submit", async (e) => {
   if (action === "cancel") return;
   e.preventDefault();
   const f = e.target, id = f.elements.id.value;
+  try {
   if (action === "delete") {
     const occ = f.elements.occurrence.value;
     const onlyThis = f.elements.rrule.value && occ && confirm("Alleen deze herhaling verwijderen?\n(Annuleren = de hele reeks)");
-    await api(`/api/events/${id}${onlyThis ? "?occurrence=" + occ : ""}`, { method: "DELETE" });
+    await api(`/api/events/${id}${onlyThis ? "?occurrence=" + occ : ""}`, { method: "DELETE", headers: { "If-Match": `"event-${id}-${f.dataset.revision}"` } });
   } else {
     const allDay = f.elements.all_day.checked;
     let start = new Date(allDay ? f.elements.start.value + "T00:00:00Z" : f.elements.start.value).getTime();
@@ -339,10 +332,11 @@ $("#eventForm").addEventListener("submit", async (e) => {
       start, end, all_day: allDay, rrule: f.elements.rrule.value || null, calendar_id: Number(f.elements.calendar_id.value),
       reminder_min: f.elements.reminder_min.value ? Number(f.elements.reminder_min.value) : null, tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
     };
-    await api(id ? "/api/events/" + id : "/api/events", { method: id ? "PATCH" : "POST", body });
+    await api(id ? "/api/events/" + id : "/api/events", { method: id ? "PATCH" : "POST", body, headers: id ? { "If-Match": `"event-${id}-${f.dataset.revision}"` } : {} });
   }
   $("#eventDlg").close();
   loadCalendar();
+  } catch (err) { $("#eventError").textContent = err.message; }
 });
 
 async function initAgenda() {
@@ -370,6 +364,8 @@ async function loadPhotos(reset = false) {
   ph.loading = true;
   if (reset) { ph.items = []; ph.done = false; $("#photoGrid").innerHTML = ""; }
   const p = new URLSearchParams({ limit: "150" });
+  if (features.photos.search()) p.set("q", features.photos.search());
+  if (features.photos.tag()) p.set("tag", features.photos.tag());
   if (ph.filter) p.set(ph.filter, "1");
   if (ph.album) p.set("album", ph.album);
   const last = ph.items.at(-1);
@@ -395,6 +391,7 @@ function showPhoto(i) {
   ph.index = i;
   const p = ph.items[i], src = `/api/photos/${p.id}/original`;
   $("#pvMedia").innerHTML = p.is_video ? `<video src="${src}" controls autoplay playsinline></video>` : `<img src="${src}" alt="">`;
+  features.photos.annotate(p);
   $("#pvInfo").textContent = `${fmtFull(p.taken_at)}${p.camera ? " · " + p.camera : ""}${p.description ? " · " + p.description : ""}`;
   $("#pvFav").textContent = p.is_favorite ? "★" : "☆";
   $("#pvDownload").href = src + "?download=1";
@@ -417,6 +414,7 @@ async function uploadFiles(files) {
 }
 
 async function initPhotos() {
+  features.photos.tags(); features.photos.onSearch(() => loadPhotos(true));
   const albums = await api("/api/albums");
   $("#albumFilter").innerHTML = `<option value="">Alle albums</option>` + albums.map((a) => `<option value="${a.id}">${esc(a.name)} (${a.count})</option>`).join("");
   $("#photoFilter").onchange = (e) => { ph.filter = e.target.value; loadPhotos(true); };
@@ -473,6 +471,9 @@ async function loadCluster() {
     `<span class="pill">${countries.map((x) => FLAGS[x] || x).join(" ")} ${countries.length} ${countries.length === 1 ? "land" : "landen"}</span>`,
     `<span class="pill">${eur(c.monthlyCost)} / maand</span>`,
     c.blobQueue ? `<span class="pill warn">${c.blobQueue} bestanden wachten op upload</span>` : "",
+    c.recovery?.oldestPendingAt ? `<span class="pill warn">Oudste upload: ${fmtDate(c.recovery.oldestPendingAt)}</span>` : "",
+    c.recovery ? `<span class="pill ${c.recovery.verified ? "ok" : "warn"}">Volledig herstel ${c.recovery.verified ? "gecontroleerd" : "nog niet bevestigd"}${c.recovery.verifiedAt ? " · " + fmtDate(c.recovery.verifiedAt) : ""}</span>` : "",
+    ...(c.recovery?.results ?? []).map((r) => `<span class="pill ${r.ok ? "ok" : "warn"}">${esc(r.store)}: ${r.checked ?? "?"} bestanden gecontroleerd, ${r.missing ?? "?"} ontbreken, ${r.damaged ?? "?"} beschadigd · ${r.durationMs ?? "?"} ms</span>`),
   ].join("");
 
   $("#nodeMap").innerHTML = europeMap(active.map((n) => ({ ...n, status: n.status })));
@@ -645,6 +646,7 @@ function showSettings(sec) {
   if (sec === "telefoon") renderPhone();
   if (sec === "gebruikers") loadUsers();
   if (sec === "account") loadAccount();
+  features.settings(sec);
 }
 
 function msg(el, text, ok) { el.textContent = text; el.className = "form-msg " + (ok ? "ok" : "err"); }
@@ -720,7 +722,7 @@ const fmtBytes = (n) => n >= 1e9 ? `${(n / 1e9).toLocaleString("nl-NL", { maximu
 function initAccount() {
   $("#pwForm").onsubmit = async (e) => {
     e.preventDefault();
-    try { await api("/api/settings/password", { method: "POST", body: { current: e.target.elements.current.value, next: e.target.elements.next.value } }); e.target.reset(); msg($("#pwMsg"), "Wachtwoord gewijzigd.", true); }
+    try { await api("/api/settings/password", { method: "POST", body: { current: e.target.elements.current.value, next: e.target.elements.next.value, code: e.target.elements.code.value } }); e.target.reset(); msg($("#pwMsg"), "Wachtwoord gewijzigd.", true); }
     catch (err) { msg($("#pwMsg"), err.message, false); }
   };
   $("#nameForm").onsubmit = async (e) => {
@@ -960,9 +962,10 @@ async function loadUploads() {
   $("#uploadList").innerHTML = ups.map((u) => {
     const pct = Math.floor((u.received / u.size) * 100);
     const waiting = u.received < u.size && !pending.has(u.name + "|" + u.size);
-    return `<li><span>${esc(u.name)}</span><span class="size">${fmtSize(u.size)}</span><span class="muted">${u.received >= u.size ? "klaar" : waiting ? "onderbroken — kies het bestand opnieuw" : pct + "%"}</span><span class="bar"><i style="width:${pct}%"></i></span></li>`;
+    return `<li><span>${esc(u.name)}</span><span class="size">${fmtSize(u.size)}</span><span class="muted">${u.received >= u.size ? "klaar" : waiting ? "onderbroken — kies het bestand opnieuw" : pct + "%"}</span><span class="bar"><i style="width:${pct}%"></i></span>${u.id ? `<button class="ghost danger" data-remove-upload="${esc(u.id)}">Verwijderen</button>` : ""}</li>`;
   }).join("");
   $("#startImport").disabled = !ups.length || ups.some((u) => u.received < u.size);
+  $("#uploadList").onclick = async (e) => { const b = e.target.closest("[data-remove-upload]"); if (!b || !confirm("Deze upload verwijderen?")) return; try { await api(`/api/import/uploads/${b.dataset.removeUpload}`, { method: "DELETE" }); await loadUploads(); } catch (err) { alert(err.message); } };
   const st = await api("/api/import/status");
   if (st.progress) renderImport(st);
 }
@@ -1033,7 +1036,9 @@ function renderImport(st) {
     <div class="counters"><div><b>${p.mail.added}</b>mails${p.mail.skipped ? ` · ${p.mail.skipped} al aanwezig` : ""}</div>
     <div><b>${p.calendar.added + p.calendar.updated}</b>afspraken in ${p.calendar.calendars} agenda${p.calendar.calendars === 1 ? "" : "'s"}</div>
     <div><b>${p.photos.added}</b>foto's en video's${p.photos.duplicates ? ` · ${p.photos.duplicates} al aanwezig` : ""}</div></div>
-    ${p.log.length ? `<ul>${p.log.slice(-8).map((l) => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}`;
+    ${p.log.length ? `<ul>${p.log.slice(-8).map((l) => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}
+    ${st.running ? '<button class="ghost danger" data-import-action="cancel">Import stoppen</button>' : ['paused', 'cancelled'].includes(st.status) ? '<button class="ghost" data-import-action="resume">Opnieuw proberen</button>' : ""}`;
+  el.querySelector("[data-import-action]")?.addEventListener("click", async (e) => { try { await api(`/api/import/jobs/${st.id}/${e.target.dataset.importAction}`, { method: "POST", body: {} }); renderImport(await api("/api/import/status")); } catch (err) { alert(err.message); } });
   if (st.running && !importTimer) pollImport();
 }
 

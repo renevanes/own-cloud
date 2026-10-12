@@ -1,0 +1,30 @@
+{
+  "contractVersion": 1,
+  "schemaCapability": "review-v1",
+  "discovery": "/api/capabilities",
+  "authentication": {
+    "cookie": "session",
+    "bearerFormat": "expiry.user-generation.session.signature",
+    "mfaChallenge": { "status": 401, "mfaRequired": true },
+    "identity": ["id", "name", "address", "owner", "sessionGeneration", "cloudInstance"]
+  },
+  "writes": {
+    "idempotencyHeader": "Idempotency-Key",
+    "revisionHeader": "If-Match",
+    "conflictStatuses": [409, 412, 428],
+    "unconfirmed": { "status": 503, "uncertain": true, "operationId": "original request key" }
+  },
+  "dav": {
+    "discovery": ["/.well-known/caldav", "/.well-known/carddav"],
+    "calendarHome": "/dav/calendars/{userId}/",
+    "addressbook": "/dav/addressbooks/{userId}/contacts/",
+    "supportedReports": ["calendar-query", "calendar-multiget", "addressbook-query", "addressbook-multiget"],
+    "unsupportedReports": ["sync-collection"]
+  },
+  "transferPreview": {
+    "contractVersion": 1,
+    "cutoverStates": ["source", "moving", "destination", "returning"],
+    "integrityMethod": "sha256"
+  },
+  "compatibility": "Clients ignore unknown response fields, discover capabilities, and preserve operation keys on retries. Version 1.14 peers block feature writes until all data nodes support review-v1."
+}

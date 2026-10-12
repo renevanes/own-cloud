@@ -24,7 +24,7 @@ public final class InstallReceiver extends BroadcastReceiver {
             if (confirm == null) return;
             confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             // Staat de app open (je tikte net op Bijwerken)? Dan meteen de vraag van Android tonen.
-            android.app.Activity open = UpdateCheck.visible;
+            android.app.Activity open = UpdateCheck.visible.get();
             if (open != null && !open.isFinishing()) {
                 try { open.startActivity(confirm); return; } catch (RuntimeException ignored) { /* dan via een melding */ }
             }

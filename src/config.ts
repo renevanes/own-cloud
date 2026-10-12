@@ -7,6 +7,14 @@ function env(name: string, fallback?: string): string {
   return v;
 }
 
+export function sessionSecret() {
+  const secret = process.env.SESSION_SECRET;
+  if (process.env.NODE_ENV === "production" && (!secret || secret.trim().length < 32 || /^verander-mij|^change-?me|^dev$/i.test(secret.trim()))) {
+    throw new Error("Stel SESSION_SECRET in op een willekeurig geheim van minimaal 32 tekens voordat je de server start.");
+  }
+  return secret || "verander-mij-dev";
+}
+
 export const config = {
   dataDir: path.resolve(env("DATA_DIR", "./data")),
   httpPort: Number(env("HTTP_PORT", "3000")),
@@ -26,7 +34,7 @@ export const config = {
   dkimSelector: process.env.DKIM_SELECTOR || "eigen",
   dkimKeyFile: process.env.DKIM_KEY_FILE || "",
   /** Geheim voor sessiecookies. */
-  sessionSecret: env("SESSION_SECRET", "verander-mij-" + "dev"),
+  sessionSecret: sessionSecret(),
   /** Token voor de privé iCal-feed (abonneren vanaf telefoon). */
   icalToken: process.env.ICAL_TOKEN || "",
   maxMessageBytes: 50 * 1024 * 1024,

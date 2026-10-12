@@ -7,3 +7,10 @@ eigen.json
 build
 app-dist/*.apk
 app-dist/update.json
+android/signing/*.jks
+android/signing/*.keystore
+android/signing/*.p12
+android/signing/*.pfx
+android/signing/signing.properties
+playwright-report/
+test-results/

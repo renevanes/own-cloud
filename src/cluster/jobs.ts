@@ -3,7 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { decryptBuffer, sealJson } from "./crypto.js";
+import { sealJson } from "./crypto.js";
+import { verifyRestoredBlobs, type BlobProof } from "./recovery.js";
 import { lastSeq } from "./changelog.js";
 import { restoreFromStore, storedUpTo } from "./backup.js";
 import { imageUrls, userData } from "./cloudinit.js";
@@ -291,43 +292,32 @@ const STEPS: Record<JobType, Step> = {
     }
   },
 
-  /** Brandoefening: herstel uit elke opslag apart, controleer integriteit en een steekproef van bestanden. */
+  /** Brandoefening: herstel uit elke opslag apart en controleer alle bestanden gestreamd. */
   async drill(svc) {
-    const results: { store: string; ok: boolean; detail: string }[] = [];
+    const results: { store: string; ok: boolean; detail: string; seq?: number; lastTs?: number | null; durationMs: number; blobs?: BlobProof }[] = [];
     for (const st of svc.stores) {
+      const t0 = Date.now();
       const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "drill-"));
       const file = path.join(tmp, "drill.sqlite");
       try {
-        const t0 = Date.now();
         const r = await restoreFromStore(st, svc.keys.db!, file);
         if (!r) throw new Error("geen bruikbare snapshot");
         const expected = svc.storeProgress.get(st.name) ?? 0;
         if (r.seq < expected) throw new Error(`hersteld tot seq ${r.seq}, verwacht minstens ${expected}`);
         const rdb = new Database(file, { readonly: true });
         const counts = Object.fromEntries(["messages", "events", "photos"].map((t) => [t, (rdb.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n]));
-        const sample = (rdb.prepare(`SELECT p FROM (SELECT raw_path AS p FROM messages UNION ALL SELECT path FROM photos UNION ALL SELECT path FROM attachments) WHERE p IS NOT NULL AND p NOT LIKE '/%' ORDER BY random() LIMIT 10`).all() as { p: string }[]).map((x) => x.p);
-        rdb.close();
-        let checked = 0;
-        for (const rel of sample) {
-          const enc = await st.getBuffer(`blobs/${rel}`);
-          if (!enc) {
-            // Kan nog in de uploadwachtrij staan.
-            if ((svc.db!.prepare("SELECT 1 FROM blob_queue WHERE rel = ?").get(rel))) continue;
-            throw new Error(`bestand ontbreekt: ${rel}`);
-          }
-          const plain = await decryptBuffer(svc.keys.blobs!, enc);
-          const m = /([0-9a-f]{64})(?:\.[a-z0-9]+)?$/.exec(rel);
-          if (m && crypto.createHash("sha256").update(plain).digest("hex") !== m[1]) throw new Error(`bestand beschadigd: ${rel}`);
-          checked++;
-        }
-        results.push({ store: st.name, ok: true, detail: `seq ${r.seq}, ${counts.messages} mails, ${counts.events} afspraken, ${counts.photos} foto's, ${checked} bestanden gecontroleerd, ${Date.now() - t0} ms` });
+        let blobs: BlobProof;
+        try { blobs = await verifyRestoredBlobs(rdb, st, svc.keys.blobs!); } finally { rdb.close(); }
+        const ok = blobs.missing === 0 && blobs.damaged === 0;
+        results.push({ store: st.name, ok, seq: r.seq, lastTs: r.lastTs, durationMs: Date.now() - t0, blobs,
+          detail: `seq ${r.seq}, ${counts.messages} mails, ${counts.events} afspraken, ${counts.photos} foto's, ${blobs.checked}/${blobs.total} bestanden gecontroleerd; ${blobs.missing} ontbreken, ${blobs.damaged} beschadigd` });
       } catch (e) {
-        results.push({ store: st.name, ok: false, detail: (e as Error).message });
+        results.push({ store: st.name, ok: false, detail: (e as Error).message, durationMs: Date.now() - t0 });
       } finally {
         fs.rmSync(tmp, { recursive: true, force: true });
       }
     }
-    const allOk = results.every((r) => r.ok);
+    const allOk = results.length > 0 && results.every((r) => r.ok);
     const failed = results.filter((r) => !r.ok);
     svc.event("drill", allOk
       ? `Back-uptest geslaagd: herstellen uit ${results.length === 1 ? "de opslag" : `alle ${results.length} opslagplaatsen`} werkt`

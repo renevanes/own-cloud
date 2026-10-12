@@ -1498,7 +1498,7 @@ async function renderOverstap(msg) {
       <label>Token van deSEC<input name="desecToken" autocomplete="off" spellcheck="false" required></label>
       <div><button class="btn primary">Controleren</button></div></form>`;
   } else if (v.stap === "gereed") {
-    inner = `${overstapUitleg(v)}<p class="note" style="margin:0">${v.naar === "zelf" ? "Je sleutels werken." : `${esc(v.naarNaam)} staat klaar${v.bestelling?.status === "ready" ? "" : " en wacht op je DNS"}.`} Kies een rustig moment: tijdens het overzetten is je cloud offline.</p>
+    inner = `${overstapUitleg(v)}${v.preview?.destination.monthly ? `<p>Nieuwe maandprijs: <b>${esc(v.preview.destination.monthly.value)} ${esc(v.preview.destination.monthly.currency)}</b>, inclusief btw. De oude cloud blijft actief tot je hieronder begint. Elk overgezet bestand wordt met SHA-256 gecontroleerd.</p>` : `<p>Elk overgezet bestand wordt met SHA-256 gecontroleerd. De kosten voor zelf beheren volgen uit de gekozen servers en opslag.</p>`}<p class="note" style="margin:0">${v.naar === "zelf" ? "Je sleutels werken." : `${esc(v.naarNaam)} staat klaar${v.bestelling?.status === "ready" ? "" : " en wacht op je DNS"}.`} Kies een rustig moment: tijdens het overzetten is je cloud offline.</p>
       <div><button class="btn primary big" id="oNu">Nu overzetten</button></div>`;
   } else if (v.stap === "klaar") {
     const k = v.klaar ?? {};

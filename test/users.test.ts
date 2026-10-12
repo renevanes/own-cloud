@@ -89,12 +89,13 @@ test("migratie: alles van de bestaande cloud is van de eigenaar; oude sessie, wa
   // Oude sessie (token zonder gebruiker) = eigenaar
   const me = await call(owner, "GET", "/api/me");
   assert.equal(me.statusCode, 200);
-  assert.deepEqual(me.json().user, { id: 1, name: "Rene", address: "rene@vanes.test", owner: true });
+  assert.deepEqual(me.json().user, { id: 1, name: "Rene", address: "rene@vanes.test", owner: true, sessionGeneration: 0, cloudInstance: me.json().user.cloudInstance });
+  assert.match(me.json().user.cloudInstance, /^[0-9a-f]{32}$/);
   assert.equal((await call(owner, "GET", "/api/mail/messages?folder=inbox")).json()[0].subject, "Geheim van de eigenaar");
   // Inloggen met alleen het wachtwoord, zoals voorheen
   const r = await login(undefined, OWNER_PW);
   assert.equal(r.statusCode, 200);
-  assert.equal(r.json().token.split(".").length, 2, "token van de eigenaar heeft het oude formaat");
+  assert.equal(r.json().token.split(".").length, 4, "nieuwe eigenaarsessies zijn afzonderlijk intrekbaar");
   assert.deepEqual((await app.inject({ url: "/api/login/info" })).json(), { multiUser: false });
   // Zoeken (FTS) werkt na de migratie
   assert.equal((await call(owner, "GET", "/api/mail/messages?q=kokosnoot")).json().length, 1);
@@ -161,7 +162,7 @@ test("inloggen per gebruiker: met naam, adres of deel vóór de @", async () => 
   assert.equal((await login("rene@vanes.test", OWNER_PW)).statusCode, 200);
   assert.equal((await login("niemand", "anna-wachtwoord-1")).statusCode, 401);
   const me = (await call(as(tokens.anna), "GET", "/api/me")).json();
-  assert.deepEqual(me.user, { id: ids.anna, name: "Anna", address: "anna@vanes.test", owner: false });
+  assert.deepEqual(me.user, { id: ids.anna, name: "Anna", address: "anna@vanes.test", owner: false, sessionGeneration: 0, cloudInstance: me.user.cloudInstance });
   assert.equal(me.mailFrom, "anna@vanes.test");
 });
 
@@ -203,7 +204,7 @@ test("afscherming: Anna ziet niets van de eigenaar, via geen enkel adres", async
   // Foto's en albums
   assert.deepEqual((await call(A, "GET", "/api/photos")).json(), []);
   assert.deepEqual((await call(A, "GET", "/api/photos?q=oud")).json(), [], "zoeken in foto's");
-  assert.deepEqual((await call(A, "GET", "/api/photos?album=1")).json(), []);
+  assert.equal((await call(A, "GET", "/api/photos?album=1")).statusCode, 404);
   assert.deepEqual((await call(A, "GET", "/api/photos/summary")).json(), []);
   assert.deepEqual((await call(A, "GET", "/api/albums")).json(), []);
   await no("GET", "/api/photos/1");

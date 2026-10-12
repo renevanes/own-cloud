@@ -1,6 +1,9 @@
 import { storeRawMessage } from "./store.js";
 import { OWNER_ID, recipientUser } from "../users.js";
 import { db } from "../db.js";
+import { scanMail, filteredFolder } from "./filter.js";
+import crypto from "node:crypto";
+import { runtime } from "../cluster/runtime.js";
 
 /**
  * Inkomende mail per ontvanger in de juiste mailbox. De ontvangers uit de SMTP-envelop reizen mee als eerste regel
@@ -39,12 +42,20 @@ export function mailboxesFor(recipients: string[] | null): number[] {
 }
 
 /** Slaat een inkomend bericht op bij elke ontvanger. Geeft de nieuwe bericht-id's terug. */
-export async function deliverInbound(input: Buffer): Promise<number[]> {
+export async function deliverInbound(input: Buffer, connection: { ip?: string; helo?: string; sender?: string; recipients?: string[] } = {}): Promise<number[]> {
   const { raw, recipients } = splitEnvelope(input);
   const out: number[] = [];
+  const scan = await scanMail(raw, connection);
+  // Our first Received header changes on an SMTP retry; the sender's bytes provide the stable fallback identity.
+  const firstLine = raw.indexOf("\n");
+  const canonical = raw.subarray(0, Math.max(0, firstLine)).toString("utf8").startsWith("Received: from ") ? raw.subarray(firstLine + 1) : raw;
+  const dedupKey = crypto.createHash("sha256").update(canonical).digest("hex");
   for (const userId of mailboxesFor(recipients)) {
-    const id = await storeRawMessage(raw, { folder: "inbox", userId });
-    if (id) out.push(id);
+    const id = await storeRawMessage(raw, { folder: await filteredFolder(raw, userId, scan), userId, dedupKey, inbound: true });
+    if (id) {
+      if (!runtime.featuresBlocked()) db.prepare("INSERT OR REPLACE INTO mail_security VALUES (?,?,?,?,?)").run(id, scan.status, scan.score, scan.action, JSON.stringify(scan.details));
+      out.push(id);
+    }
   }
   return out;
 }

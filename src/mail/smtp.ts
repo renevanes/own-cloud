@@ -1,16 +1,21 @@
 import fs from "node:fs";
+import path from "node:path";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { SMTPServer } from "smtp-server";
 import { config } from "../config.js";
 import { deliverInbound, withEnvelope } from "./inbound.js";
 import { recipientUser } from "../users.js";
 import { runtime } from "../cluster/runtime.js";
 import { isNotLeader } from "../cluster/fence.js";
+import { reserveSpace } from "../work.js";
 
 /**
  * Ontvangt inkomende mail (MX) voor de geconfigureerde domeinen.
  * Accepteert alleen ontvangers op eigen domeinen → geen open relay.
  */
 export function startSmtpServer() {
+  let receiving = 0;
   const certFile = process.env.TLS_CERT_FILE;
   const keyFile = process.env.TLS_KEY_FILE;
   const tls = certFile && keyFile && fs.existsSync(certFile) && fs.existsSync(keyFile)
@@ -25,6 +30,8 @@ export function startSmtpServer() {
     ...(tls ?? {}),
     size: config.maxMessageBytes,
     logger: false,
+    maxClients: 100,
+    socketTimeout: 120_000,
 
     onRcptTo(address, _session, cb) {
       if (runtime.sleeping()) {
@@ -47,38 +54,57 @@ export function startSmtpServer() {
     },
 
     onData(stream, session, cb) {
-      const chunks: Buffer[] = [];
-      stream.on("data", (c: Buffer) => chunks.push(c));
-      stream.on("end", async () => {
-        if ((stream as unknown as { sizeExceeded?: boolean }).sizeExceeded) {
-          const err = new Error("Bericht te groot") as Error & { responseCode: number };
-          err.responseCode = 552;
-          return cb(err);
-        }
+      if (receiving >= 2) { stream.resume(); return cb(Object.assign(new Error("Tijdelijk druk, probeer later"), { responseCode: 451 })); }
+      receiving++;
+      void (async () => {
+        const releases: ReturnType<typeof reserveSpace>[] = [];
+        let tmp: string | undefined;
         try {
-          const header = `Received: from ${session.clientHostname} ([${session.remoteAddress}]) by ${config.hostname}; ${new Date().toUTCString()}\r\n`;
+          const users = new Set(session.envelope.rcptTo.map((r) => recipientUser(r.address) ?? 1));
+          for (const id of users) releases.push(reserveSpace(id, 0));
+          tmp = fs.mkdtempSync(path.join(config.dataDir, ".smtp-"));
+          const file = path.join(tmp, "incoming.eml");
+          let bytes = 0, reserved = 0;
+          const budget = new Transform({ transform(chunk, _encoding, callback) {
+            try {
+              bytes += chunk.length;
+              if (bytes > config.maxMessageBytes) throw Object.assign(new Error("Bericht te groot"), { responseCode: 552 });
+              if (bytes > reserved) { reserved = Math.min(config.maxMessageBytes, bytes + 1024 ** 2); for (const release of releases) release.resize(reserved); }
+              callback(null, chunk);
+            } catch (e) { callback(e as Error); }
+          } });
+          await pipeline(stream, budget, fs.createWriteStream(file, { mode: 0o600 }));
+          if (stream.sizeExceeded) throw Object.assign(new Error("Bericht te groot"), { responseCode: 552 });
+          const clean = (s: string) => String(s ?? "").replace(/[\r\n]/g, "");
+          const header = `Received: from ${clean(session.clientHostname)} ([${clean(session.remoteAddress)}]) by ${config.hostname}; ${new Date().toUTCString()}\r\n`;
           // De ontvangers (envelop) gaan mee, zodat elke gebruiker zijn eigen kopie krijgt; ook via de secundaire MX.
-          const raw = withEnvelope(Buffer.concat([Buffer.from(header), ...chunks]), session.envelope.rcptTo.map((r) => r.address));
+          const raw = withEnvelope(Buffer.concat([Buffer.from(header), fs.readFileSync(file)]), session.envelope.rcptTo.map((r) => r.address));
           if (runtime.enabled && !runtime.isLeader()) {
             // Secundaire MX: veilig op schijf, wordt doorgegeven aan de leider.
-            runtime.spool(raw);
+            if (!(await runtime.spool(raw))) throw new Error("Wachten op de primaire MX");
             return cb();
           }
           try {
-            await deliverInbound(raw);
-            if (runtime.enabled) await runtime.waitDurable();
+            await deliverInbound(raw, { ip: session.remoteAddress, helo: session.clientHostname, sender: session.envelope.mailFrom && session.envelope.mailFrom.address || "", recipients: session.envelope.rcptTo.map((r) => r.address) });
+            if (runtime.enabled && !(await runtime.waitDurable())) throw new Error("Bericht nog niet duurzaam bevestigd");
           } catch (e) {
             if (!runtime.enabled || !isNotLeader(e)) throw e;
-            runtime.spool(raw);
+            if (!(await runtime.spool(raw))) throw new Error("Wachten op de primaire MX");
           }
           cb();
         } catch (e) {
           console.error("Opslaan inkomende mail mislukt:", e);
           const err = new Error("Tijdelijke fout, probeer later") as Error & { responseCode: number };
-          err.responseCode = 451;
+          err.responseCode = (e as { responseCode?: number }).responseCode === 552 ? 552 : 451;
+          if (err.responseCode === 552) err.message = "Bericht te groot";
+          stream.resume();
           cb(err);
+        } finally {
+          for (const release of releases) release();
+          if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
+          receiving--;
         }
-      });
+      })();
     },
   });
 

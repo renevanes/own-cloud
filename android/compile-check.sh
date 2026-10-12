@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Controleert zonder Android-bouwgereedschap of de app-code compileert: javac tegen de API-stubs van Android 34
-# (android.jar uit het SDK-platform) plus een stub voor LambdaMetafactory (in een echte build herschrijft D8 lambda's).
+# (android.jar uit het SDK-platform) en de Java 11-standaardbibliotheek.
 #   ANDROID_JAR=/pad/naar/android.jar android/compile-check.sh
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-JAR="${ANDROID_JAR:-/home/claude/tools/android-34.jar}"
-LMF="${LMF_DIR:-/home/claude/tools/lmf}"
+JAR="${ANDROID_JAR:-${ANDROID_HOME:-$HOME/Android/Sdk}/platforms/android-34/android.jar}"
 OUT="$HERE/build/compile-check"
 rm -rf "$OUT"; mkdir -p "$OUT/stubs-src/nl/eigencloud/app" "$OUT/classes"
 cat > "$OUT/stubs-src/nl/eigencloud/app/R.java" <<'J'
@@ -17,7 +16,7 @@ package nl.eigencloud.app;
 public final class BuildConfig { public static final String VERSION_NAME = "0.0.0"; public static final int VERSION_CODE = 1; public static final String UPDATE_REPO = "x/y"; public static final String UPDATE_IMAGE = "x/y-app"; public static final String DIENST_URL = ""; }
 J
 set +e
-javac -Xlint:all -Xlint:-options -Xlint:-deprecation -Werror -source 8 -target 8 -bootclasspath "$JAR:$LMF" -encoding UTF-8 -d "$OUT/classes" \
+javac -Xlint:all -Xlint:-options -Xlint:-deprecation -Werror --release 11 -classpath "$JAR" -encoding UTF-8 -d "$OUT/classes" \
   $(find "$HERE/core/src/main/java" "$HERE/app/src/main/java" "$OUT/stubs-src" -name '*.java') > "$OUT/javac.log" 2>&1
 rc=$?
 set -e

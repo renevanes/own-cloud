@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { db } from "../db.js";
 import { requireAuth, uid } from "../auth.js";
 import { sendMail } from "./send.js";
+import { enqueueMail, processOutbox } from "./outbox.js";
 import { ensureLocal } from "../blobs.js";
 import { isNotLeader } from "../cluster/fence.js";
 
@@ -28,7 +29,7 @@ export function mailRoutes(app: FastifyInstance) {
     };
   });
 
-  app.get<{ Querystring: { folder?: string; q?: string; label?: string; starred?: string; before?: string; limit?: string } }>("/api/mail/messages", async (req) => {
+  app.get<{ Querystring: { folder?: string; q?: string; label?: string; starred?: string; before?: string; beforeId?: string; limit?: string } }>("/api/mail/messages", async (req) => {
     const { folder, q, label, starred, before } = req.query;
     const limit = Math.min(Number(req.query.limit ?? 50), 200);
     const where: string[] = ["user_id = ?"];
@@ -42,8 +43,8 @@ export function mailRoutes(app: FastifyInstance) {
     }
     if (label) { where.push("EXISTS (SELECT 1 FROM json_each(messages.labels) WHERE value = ?)"); params.push(label); }
     if (starred) where.push("is_starred = 1");
-    if (before) { where.push("date < ?"); params.push(Number(before)); }
-    const sql = `SELECT ${LIST_COLS} FROM messages WHERE ${where.join(" AND ")} ORDER BY date DESC LIMIT ?`;
+    if (before) { where.push("(date < ? OR (date = ? AND id < ?))"); params.push(Number(before), Number(before), Number(req.query.beforeId ?? 0)); }
+    const sql = `SELECT ${LIST_COLS} FROM messages WHERE ${where.join(" AND ")} ORDER BY date DESC, id DESC LIMIT ?`;
     return db.prepare(sql).all(...params, limit);
   });
 
@@ -56,6 +57,7 @@ export function mailRoutes(app: FastifyInstance) {
     const thread = db.prepare(`SELECT ${LIST_COLS} FROM messages WHERE thread_key = ? AND user_id = ? ORDER BY date`).all(msg.thread_key, me);
     delete msg.raw_path;
     delete msg.user_id;
+    msg.security = db.prepare("SELECT status,score,action,details FROM mail_security WHERE message_id=?").get(msg.id) ?? null;
     return { ...msg, is_read: 1, attachments, thread };
   });
 
@@ -114,13 +116,15 @@ export function mailRoutes(app: FastifyInstance) {
       if (orig?.message_id) { inReplyTo = orig.message_id; references = [orig.message_id]; }
     }
     try {
-      const id = await sendMail({
+      const outbox = await enqueueMail({
         to, cc: b.cc, bcc: b.bcc, subject: b.subject ?? "", text: b.text ?? "", html: b.html, inReplyTo, references,
         attachments: b.attachments?.map((a) => ({ filename: a.filename, content: Buffer.from(a.base64, "base64"), contentType: a.contentType })),
-      }, uid(req));
-      return { ok: true, id };
+      }, uid(req), typeof req.headers["idempotency-key"] === "string" ? req.headers["idempotency-key"] : undefined);
+      await processOutbox(outbox.id);
+      const current = db.prepare("SELECT status,sent_id FROM mail_outbox WHERE id=?").get(outbox.id) as { status: string; sent_id: number | null };
+      return { ok: true, id: current.sent_id, outboxId: outbox.id, status: current.status, queued: current.status !== "sent" };
     } catch (e) {
-      return reply.code(502).send({ error: (e as Error).message });
+      return reply.code((e as { statusCode?: number }).statusCode ?? 502).send({ error: (e as Error).message });
     }
   });
 }

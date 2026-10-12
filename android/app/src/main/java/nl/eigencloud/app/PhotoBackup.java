@@ -38,8 +38,14 @@ final class PhotoBackup {
             MediaStore.MediaColumns.DATE_ADDED, MediaStore.MediaColumns.SIZE, MediaStore.MediaColumns.DATE_MODIFIED, "datetaken"};
 
     static boolean permitted(Context c) {
-        if (Build.VERSION.SDK_INT >= 33) return c.checkSelfPermission("android.permission.READ_MEDIA_IMAGES") == PackageManager.PERMISSION_GRANTED;
+        if (Build.VERSION.SDK_INT >= 34 && c.checkSelfPermission("android.permission.READ_MEDIA_VISUAL_USER_SELECTED") == PackageManager.PERMISSION_GRANTED) return true;
+        if (Build.VERSION.SDK_INT >= 33) return c.checkSelfPermission("android.permission.READ_MEDIA_IMAGES") == PackageManager.PERMISSION_GRANTED || c.checkSelfPermission("android.permission.READ_MEDIA_VIDEO") == PackageManager.PERMISSION_GRANTED;
         return c.checkSelfPermission("android.permission.READ_EXTERNAL_STORAGE") == PackageManager.PERMISSION_GRANTED;
+    }
+    private static boolean canReadKind(Context c, String kind) {
+        if (Build.VERSION.SDK_INT >= 34 && c.checkSelfPermission("android.permission.READ_MEDIA_VISUAL_USER_SELECTED") == PackageManager.PERMISSION_GRANTED) return true;
+        if (Build.VERSION.SDK_INT >= 33) return c.checkSelfPermission("images".equals(kind) ? "android.permission.READ_MEDIA_IMAGES" : "android.permission.READ_MEDIA_VIDEO") == PackageManager.PERMISSION_GRANTED;
+        return permitted(c);
     }
 
     /** Waarom er nu geen back-up gemaakt wordt (null = mag). */
@@ -77,6 +83,7 @@ final class PhotoBackup {
         if (!permitted(c)) return -1;
         int n = 0;
         for (String kind : kinds(c)) {
+            if (!canReadKind(c, kind)) continue;
             try (Cursor cur = query(c.getContentResolver(), kind, Prefs.num(c, "mark." + kind + ".added"), Prefs.num(c, "mark." + kind + ".id"))) {
                 if (cur != null) n += cur.getCount();
             } catch (RuntimeException e) {
@@ -102,6 +109,7 @@ final class PhotoBackup {
         ContentResolver cr = c.getContentResolver();
         try {
             for (String kind : kinds(c)) {
+                if (!canReadKind(c, kind)) continue;
                 String markAdded = "mark." + kind + ".added", markId = "mark." + kind + ".id";
                 try (Cursor cur = query(cr, kind, Prefs.num(c, markAdded), Prefs.num(c, markId))) {
                     if (cur == null) continue;

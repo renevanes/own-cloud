@@ -16,6 +16,7 @@
       <p class="muted">Mail · Agenda · Foto's</p>
       <input type="text" id="loginUser" placeholder="E-mailadres" autocomplete="username" autocapitalize="none" spellcheck="false" hidden>
       <input type="password" id="password" placeholder="Wachtwoord" autocomplete="current-password" required>
+      <label id="loginFactor" hidden>Tweede inlogcode of herstelcode<input id="loginCode" autocomplete="one-time-code" maxlength="100"></label>
       <button class="primary">Inloggen</button>
       <p id="loginError" class="error"></p>
     </form>
@@ -40,12 +41,21 @@
         <button data-tab="mail" class="active">✉️ <span>Mail</span></button>
         <button data-tab="agenda">📅 <span>Agenda</span></button>
         <button data-tab="fotos">🖼️ <span>Foto's</span></button>
+        <button data-tab="contacten">👤 <span>Contacten</span></button>
         <button data-tab="nodes" hidden>🐌 <span>Waar draai ik</span></button>
         <button data-tab="instellingen">⚙️ <span>Instellingen</span><i class="health-dot" id="healthDot" hidden></i></button>
       </nav>
       <button id="logout" class="ghost" title="Uitloggen">⎋</button>
     </header>
     <div id="healthBanner" class="health-banner" hidden></div>
+    <p id="offlineBanner" class="health-banner" role="status" hidden></p>
+    <main id="tab-contacten" class="tab contacts" hidden>
+      <h2>Contacten</h2><p class="muted">Je eigen adresboek. Gebruik CardDAV bij Beveiliging om het met je telefoon of computer te synchroniseren.</p>
+      <form id="contactForm" class="form narrow-form"><input name="id" type="hidden"><input name="revision" type="hidden">
+        <label>Naam<input name="name" required maxlength="1000"></label><label>E-mailadres<input name="email" type="email" maxlength="320"></label><label>Telefoon<input name="phone" type="tel" maxlength="100"></label>
+        <div class="row"><button class="primary">Contact opslaan</button><button type="reset" class="ghost">Nieuw contact</button><a href="/api/contacts/export.vcf" class="btn ghost">Exporteren</a></div><p id="contactMessage" role="status"></p>
+      </form><ul id="contactList" class="feature-list"></ul>
+    </main>
 
     <!-- MAIL -->
     <main id="tab-mail" class="tab">
@@ -334,6 +344,7 @@
         <form id="pwForm" class="form narrow-form">
           <label>Huidig wachtwoord<input name="current" type="password" autocomplete="current-password" required></label>
           <label>Nieuw wachtwoord<input name="next" type="password" autocomplete="new-password" minlength="10" required><small>Minstens 10 tekens.</small></label>
+          <label>Tweede inlogcode of herstelcode (als ingesteld)<input name="code" autocomplete="one-time-code" maxlength="100"></label>
           <p class="form-msg" id="pwMsg" role="status"></p>
           <div class="row-actions"><button class="primary">Wachtwoord wijzigen</button></div>
         </form>
@@ -372,7 +383,7 @@
       <input type="file" name="files" multiple>
       <input type="hidden" name="replyToId">
       <p class="error" id="composeError"></p>
-      <div class="row"><button value="cancel" formnovalidate class="ghost">Annuleren</button><button id="sendBtn" class="primary" value="send">Versturen</button></div>
+      <div class="row"><button value="cancel" formnovalidate class="ghost">Sluiten</button><button type="button" id="saveDraft" class="ghost">Concept bewaren</button><button id="sendBtn" class="primary" value="send">Versturen</button></div>
     </form>
   </dialog>
 
@@ -393,6 +404,7 @@
       </div>
       <label>Herinnering<select name="reminder_min"><option value="">Geen</option><option value="10">10 min vooraf</option><option value="30">30 min vooraf</option><option value="60">1 uur vooraf</option><option value="1440">1 dag vooraf</option></select></label>
       <input type="hidden" name="id"><input type="hidden" name="occurrence">
+      <p id="eventError" class="error" role="status"></p>
       <div class="row">
         <button value="delete" id="deleteEvent" class="ghost danger" formnovalidate hidden>Verwijderen</button>
         <span class="grow"></span>
@@ -408,6 +420,7 @@
       <button id="pvNext" class="ghost">›</button><button id="pvClose" class="ghost">✕</button>
     </div>
     <div id="pvMedia" class="viewer-media"></div>
+    <div id="photoAnnotations" class="photo-annotations"></div>
   </dialog>
 
   <script src="app.js" type="module"></script>
