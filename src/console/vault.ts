@@ -13,6 +13,10 @@ export interface ConsoleState {
   step: string;
   done: boolean;
   keyConfirmed: boolean;
+  /** Welke groep (1–8) de controle van de herstelsleutel vraagt; gekozen door de server, weg na de controle. */
+  keyAsk?: number;
+  /** "Later controleren" gekozen: de stappen gaan door, het overzicht herinnert eraan. Weg na de controle. */
+  keyCheckLater?: boolean;
   /**
    * Kluis alleen voor een Eigen Cloud Dienst (aanbieder worden zonder eigen cloud): geen domein, opslag of servers van een
    * cloud. Later kan er een cloud bij (POST /api/setup/cloud); dan gaat deze vlag weg.

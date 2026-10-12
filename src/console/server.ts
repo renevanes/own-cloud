@@ -119,6 +119,7 @@ function sanitized(c: AdminConfig) {
     maxUsers: c.console.maxUsers ?? 0,
     overstap: c.console.overstap ? { naar: c.console.overstap.naar, stap: c.console.overstap.stap } : null,
     alleenDienst: !!c.console.alleenDienst,
+    keyCheck: c.console.keyConfirmed ? "ok" : c.console.keyCheckLater ? "later" : "open",
   };
 }
 
@@ -420,6 +421,27 @@ function dienstConfig(): AdminConfig {
   };
 }
 
+// ───────── Herstelsleutel ─────────
+
+const keyGroups = (c: AdminConfig) => c.masterKey!.match(/.{8}/g)!;
+const keyCheckCode = (c: AdminConfig) => crypto.createHash("sha256").update(c.masterKey!).digest("hex").slice(0, 6);
+/** Een getypte groep: spaties weg, kleine letters, o → 0 en i/l → 1 (die komen in een sleutel niet voor). */
+const normGroup = (x: unknown) => String(x ?? "").replace(/\s/g, "").toLowerCase().replace(/o/g, "0").replace(/[il]/g, "1");
+/** Een willekeurige groep (1–8), anders dan `not`. */
+function pickKeyGroup(not?: number) {
+  let n: number;
+  do n = crypto.randomInt(1, 9); while (n === not);
+  return n;
+}
+/** De groep die we vragen; blijft hetzelfde (ook na herladen) tot de controle lukt of je teruggaat naar de sleutel. */
+function keyAsk(c: AdminConfig) {
+  const a = c.console.keyAsk;
+  if (typeof a === "number" && a >= 1 && a <= 8) return a;
+  c.console.keyAsk = pickKeyGroup();
+  save();
+  return c.console.keyAsk;
+}
+
 // ───────── Server ─────────
 
 export async function buildConsole() {
@@ -566,14 +588,41 @@ export async function buildConsole() {
     s.post<{ Body: { step: string } }>("/api/step", async (req) => { cfg().console.step = req.body.step; save(); return { ok: true }; });
 
     // ── Sleutel ──
-    s.get("/api/key", async () => ({ groups: cfg().masterKey!.match(/.{8}/g), check: crypto.createHash("sha256").update(cfg().masterKey!).digest("hex").slice(0, 6), confirmed: cfg().console.keyConfirmed }));
-    s.post<{ Body: { g3: string; g7: string } }>("/api/key/confirm", async (req, reply) => {
-      const g = cfg().masterKey!.match(/.{8}/g)!;
-      const norm = (x: string) => (x ?? "").replace(/\s/g, "").toLowerCase();
-      if (norm(req.body.g3) !== g[2] || norm(req.body.g7) !== g[6]) return reply.code(400).send({ error: "Dat klopt niet met je sleutel. Kijk nog eens naar groep 3 en 7." });
-      cfg().console.keyConfirmed = true;
+    // Eerst de sleutel tonen (groups), dan zonder sleutel in beeld één groep vragen (ask, 1–8, door de server gekozen en bewaard).
+    s.get("/api/key", async () => {
+      const c = cfg();
+      return { groups: keyGroups(c), check: keyCheckCode(c), confirmed: c.console.keyConfirmed, later: !c.console.keyConfirmed && !!c.console.keyCheckLater, ask: keyAsk(c) };
+    });
+    s.post<{ Body: { group?: number; value?: string; g3?: string; g7?: string } }>("/api/key/confirm", async (req, reply) => {
+      const c = cfg(), b = req.body ?? {};
+      const g = keyGroups(c);
+      if (b.value === undefined && (b.g3 !== undefined || b.g7 !== undefined)) {
+        // Oude vorm: groep 3 en 7.
+        if (normGroup(b.g3) !== g[2] || normGroup(b.g7) !== g[6]) return reply.code(400).send({ error: "Dat klopt niet met je sleutel. Kijk nog eens naar groep 3 en 7." });
+      } else {
+        const ask = keyAsk(c);
+        if (b.group !== undefined && Number(b.group) !== ask) return reply.code(409).send({ error: `Er wordt nu naar groep ${ask} gevraagd`, ask });
+        if (normGroup(b.value) !== g[ask - 1]) return reply.code(400).send({ error: `Dat is niet groep ${ask}. Kijk nog eens op je herstelblad.`, ask });
+      }
+      c.console.keyConfirmed = true;
+      delete c.console.keyCheckLater;
+      delete c.console.keyAsk;
       save();
       return { ok: true };
+    });
+    // Terug naar de sleutel: daarna wordt een andere groep gevraagd.
+    s.post("/api/key/new-group", async () => {
+      const c = cfg();
+      c.console.keyAsk = pickKeyGroup(keyAsk(c));
+      save();
+      return { ask: c.console.keyAsk };
+    });
+    // Later controleren: de stappen gaan door; het overzicht toont een herinnering.
+    s.post("/api/key/later", async () => {
+      const c = cfg();
+      if (!c.console.keyConfirmed) c.console.keyCheckLater = true;
+      save();
+      return { ok: true, later: !c.console.keyConfirmed };
     });
     s.get("/api/recovery-sheet", async (_req, reply) => {
       const c = cfg();
@@ -895,7 +944,7 @@ export async function buildConsole() {
       let n: AdminConfig;
       try { n = cloudConfig(req.body ?? ({} as CloudInput)); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
       Object.assign(c, { cluster: n.cluster, domain: n.domain, appEnv: n.appEnv });
-      Object.assign(c.console, { appPasswordHash: n.console.appPasswordHash, alertEmail: n.console.alertEmail, domainMode: n.console.domainMode, step: c.console.keyConfirmed ? "regelen" : "sleutel" });
+      Object.assign(c.console, { appPasswordHash: n.console.appPasswordHash, alertEmail: n.console.alertEmail, domainMode: n.console.domainMode, step: c.console.keyConfirmed || c.console.keyCheckLater ? "regelen" : "sleutel" });
       delete c.console.alleenDienst;
       save();
       return { ok: true, step: c.console.step };
@@ -1084,7 +1133,7 @@ async function delegated(domain: string, ns: string[]) {
 function checklist(c: AdminConfig) {
   const countries = new Set(c.stores.map((s) => s.country));
   return [
-    { id: "sleutel", label: "Herstelsleutel bewaard", ok: c.console.keyConfirmed, required: true },
+    { id: "sleutel", label: "Herstelsleutel bewaard", ok: c.console.keyConfirmed, required: !c.console.keyCheckLater || !!c.console.keyConfirmed },
     { id: "opslag", label: "Opslag gekoppeld", ok: c.stores.some((s) => s.purpose === "replica"), required: true },
     { id: "opslag-spreiding", label: "Back-up op een tweede plek, in een ander land", ok: c.stores.length >= 2 && countries.size >= 2 && c.stores.some((s) => s.purpose === "backup"), required: false },
     { id: "servers", label: "Serverplekken gekozen", ok: c.policy.placement.length > 0, required: true },

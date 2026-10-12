@@ -115,6 +115,8 @@ async function render() {
   config = await api("/api/config");
   STEPS = stepsFor(config);
   void updateDienstLink();
+  // De herstelsleutel bekijken of controleren (ook vanaf de herinnering op het overzicht).
+  if (hash === "sleutelcontrole" || hash === "herstelsleutel") return stepKey(!!config.alleenDienst, hash === "sleutelcontrole" ? "check" : "show");
   if (config.alleenDienst) {
     // Kluis alleen voor een Dienst: eerst de herstelsleutel, daarna "Je dienst". "#jij": toch een eigen cloud erbij.
     if (state.step === "sleutel") return stepKey(true);
@@ -516,36 +518,95 @@ function renderStep(id) {
   fn();
 }
 
-/** De herstelsleutel opschrijven en controleren. `dienst`: kluis alleen voor een Dienst (daarna naar "Je dienst"). */
-async function stepKey(dienst = false) {
+/**
+ * De herstelsleutel: eerst opschrijven of afdrukken (`mode` "show"), dan zonder sleutel in beeld één groep invullen ("check").
+ * `dienst`: kluis alleen voor een Dienst (daarna naar "Je dienst").
+ */
+async function stepKey(dienst = false, mode = "show") {
   const k = await api("/api/key");
-  const inner = `
+  const wrap = (inner) => { root.innerHTML = dienst || state.done ? `<section class="center keypage">${inner}</section>` : wizardShell("sleutel", inner); };
+  if (mode === "check") return keyCheck(dienst, k, wrap);
+  wrap(`
     <h1>Je herstelsleutel</h1>
     <p class="lead">${dienst ? "Hiermee haal je het beheer van je Dienst terug op een ander toestel. De console bewaart een versleutelde kopie bij de back-ups van je Dienst; alleen deze sleutel opent hem." : "Alles wat je cloud opslaat, wordt hiermee versleuteld. Zonder deze sleutel kan niemand je back-ups lezen — ook jij niet."}</p>
     <div class="key">${k.groups.map((g, i) => `<div>${g}<small>groep ${i + 1}</small></div>`).join("")}</div>
     <p class="muted">Controlegetal ${k.check}</p>
-    <div class="note">Schrijf hem op of druk het herstelblad af, en bewaar het op twee plekken: thuis bij je belangrijke papieren en bij iemand die je vertrouwt. Niet als foto op je telefoon.</div>
-    <p><a class="btn" href="/api/recovery-sheet" target="_blank" rel="noopener">Herstelblad afdrukken</a></p>
-    <h2>Even controleren</h2>
-    <form class="fields" id="f">
-      <div class="row"><label>Groep 3<input name="g3" autocomplete="off" required></label><label>Groep 7<input name="g7" autocomplete="off" required></label></div>
-      <p class="msg"></p>
-      <div class="next"><button class="btn primary">${k.confirmed ? "Verder" : "Klopt, verder"}</button></div>
-    </form>`;
-  root.innerHTML = dienst ? `<section class="center keypage">${inner}</section>` : wizardShell("sleutel", inner);
-  const f = $("#f");
-  if (k.confirmed) { f.g3.value = k.groups[2]; f.g7.value = k.groups[6]; }
-  f.onsubmit = async (e) => {
-    e.preventDefault();
-    try {
-      await api("/api/key/confirm", { method: "POST", body: { g3: f.g3.value, g7: f.g7.value } });
-      if (!dienst) return go("regelen");
-      await api("/api/step", { method: "POST", body: { step: "dienst" } });
-      state.step = "dienst";
-      goHash("aanbieder");
-    } catch (err) { formMsg(f, err.message); }
-  };
+    <div class="note">Druk het herstelblad af of schrijf de sleutel over, en bewaar het op twee plekken: thuis bij je belangrijke papieren en bij iemand die je vertrouwt. Niet als foto op je telefoon.</div>
+    <p class="muted"><small>Geen printer bij de hand? Kies bij afdrukken voor "Opslaan als PDF" en druk hem later af.</small></p>
+    <div class="next"><a class="btn primary" href="/api/recovery-sheet" target="_blank" rel="noopener">Herstelblad afdrukken</a><button class="btn" id="kNext">${k.confirmed ? "Verder" : "Ik heb hem opgeschreven"}</button></div>`);
+  $("#kNext").onclick = () => (k.confirmed ? afterKey(dienst) : goHash("sleutelcontrole"));
 }
+
+/** Even controleren: de sleutel is niet in beeld; de server kiest welke groep we vragen. */
+function keyCheck(dienst, k, wrap) {
+  const ask = k.ask;
+  wrap(`
+    <h1>Even controleren</h1>
+    <p class="lead">Pak je herstelblad of je briefje erbij. Wat staat er bij groep ${ask}?</p>
+    <form class="fields" id="f" novalidate>
+      <label>Groep ${ask}<input name="v" class="keyinput" maxlength="8" inputmode="text" enterkeyhint="done" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" aria-describedby="kmsg"><small>8 tekens: cijfers en de letters a tot en met f.</small></label>
+      <p class="msg" id="kmsg" role="status"></p>
+      <p id="kBackRow" hidden><button type="button" class="link" id="kBack">Sleutel nog eens bekijken</button></p>
+      <div class="next"><button class="btn primary">Controleren</button>${k.confirmed ? "" : `<button type="button" class="link quiet" id="kLater">Later controleren</button>`}</div>
+    </form>`);
+  const f = $("#f"), inp = f.v, msg = $("#kmsg");
+  const clean = (x) => x.replace(/\s/g, "").toLowerCase().replace(/o/g, "0").replace(/[il]/g, "1").slice(0, 8);
+  let busyCheck = false;
+  const check = async () => {
+    if (busyCheck) return;
+    if (clean(inp.value).length < 8) { msg.textContent = "Vul alle 8 tekens van de groep in."; msg.className = "msg err"; inp.focus(); return; }
+    busyCheck = true;
+    try {
+      await api("/api/key/confirm", { method: "POST", body: { group: ask, value: inp.value } });
+      msg.textContent = "Klopt. Je herstelsleutel is goed bewaard.";
+      msg.className = "msg ok";
+      $("#kBackRow").hidden = true;
+      inp.disabled = true;
+      $(".next", f).style.visibility = "hidden";
+      setTimeout(() => afterKey(dienst), 900);
+    } catch (err) {
+      busyCheck = false;
+      msg.textContent = err.message;
+      msg.className = "msg err";
+      $("#kBackRow").hidden = false;
+      inp.select();
+    }
+  };
+  inp.addEventListener("paste", (e) => {
+    e.preventDefault();
+    inp.value = clean((e.clipboardData ?? window.clipboardData).getData("text"));
+    inp.dispatchEvent(new Event("input"));
+  });
+  inp.addEventListener("input", () => {
+    const v = clean(inp.value);
+    if (v !== inp.value) inp.value = v;
+    if (v.length < 8 && msg.className.includes("err")) { msg.textContent = ""; msg.className = "msg"; }
+    if (v.length === 8) check();
+  });
+  f.onsubmit = (e) => { e.preventDefault(); check(); };
+  $("#kBack").onclick = async () => { await api("/api/key/new-group", { method: "POST" }).catch(() => {}); goHash("herstelsleutel"); };
+  $("#kLater")?.addEventListener("click", async (e) => {
+    try { await busy(e.target, () => api("/api/key/later", { method: "POST" })); config = await api("/api/config"); afterKey(dienst); }
+    catch (err) { msg.textContent = err.message; msg.className = "msg err"; }
+  });
+  inp.focus();
+}
+
+/** Na de herstelsleutel verder: in de stappen naar "Waar draait je cloud?", bij een Dienst-kluis naar "Je dienst", anders terug naar het overzicht. */
+async function afterKey(dienst) {
+  if (dienst) {
+    if (state.step === "sleutel") { await api("/api/step", { method: "POST", body: { step: "dienst" } }); state.step = "dienst"; }
+    return goHash("aanbieder");
+  }
+  if (state.done) return goHash("");
+  if (state.step === "sleutel") return go("regelen");
+  goHash(state.step);
+}
+
+/** Herinnering op het overzicht en bij "Je dienst" zolang de herstelsleutel niet gecontroleerd is. */
+const keyReminder = () => config && config.keyCheck && config.keyCheck !== "ok" ? `<div class="panel keyremind">
+    <div><b>Herstelsleutel nog niet gecontroleerd</b><br><span class="muted">Pak je herstelblad erbij en vul één groep in. Zo weet je zeker dat je ${config.alleenDienst ? "het beheer van je Dienst" : "je cloud"} altijd kunt terughalen.</span></div>
+    <div><a class="btn" href="#sleutelcontrole">Nu controleren</a></div></div>` : "";
 
 // ═════════ Zelf of via de Eigen Cloud Dienst ═════════
 
@@ -1226,7 +1287,7 @@ async function stepLaunch() {
   root.innerHTML = wizardShell("starten", `
     <h1>Klaar om te starten</h1>
     <p class="lead">Eén server wordt nu aangemaakt. Zodra die draait, maakt je cloud zelf de tweede server en de witness erbij${p ? `, volgens "${esc(p.title)}"` : ""}.</p>
-    <ul class="results">${list.map((x) => `<li class="${x.ok ? "" : x.required ? "bad" : "meh"}">${esc(x.label)}${!x.ok && !x.required ? "<small>Kan later ook, via Instellingen in je cloud.</small>" : ""}</li>`).join("")}</ul>
+    <ul class="results">${list.map((x) => `<li class="${x.ok ? "" : x.required ? "bad" : "meh"}">${esc(x.label)}${!x.ok && !x.required ? `<small>${x.id === "sleutel" ? "Kan later; op het overzicht staat een herinnering." : "Kan later ook, via Instellingen in je cloud."}</small>` : ""}</li>`).join("")}</ul>
     ${p ? `<div class="panel"><div style="display:grid;grid-template-columns:140px 1fr;gap:16px;align-items:center"><div>${europeMap(p.placement.map((x, i) => ({ id: String(i), kind: x.kind, provider: x.provider, region: x.region, status: "ready", isLeader: i === 0 })))}</div>
       <div><b>${esc(config.domain)}</b><br><span class="muted">${p.placement.map((x) => `${FLAGS[x.country] ?? ""} ${x.kind === "witness" ? "witness" : "data"} bij ${x.provider}`).join("<br>")}</span><br><b>${p.monthly != null ? eur(p.monthly) + " per maand" : ""}</b></div></div></div>` : ""}
     <p class="msg" id="lmsg"></p>
@@ -1837,7 +1898,7 @@ async function renderHub(hash, msg) {
     root.innerHTML = `<div class="hubwrap setup"><header class="hubhead"><div><h1>${exists ? "Je dienst wijzigen" : a.started ? "Je dienst opzetten" : "Aanbieder worden"}</h1>
         ${a.started ? "" : `<p class="lead">Je eigen Eigen Cloud Dienst, met je eigen naam en prijzen. Een eigen cloud is niet nodig.</p>`}</div>
         <div class="actions" style="margin:0">${exists ? `<button class="btn" id="hBack">Terug naar je dienst</button>` : ""}${back}</div></header>
-      <div id="aanbieder"></div>${config?.alleenDienst && !a.started ? cloudLater() : ""}</div>`;
+      ${config?.alleenDienst ? keyReminder() : ""}<div id="aanbieder"></div>${config?.alleenDienst && !a.started ? cloudLater() : ""}</div>`;
     $("#hBack")?.addEventListener("click", () => aStep("klaar").catch(() => {}));
     return renderAanbieder(msg);
   }
@@ -1912,6 +1973,7 @@ const tile = (x) => x.waar === "dienst"
 
 function hubOverzicht(pane, a) {
   pane.innerHTML = `${sectionHead(a, "overzicht")}
+    ${keyReminder()}
     <div id="aStatus">${a.lastHealth ? statusList(a, a.lastHealth) : `<p class="muted" style="margin:0">Status ophalen…</p>`}</div>
     <div class="cards" id="hCards">${cards(null)}</div>
     <h2 class="hubtitle small">Alles voor je dienst</h2>
@@ -2225,7 +2287,7 @@ async function renderKosten(msg) {
 }
 
 async function renderDash() {
-  root.innerHTML = `<div class="dash"><div class="mapwrap" id="map"></div><section><div id="side"><p class="muted">Status ophalen…</p></div>${config?.dienst?.orderId ? "" : `<div id="kosten"></div>`}${keysSection()}${config?.dienst?.orderId ? `<div id="abo"></div>` : ""}<div id="aanbiederTeaser"></div></section></div>`;
+  root.innerHTML = `<div class="dash"><div class="mapwrap" id="map"></div><section>${keyReminder()}<div id="side"><p class="muted">Status ophalen…</p></div>${config?.dienst?.orderId ? "" : `<div id="kosten"></div>`}${keysSection()}${config?.dienst?.orderId ? `<div id="abo"></div>` : ""}<div id="aanbiederTeaser"></div></section></div>`;
   if (config?.dienst?.orderId) renderAbo(); else renderKosten();
   renderAanbiederTeaser();
   const draw = async () => {

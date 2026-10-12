@@ -1,5 +1,14 @@
 [
   {
+    "version": "1.15",
+    "date": "2026-10-12",
+    "changes": [
+      "Herstelsleutel controleren is eenvoudiger: eerst opschrijven of afdrukken, daarna typ je één groep over zonder dat de sleutel in beeld staat",
+      "Typen gaat makkelijker: hoofdletters, spaties en verwisselde O en 0 maken niet uit, en hij controleert vanzelf",
+      "Geen tijd? Kies 'Later controleren'; je krijgt dan een herinnering op het overzicht"
+    ]
+  },
+  {
     "version": "1.14",
     "date": "2026-10-12",
     "changes": [

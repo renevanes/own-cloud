@@ -77,7 +77,7 @@ public final class Console {
         con.put("appPasswordHash", Json.path(n, "console", "appPasswordHash"));
         con.put("alertEmail", Json.path(n, "console", "alertEmail"));
         con.put("domainMode", mode);
-        con.put("step", Json.truthy(con.get("keyConfirmed")) ? "regelen" : "sleutel");
+        con.put("step", Json.truthy(con.get("keyConfirmed")) || Json.truthy(con.get("keyCheckLater")) ? "regelen" : "sleutel");
         con.remove("alleenDienst");
         return Json.str(con, "step");
     }
@@ -121,10 +121,64 @@ public final class Console {
     public static void confirmKey(Map<String, Object> c, String g3, String g7) {
         List<String> g = keyGroups(c);
         if (!norm(g3).equals(g.get(2)) || !norm(g7).equals(g.get(6))) throw new IllegalArgumentException("Dat klopt niet met je sleutel. Kijk nog eens naar groep 3 en 7.");
-        console(c).put("keyConfirmed", true);
+        keyConfirmed(c);
     }
 
     private static String norm(String x) { return (x == null ? "" : x).replaceAll("\\s", "").toLowerCase(java.util.Locale.ROOT); }
+
+    private static final java.security.SecureRandom RANDOM = new java.security.SecureRandom();
+
+    /** A typed group: no spaces, lowercase, o → 0 and i/l → 1 (normGroup in server.ts). */
+    public static String normGroup(String x) { return norm(x).replace('o', '0').replace('i', '1').replace('l', '1'); }
+
+    /** A random group (1–8) other than {@code not} (pickKeyGroup in server.ts). */
+    public static long pickKeyGroup(Long not) {
+        long n;
+        do n = RANDOM.nextInt(8) + 1; while (not != null && n == not);
+        return n;
+    }
+
+    /** The group the key check asks (1–8); chosen once and kept until the check succeeds or a new one is asked. Returns whether it was newly set via {@code changed[0]}. */
+    public static long keyAsk(Map<String, Object> c, boolean[] changed) {
+        Object a = console(c).get("keyAsk");
+        if (a instanceof Number) {
+            double d = ((Number) a).doubleValue();
+            if (d >= 1 && d <= 8 && d == Math.floor(d)) return (long) d;
+        }
+        long n = pickKeyGroup(null);
+        console(c).put("keyAsk", n);
+        if (changed != null) changed[0] = true;
+        return n;
+    }
+
+    /** POST /api/key/new-group: ask a different group after going back to the key. */
+    public static long newKeyGroup(Map<String, Object> c) {
+        long n = pickKeyGroup(keyAsk(c, null));
+        console(c).put("keyAsk", n);
+        return n;
+    }
+
+    /** POST /api/key/later: continue without the check; returns whether the reminder is now on. */
+    public static boolean keyLater(Map<String, Object> c) {
+        Map<String, Object> con = console(c);
+        if (!Json.truthy(con.get("keyConfirmed"))) con.put("keyCheckLater", true);
+        return !Json.truthy(con.get("keyConfirmed"));
+    }
+
+    /** Marks the key as checked (clears the asked group and the reminder). */
+    public static void keyConfirmed(Map<String, Object> c) {
+        Map<String, Object> con = console(c);
+        con.put("keyConfirmed", true);
+        con.remove("keyCheckLater");
+        con.remove("keyAsk");
+    }
+
+    /** "ok", "later" or "open" (keyCheck in /api/config). */
+    public static String keyCheckState(Map<String, Object> c) {
+        Map<String, Object> con = Json.map(c, "console");
+        if (con != null && Json.truthy(con.get("keyConfirmed"))) return "ok";
+        return con != null && Json.truthy(con.get("keyCheckLater")) ? "later" : "open";
+    }
 
     private static Map<String, Object> console(Map<String, Object> c) {
         Map<String, Object> con = Json.map(c, "console");
@@ -209,7 +263,7 @@ public final class Console {
             if ("backup".equals(s.get("purpose"))) backup = true;
         }
         List<Map<String, Object>> out = new ArrayList<>();
-        out.add(Json.obj("id", "sleutel", "label", "Herstelsleutel bewaard", "ok", con.get("keyConfirmed"), "required", true));
+        out.add(Json.obj("id", "sleutel", "label", "Herstelsleutel bewaard", "ok", con.get("keyConfirmed"), "required", !Json.truthy(con.get("keyCheckLater")) || Json.truthy(con.get("keyConfirmed"))));
         out.add(Json.obj("id", "opslag", "label", "Opslag gekoppeld", "ok", replica, "required", true));
         out.add(Json.obj("id", "opslag-spreiding", "label", "Back-up op een tweede plek, in een ander land", "ok", stores.size() >= 2 && countries.size() >= 2 && backup, "required", false));
         out.add(Json.obj("id", "servers", "label", "Serverplekken gekozen", "ok", !Json.listAt(c, "policy", "placement").isEmpty(), "required", true));

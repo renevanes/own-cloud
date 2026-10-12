@@ -53,6 +53,8 @@ public class VaultTest {
             // Key confirmation and checklist
             T.eq(8, Console.keyGroups(cfg).size(), "8 key groups");
             T.throwsWith("groep 3 en 7", () -> Console.confirmKey(cfg, "x", "y"), "wrong groups refused");
+            T.eq("0a1b1c1d", Console.normGroup(" OA iB Lc ld "), "normGroup: spaces, case, o→0, i/l→1");
+            for (int i = 0; i < 50; i++) { long n = Console.pickKeyGroup(3L); T.check(n >= 1 && n <= 8 && n != 3, "pickKeyGroup"); }
             Console.confirmKey(cfg, " " + Console.keyGroups(cfg).get(2).toUpperCase() + " ", Console.keyGroups(cfg).get(6));
             T.eq(Boolean.TRUE, Json.path(cfg, "console", "keyConfirmed"), "key confirmed");
             T.eq("Nog niet klaar: opslag gekoppeld, serverplekken gekozen", Console.launchBlocker(cfg), "launch blocker");

@@ -249,6 +249,8 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
 .atrail .now .pip { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .astep { font-size: var(--fs-1); margin: 10px 0 0; }
 .keypage { max-width: 640px; }
+.keyinput { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--fs-2, 22px); letter-spacing: .18em; max-width: 14ch; text-transform: lowercase; }
+.keyremind { margin: 0 0 18px; border-color: var(--accent); }
 @media (max-width: 820px) {
   .hubwrap { padding: 4px 16px 50px; }
   .hub { grid-template-columns: 1fr; gap: 14px; }

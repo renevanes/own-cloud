@@ -259,7 +259,8 @@ public final class ConsoleApi {
                         "orderId", Json.str(con, "dienst", "orderId"), "bundle", Json.path(con, "dienst", "bundle"), "applied", Json.truthy(Json.path(con, "dienst", "applied"))),
                 "maxUsers", con == null || con.get("maxUsers") == null ? (Object) 0L : con.get("maxUsers"),
                 "overstap", Json.map(con, "overstap") == null ? null : Json.obj("naar", Json.path(con, "overstap", "naar"), "stap", Json.path(con, "overstap", "stap")),
-                "alleenDienst", Json.truthy(Json.path(con, "alleenDienst")));
+                "alleenDienst", Json.truthy(Json.path(con, "alleenDienst")),
+                "keyCheck", Console.keyCheckState(c));
     }
 
     /** What /api/state reports about biometric unlock (filled in by the app). */
@@ -268,6 +269,7 @@ public final class ConsoleApi {
     // ───────── Router ─────────
 
     private static Reply ok(Object j) { return new Reply(200, j); }
+
 
     private static Reply err(int status, String msg) { return new Reply(status, Json.obj("error", msg)); }
 
@@ -476,12 +478,40 @@ public final class ConsoleApi {
                 save();
                 return ok(Json.obj("ok", true));
 
-            case "GET /api/key":
-                return ok(Json.obj("groups", Console.keyGroups(c), "check", Console.keyCheck(c), "confirmed", Json.truthy(Json.path(c, "console", "keyConfirmed"))));
-            case "POST /api/key/confirm":
-                Console.confirmKey(c, Json.str(b, "g3"), Json.str(b, "g7"));
+            case "GET /api/key": {
+                boolean[] changed = { false };
+                long ask = Console.keyAsk(c, changed);
+                if (changed[0]) save();
+                boolean confirmed = Json.truthy(Json.path(c, "console", "keyConfirmed"));
+                return ok(Json.obj("groups", Console.keyGroups(c), "check", Console.keyCheck(c), "confirmed", confirmed,
+                        "later", !confirmed && Json.truthy(Json.path(c, "console", "keyCheckLater")), "ask", ask));
+            }
+            case "POST /api/key/confirm": {
+                if (b.get("value") == null && (b.get("g3") != null || b.get("g7") != null)) {
+                    Console.confirmKey(c, Json.str(b, "g3"), Json.str(b, "g7")); // oude vorm: groep 3 en 7
+                } else {
+                    boolean[] changed = { false };
+                    long ask = Console.keyAsk(c, changed);
+                    if (changed[0]) save();
+                    Object group = b.get("group") == null ? null : jsNumber(b.get("group"));
+                    if (b.get("group") != null && (!(group instanceof Number) || ((Number) group).doubleValue() != ask)) return err(409, "Er wordt nu naar groep " + ask + " gevraagd", "ask", ask);
+                    String value = b.get("value") == null ? "" : Json.jsString(b.get("value"));
+                    if (!Console.normGroup(value).equals(Console.keyGroups(c).get((int) ask - 1))) return err(400, "Dat is niet groep " + ask + ". Kijk nog eens op je herstelblad.", "ask", ask);
+                    Console.keyConfirmed(c);
+                }
                 save();
                 return ok(Json.obj("ok", true));
+            }
+            case "POST /api/key/new-group": {
+                long ask = Console.newKeyGroup(c);
+                save();
+                return ok(Json.obj("ask", ask));
+            }
+            case "POST /api/key/later": {
+                boolean later = Console.keyLater(c);
+                save();
+                return ok(Json.obj("ok", true, "later", later));
+            }
 
             case "POST /api/stores": {
                 Console.StoreSetup r = Console.addStore(c, catalog, Json.str(b, "offer"), Json.str(b, "region"), Json.str(b, "endpoint"), Json.str(b, "accessKey"),

@@ -319,6 +319,8 @@ const checklistConfigs = [
   sampleConfig,
   { ...sampleConfig, stores: [...sampleConfig.stores, { name: "h-backup", type: "s3", purpose: "backup", country: "DE" }], console: { ...sampleConfig.console, dnsMode: "desec", mailRelay: "smtp://x" } },
   { ...sampleConfig, stores: [], policy: { ...DEFAULT_POLICY }, console: { step: "sleutel", done: false, keyConfirmed: false } },
+  { ...sampleConfig, stores: [], policy: { ...DEFAULT_POLICY }, console: { step: "regelen", done: false, keyConfirmed: false, keyCheckLater: true } },
+  { ...sampleConfig, console: { ...sampleConfig.console, keyCheckLater: true } },
   { ...sampleConfig, stores: [{ name: "a", purpose: "backup" }, { name: "b", purpose: "backup" }] },
 ];
 const checklists = checklistConfigs.map((c) => ({ cfg: c, out: consoleFns.checklist(c) }));
