@@ -52,6 +52,36 @@ public final class Console {
         return c;
     }
 
+    /** POST /api/setup/aanbieder: a vault only for the Eigen Cloud Dienst (dienstConfig in server.ts). */
+    public static Map<String, Object> newDienstConfig() {
+        return Json.obj(
+                "cluster", "eigen", "nodeId", "beheer", "kind", "data", "masterKey", EigenCrypto.randomKeyHex(), "clusterPort", 7946L,
+                "advertise", Json.obj("clusterUrl", ""), "seeds", Json.list(),
+                "stores", Json.list(), "providers", Json.obj(), "dns", Json.list(),
+                "image", Json.obj("ref", "ghcr.io/renevanes/eigen-cloud:latest", "caddyRef", "ghcr.io/renevanes/eigen-caddy:latest"),
+                "appEnv", Json.obj("NODE_ENV", "production"),
+                "policy", ClusterConfig.defaultPolicy(),
+                "console", Json.obj("step", "sleutel", "done", false, "keyConfirmed", false, "alleenDienst", true));
+    }
+
+    /**
+     * POST /api/setup/cloud: a vault only for a Dienst gets an own cloud after all (domain, mailbox, password; no new vault).
+     * Returns the next step.
+     */
+    public static String addCloud(Map<String, Object> c, String domain, String mode, String mailbox, String alertEmail, String appPassword) {
+        Map<String, Object> n = newAdminConfig(domain, mailbox, alertEmail, appPassword);
+        Map<String, Object> con = Json.map(c, "console");
+        c.put("cluster", n.get("cluster"));
+        c.put("domain", n.get("domain"));
+        c.put("appEnv", n.get("appEnv"));
+        con.put("appPasswordHash", Json.path(n, "console", "appPasswordHash"));
+        con.put("alertEmail", Json.path(n, "console", "alertEmail"));
+        con.put("domainMode", mode);
+        con.put("step", Json.truthy(con.get("keyConfirmed")) ? "regelen" : "sleutel");
+        con.remove("alleenDienst");
+        return Json.str(con, "step");
+    }
+
     /** Cleans a typed master key (keeps hex digits, lowercase); throws when it is not 64 characters. */
     public static String normalizeMasterKey(String input) {
         String key = (input == null ? "" : input).replaceAll("[^0-9a-fA-F]", "").toLowerCase(java.util.Locale.ROOT);
@@ -64,8 +94,11 @@ public final class Console {
         Map<String, Object> c = Json.map(Admin.findAdminConfig(normalizeMasterKey(masterKeyInput), store), "config");
         Map<String, Object> con = Json.map(c, "console");
         Map<String, Object> nc = con != null ? con : Json.obj();
-        nc.put("step", "klaar");
-        nc.put("done", true);
+        // Een kluis alleen voor een Dienst (herstelkopie uit zijn back-upbucket) heeft geen cloud om "klaar" te zijn.
+        if (!Json.truthy(nc.get("alleenDienst"))) {
+            nc.put("step", "klaar");
+            nc.put("done", true);
+        }
         nc.put("keyConfirmed", true);
         c.put("console", nc);
         return c;

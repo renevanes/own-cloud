@@ -51,6 +51,23 @@ public class CryptoGoldenTest {
             Object boot = EigenCrypto.openJson(EigenCrypto.deriveKey(Bytes.fromHex(jt), "bootstrap"), Bytes.fromBase64(Json.str(g, "bootstrap", "sealed")), "bootstrap");
             T.eq(Json.stringify(Json.path(g, "bootstrap", "value")), Json.stringify(boot), "open TS bootstrap config");
 
+            // Grote bestanden (encryptBuffer) uit TS ontsleutelen; Java versleutelt in hetzelfde formaat.
+            byte[] sk = Bytes.fromHex(Json.str(g, "streamKey"));
+            for (Object o : Json.listAt(g, "streams")) {
+                byte[] plain = EigenCrypto.decryptBuffer(sk, Bytes.fromBase64(Json.str(o, "enc")));
+                T.eq(Json.num(o, "size").intValue(), plain.length, "stream size " + Json.num(o, "size"));
+                T.eq(Json.str(o, "plainSha"), Bytes.sha256Hex(plain), "stream content " + Json.num(o, "size"));
+                byte[] again = EigenCrypto.encryptBuffer(sk, plain);
+                T.eq(Bytes.fromBase64(Json.str(o, "enc")).length, again.length, "Java encryptBuffer: same size as TS " + plain.length);
+                T.eq(Bytes.sha256Hex(plain), Bytes.sha256Hex(EigenCrypto.decryptBuffer(sk, again)), "Java roundtrip " + plain.length);
+            }
+            byte[] bad = Bytes.fromBase64(Json.str(Json.listAt(g, "streams").get(1), "enc"));
+            bad[bad.length - 1] ^= 1;
+            final byte[] badF = bad;
+            T.throwsWith("Kan niet ontsleutelen", () -> EigenCrypto.decryptBuffer(sk, badF), "tampered stream refused");
+            final byte[] cut = java.util.Arrays.copyOf(Bytes.fromBase64(Json.str(Json.listAt(g, "streams").get(2), "enc")), 1024 * 1024 + 40);
+            T.throwsWith("afgekapt", () -> EigenCrypto.decryptBuffer(sk, cut), "truncated stream refused");
+
             // 3. adminProof at a fixed ts equals the TS mac
             for (Object o : Json.listAt(g, "proofs")) {
                 Map<String, Object> p = Admin.adminProof(masterHex, Json.path(o, "payload"), Json.num(o, "ts").longValue());

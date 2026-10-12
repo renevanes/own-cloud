@@ -16,6 +16,11 @@ import java.util.regex.Pattern;
  * src/console/aanbieder.ts; the console routes /api/aanbieder… return the same JSON). The Dienst's server can be at any
  * provider with servers ({@link Adapters}), its backups at any S3 storage. State lives in the vault under
  * console.aanbieder (older Scaleway-only states are migrated on read). Blocking; call off the UI thread.
+ *
+ * <p>Without an own cloud (vault with console.alleenDienst) the Dienst links its own DNS provider ({@code dns}): the
+ * console then sets the A/AAAA records itself through the DNS adapter. Once set up there is one place for everything
+ * ("Je dienst", {@code hub} in the view): what lives in the vault the console manages, what lives in the Dienst's
+ * database opens /beheer at the right page.
  */
 public final class Aanbieder {
     private Aanbieder() {}
@@ -60,6 +65,9 @@ public final class Aanbieder {
         List<Map<String, Object>> serverOffers();
 
         List<Map<String, Object>> storeOffers();
+
+        /** DNS offers (catalog.json "dns"); empty when not given. */
+        default List<Map<String, Object>> dnsOffers() { return new ArrayList<>(); }
     }
 
     /** Offers straight from a catalog. */
@@ -68,6 +76,8 @@ public final class Aanbieder {
             @Override public List<Map<String, Object>> serverOffers() { return cat.serverOffers(); }
 
             @Override public List<Map<String, Object>> storeOffers() { return cat.storeOffers(); }
+
+            @Override public List<Map<String, Object>> dnsOffers() { return cat.dnsOffers(); }
         };
     }
 
@@ -152,7 +162,8 @@ public final class Aanbieder {
     private static String mailFromOf(Map<String, Object> c, Map<String, Object> a) {
         String own = Json.str(a, "accounts", "mailFrom");
         if (nonEmpty(own)) return own;
-        return "noreply@" + (c.get("domain") != null ? Json.jsString(c.get("domain")) : "localhost");
+        String z = defaultZone(hostOf(Json.str(a, "url")));
+        return "noreply@" + (c.get("domain") != null ? Json.jsString(c.get("domain")) : z != null ? z : "localhost");
     }
 
     /** "smtp://gebruiker@host:587", zonder wachtwoord; null als het geen adres is. */
@@ -174,24 +185,46 @@ public final class Aanbieder {
         try { return new URI(url).getHost(); } catch (URISyntaxException e) { return null; }
     }
 
-    /** Waar het adres van de Dienst naartoe wijst en of je cloud dat record zelf publiceert. */
+    /** The sub-name of {@code host} under the cloud's domain ("dienst"), or null. */
+    private static String cloudSub(Map<String, Object> c, String host) {
+        String d = c.get("domain") != null ? Json.jsString(c.get("domain")) : "";
+        return host != null && !d.isEmpty() && host.endsWith("." + d) ? host.substring(0, host.length() - d.length() - 1) : null;
+    }
+
+    /** Can the cloud publish records (a running cloud with a DNS link)? */
+    private static boolean cloudDns(Map<String, Object> c) {
+        return !Json.listAt(c, "dns").isEmpty() && Json.truthy(Json.path(c, "console", "done")) && Json.truthy(c.get("domain"));
+    }
+
+    /** Who sets the record for {@code host}: "eigen" (the console, own DNS link), "cloud" or "handmatig" (dnsFor in TS). */
+    private static Map<String, Object> dnsFor(Map<String, Object> c, Map<String, Object> a, String host) {
+        Object value = Json.path(a, "server", "ipv4");
+        Map<String, Object> own = Json.map(a, "dns");
+        if (own != null) {
+            String z = Json.str(own, "zone");
+            String sub = host == null ? null : host.equals(z) ? "" : host.endsWith("." + z) ? host.substring(0, host.length() - z.length() - 1) : null;
+            return Json.obj("host", host, "sub", sub, "managed", sub != null, "value", value, "mode", "eigen", "provider", own.get("provider"), "zone", z);
+        }
+        String sub = cloudSub(c, host);
+        boolean managed = sub != null && !sub.isEmpty() && cloudDns(c);
+        Object provider = null;
+        if (managed) {
+            Object m = Json.path(c, "console", "dnsMode");
+            provider = m != null ? m : Json.listAt(c, "dns").isEmpty() ? null : Json.path(Json.listAt(c, "dns").get(0), "type");
+        }
+        return Json.obj("host", host, "sub", sub, "managed", managed, "value", value, "mode", managed ? "cloud" : "handmatig", "provider", provider, "zone", managed ? c.get("domain") : null);
+    }
+
+    /** Waar het adres van de Dienst naartoe wijst en wie dat record zet (je cloud, de console of jijzelf). */
     public static Map<String, Object> dnsInfo(Map<String, Object> c) {
         Map<String, Object> a = existing(c);
-        String host = hostOf(Json.str(a, "url"));
-        String d = c.get("domain") != null ? Json.jsString(c.get("domain")) : "";
-        String sub = host != null && !d.isEmpty() && host.endsWith("." + d) ? host.substring(0, host.length() - d.length() - 1) : null;
-        boolean managed = sub != null && !Json.listAt(c, "dns").isEmpty() && Json.truthy(Json.path(c, "console", "done"));
-        return Json.obj("host", host, "sub", sub, "managed", managed, "value", Json.path(a, "server", "ipv4"));
+        return dnsFor(c, a, hostOf(Json.str(a, "url")));
     }
 
     /** Zelfde voor de hostnaam van de adressendienst (als die op deze server draait). */
     public static Map<String, Object> adressenDns(Map<String, Object> c) {
         Map<String, Object> a = existing(c);
-        String host = Json.str(a, "adressen", "host");
-        String d = c.get("domain") != null ? Json.jsString(c.get("domain")) : "";
-        String sub = host != null && !d.isEmpty() && host.endsWith("." + d) ? host.substring(0, host.length() - d.length() - 1) : null;
-        boolean managed = sub != null && !Json.listAt(c, "dns").isEmpty() && Json.truthy(Json.path(c, "console", "done"));
-        return Json.obj("host", host, "sub", sub, "managed", managed, "value", Json.path(a, "server", "ipv4"));
+        return dnsFor(c, a, Json.str(a, "adressen", "host"));
     }
 
     private static boolean accountsReady(Map<String, Object> a) {
@@ -289,7 +322,107 @@ public final class Aanbieder {
                 "beheerUrl", url != null ? url + "/beheer" : null,
                 "adressen", adressenView(a),
                 "defaultAdressenHost", defaultAdressenHost(c, a),
-                "wijzigingen", wijzigingen(c, a));
+                "wijzigingen", wijzigingen(c, a),
+                "alleenDienst", Json.truthy(Json.path(c, "console", "alleenDienst")),
+                "cloudDns", cloudDns(c),
+                "dnsLink", dnsLinkView(a),
+                "dnsKeuze", dnsKeuze(c, a),
+                "defaultZone", defaultZone(hostOf(url)),
+                "hersteltest", a.get("hersteltest") != null ? a.get("hersteltest") : null,
+                "pending", new ArrayList<Object>(pendingSections(c, a)),
+                "hub", hubOf(c, a));
+    }
+
+    private static Map<String, Object> dnsLinkView(Map<String, Object> a) {
+        Map<String, Object> d = Json.map(a, "dns");
+        if (d == null) return null;
+        Map<String, Object> f = Json.map(d, "fields");
+        return Json.obj("provider", d.get("provider"), "zone", d.get("zone"), "fields", f == null ? Json.list() : new ArrayList<Object>(f.keySet()),
+                "records", d.get("set") != null ? d.get("set") : Json.list(), "error", d.get("error") != null ? d.get("error") : null,
+                "at", d.get("at") != null ? d.get("at") : null, "nameservers", d.get("nameservers") != null ? d.get("nameservers") : Json.list());
+    }
+
+    private static Object dnsKeuze(Map<String, Object> c, Map<String, Object> a) {
+        Object p = Json.path(a, "dns", "provider");
+        if (p != null) return p;
+        if (Json.truthy(a.get("dnsHandmatig"))) return "handmatig";
+        return "cloud".equals(Json.str(dnsInfo(c), "mode")) ? "cloud" : null;
+    }
+
+    /** Het beheer van de Dienst op een pagina, bijv. https://dienst.vanes.nl/beheer#/klanten. */
+    public static String beheerLink(String url, String page) { return BeheerLink.of(url, page); }
+
+    /** Standaardzone voor de eigen DNS-koppeling: dienst.vanes.nl → vanes.nl (twee labels blijven zoals ze zijn). */
+    public static String defaultZone(String host) {
+        if (host == null) return null;
+        String[] parts = host.split("\\.", -1);
+        return parts.length > 2 ? host.substring(host.indexOf('.') + 1) : host;
+    }
+
+    /** The sections of "Je dienst" (HUB in aanbieder.ts): id, label, where the data lives, /beheer page or null. */
+    public static final String[][] HUB = {
+            {"overzicht", "Overzicht", "console", null},
+            {"bedrijf", "Bedrijf", "console", null},
+            {"accounts", "Accounts en sleutels", "console", null},
+            {"aanbod", "Aanbod en prijzen", "dienst", "aanbod"},
+            {"huisstijl", "Huisstijl", "dienst", "huisstijl"},
+            {"medewerkers", "Medewerkers", "dienst", "medewerkers"},
+            {"klanten", "Klanten", "dienst", "klanten"},
+            {"hulpvragen", "Hulpvragen", "dienst", "hulpvragen"},
+            {"berichten", "Berichten", "dienst", "berichten"},
+            {"adressendienst", "Adressendienst", "beide", "adressen"},
+            {"lijst", "Op de lijst", "dienst", "lijst"},
+            {"server", "Server en back-ups", "console", null},
+            {"kosten", "Kosten", "beide", "kosten"},
+            {"updates", "Updates", "console", null},
+    };
+
+    private static String sectionOf(String key) {
+        switch (key) {
+            case "BROKER_OWNER_EMAIL": case "BROKER_ADMIN_EMAIL": case "BROKER_BRAND_NAME": case "BROKER_COMPANY_NAME":
+            case "BROKER_COMPANY_ADDRESS": case "BROKER_COMPANY_KVK": case "BROKER_COMPANY_VAT": case "BROKER_VAT_PERCENT": case "BROKER_ENFORCE":
+                return "bedrijf";
+            case "BROKER_ADRES_PUBLIEK": return "adressendienst";
+            default: return "accounts";
+        }
+    }
+
+    /** Sha256 per setting (deployed.keys). */
+    private static Map<String, Object> envKeys(Map<String, Object> c, Map<String, Object> a) {
+        Map<String, Object> out = Json.obj();
+        for (String[] kv : instelbaarEnv(c, a)) out.put(kv[0], sha(kv[1]));
+        return out;
+    }
+
+    /** Sections with changes that are not on the Dienst yet (in HUB order). */
+    public static List<String> pendingSections(Map<String, Object> c, Map<String, Object> a) {
+        List<String> out = new ArrayList<>();
+        String w = wijzigingen(c, a);
+        if (w == null || "geen".equals(w)) return out;
+        java.util.Set<String> set = new java.util.HashSet<>();
+        if ("opnieuw".equals(w)) set.add("server");
+        Map<String, Object> keys = Json.map(a, "deployed", "keys");
+        if (keys != null) {
+            Map<String, Object> now = envKeys(c, a);
+            java.util.Set<String> all = new LinkedHashSet<>(keys.keySet());
+            all.addAll(now.keySet());
+            for (String k : all) if (!java.util.Objects.equals(keys.get(k), now.get(k))) set.add(sectionOf(k));
+        }
+        for (String[] h : HUB) if (set.contains(h[0])) out.add(h[0]);
+        return out;
+    }
+
+    private static List<Object> hubOf(Map<String, Object> c, Map<String, Object> a) {
+        String url = Json.str(a, "url");
+        boolean server = a.get("server") != null;
+        if (!nonEmpty(url) || (!server && !Json.truthy(a.get("removed")))) return null;
+        List<String> pend = pendingSections(c, a);
+        List<Object> out = new ArrayList<>();
+        for (String[] h : HUB) {
+            boolean link = h[3] != null && server && !("adressendienst".equals(h[0]) && Json.map(a, "adressen") == null);
+            out.add(Json.obj("id", h[0], "label", h[1], "waar", h[2], "link", link ? beheerLink(url, h[3]) : null, "pending", pend.contains(h[0])));
+        }
+        return out;
     }
 
     private static Map<String, Object> adressenView(Map<String, Object> a) {
@@ -547,12 +680,12 @@ public final class Aanbieder {
         String in = Json.str(b, "url");
         String url = cleanUrl(nonEmpty(in) ? in : def);
         LinkedHashSet<Object> remove = new LinkedHashSet<>(Json.listAt(a, "dnsRemove"));
-        if (nonEmpty(Json.str(a, "url")) && !url.equals(Json.str(a, "url")) && a.get("server") != null) {
-            String old = Json.str(dnsInfo(c), "sub");
-            if (old != null) remove.add(old);
+        if (nonEmpty(Json.str(a, "url")) && !url.equals(Json.str(a, "url")) && a.get("server") != null && Json.map(a, "dns") == null) {
+            String old = cloudSub(c, hostOf(Json.str(a, "url")));
+            if (old != null && !old.isEmpty()) remove.add(old);
         }
         a.put("url", url);
-        remove.remove(Json.str(dnsInfo(c), "sub"));
+        remove.remove(cloudSub(c, hostOf(url)));
         if (remove.isEmpty()) a.remove("dnsRemove"); else a.put("dnsRemove", new ArrayList<>(remove));
         if ("adres".equals(a.get("step"))) a.put("step", "server");
         return Json.obj("ok", true, "url", url, "step", a.get("step"), "dns", dnsInfo(c), "pending", a.get("server") != null);
@@ -569,7 +702,7 @@ public final class Aanbieder {
     /** De gratis-adressendienst op de server van de Dienst aan (met live controle bij deSEC) of uit (saveAdressen in TS). */
     public static Map<String, Object> saveAdressen(Map<String, Object> c, Map<String, Object> b) {
         Map<String, Object> a = state(c);
-        String oldSub = a.get("server") != null ? Json.str(adressenDns(c), "sub") : null;
+        String oldSub = a.get("server") != null && Json.map(a, "dns") == null ? cloudSub(c, Json.str(a, "adressen", "host")) : null;
         if (Boolean.FALSE.equals(b.get("aan"))) {
             if (oldSub != null) addRemove(a, oldSub);
             a.remove("adressen");
@@ -607,10 +740,10 @@ public final class Aanbieder {
         for (Object x : checks) ok &= Boolean.TRUE.equals(Json.path(x, "ok"));
         if (ok) {
             a.put("adressen", Json.obj("zone", zone, "desecToken", token, "host", host));
-            String newSub = Json.str(adressenDns(c), "sub");
+            String newSub = cloudSub(c, host);
             if (oldSub != null && !oldSub.equals(newSub)) addRemove(a, oldSub);
             List<Object> left = new ArrayList<>();
-            String dienstSub = Json.str(dnsInfo(c), "sub");
+            String dienstSub = cloudSub(c, hostOf(Json.str(a, "url")));
             for (Object x : Json.listAt(a, "dnsRemove")) if (!x.equals(newSub) && !x.equals(dienstSub)) left.add(x);
             if (left.isEmpty()) a.remove("dnsRemove"); else a.put("dnsRemove", left);
         }
@@ -968,7 +1101,7 @@ public final class Aanbieder {
             // dienst.env van deze server is nieuwer dan instellingen die eerder met "Toepassen" zijn gestuurd.
             a.put("envAt", System.currentTimeMillis());
             Provider.ServerInfo info = providerFor(c, a, hp).create(new Provider.CreateSpec(PROJECT_NAME, nodeId, "data", hr, hs, serverUserData(c, a)));
-            a.put("deployed", Json.obj("env", sha(envList(instelbaarEnv(c, a))), "shape", sha(shapeOf(a))));
+            a.put("deployed", Json.obj("env", sha(envList(instelbaarEnv(c, a))), "shape", sha(shapeOf(a)), "keys", envKeys(c, a)));
             Map<String, Object> old = Json.map(a, "server");
             Map<String, Object> srv = Json.obj("provider", hp, "region", hr, "size", hs, "serverId", info.serverId);
             if (info.ipv4 != null) srv.put("ipv4", info.ipv4);
@@ -989,15 +1122,13 @@ public final class Aanbieder {
             deps.save();
             steps.add(step("Server bij " + Json.jsString(offer.get("name")) + " in " + (where != null ? Json.str(where, "city") : hr) + " (" + hs + ")", true, info.ipv4 != null ? "IP-adres " + info.ipv4 : null));
             if (old != null && nonEmpty(Json.str(old, "serverId"))) steps.add(step("De vorige server wordt opgeruimd", true, null));
+            Object[] sync = Json.map(a, "dns") != null ? syncOwnDns(a, deps) : null;
+            if (sync != null) deps.save();
             Map<String, Object> d = dnsInfo(c);
-            steps.add(Json.truthy(d.get("managed"))
-                    ? step(Json.str(d, "host") + " wijst naar " + info.ipv4, true, "Je cloud zet dit record zelf in je DNS")
-                    : step("Zet bij je DNS een A-record: " + Json.str(d, "host") + " → " + info.ipv4, true, null));
+            steps.add(dnsStep(d, info.ipv4, sync, Json.str(d, "host") + " wijst naar " + info.ipv4, false, deps));
             if (Json.map(a, "adressen") != null) {
                 Map<String, Object> ad = adressenDns(c);
-                steps.add(Json.truthy(ad.get("managed"))
-                        ? step("Adressendienst op " + Json.str(ad, "host"), true, "Je cloud zet ook dit record zelf in je DNS")
-                        : step("Zet bij je DNS een A-record: " + Json.str(ad, "host") + " → " + info.ipv4, true, null));
+                steps.add(dnsStep(ad, info.ipv4, sync, "Adressendienst op " + Json.str(ad, "host"), true, deps));
             }
             if (!Json.listAt(a, "retired").isEmpty()) cleanupRetiredAsync(c, deps);
             return Json.obj("ok", true, "replaced", replace, "steps", steps, "server", view(c, deps).get("server"));
@@ -1005,6 +1136,271 @@ public final class Aanbieder {
             try { deps.save(); } catch (IOException ignored) { /* bewaren lukt de volgende keer */ }
             throw new SetupException(e.getMessage(), steps, e);
         }
+    }
+
+    /** The DNS step after setting up: who sets the record, or what you have to do yourself. */
+    private static Map<String, Object> dnsStep(Map<String, Object> d, String ip, Object[] sync, String label, boolean also, Offers deps) {
+        String name = dnsName(Json.str(d, "provider"), deps);
+        if ("eigen".equals(d.get("mode")) && Json.truthy(d.get("managed"))) {
+            return sync != null && !(Boolean) sync[0] ? step(Json.str(d, "host") + " in de DNS zetten bij " + name, false, (String) sync[2])
+                    : step(label, true, "De console zet dit record bij " + name);
+        }
+        if (Json.truthy(d.get("managed"))) return step(label, true, also ? "Je cloud zet ook dit record zelf in je DNS" : "Je cloud zet dit record zelf in je DNS");
+        return step("Zet bij je DNS een A-record: " + Json.str(d, "host") + " → " + ip, true, null);
+    }
+
+    /** "deSEC" instead of "deSEC (gratis, open source, Berlijn)": the name from the DNS offers. */
+    private static String dnsName(String id, Offers deps) {
+        if (id == null) return "";
+        for (Map<String, Object> o : deps.dnsOffers()) if (id.equals(o.get("id"))) return Json.str(o, "name").replaceFirst(" \\(.*\\)$", "");
+        return id;
+    }
+
+    // ───────── Eigen DNS van de Dienst ─────────
+
+    /** TTL for the Dienst's records (deSEC rounds up to its minimum of an hour). */
+    public static final int DNS_TTL = 300;
+
+    /** The records that should exist with the own DNS link (ownDnsWant in TS): A and AAAA per host under the zone. */
+    public static List<Object> ownDnsWant(Map<String, Object> a) {
+        List<Object> out = new ArrayList<>();
+        Map<String, Object> d = Json.map(a, "dns");
+        if (d == null) return out;
+        String z = Json.str(d, "zone");
+        boolean live = a.get("server") != null && !Json.truthy(a.get("removed"));
+        String v4 = live ? nz(Json.str(a, "server", "ipv4")) : "", v6 = live ? nz(Json.str(a, "server", "ipv6")) : "";
+        List<String> seen = new ArrayList<>();
+        for (String h : new String[] {hostOf(Json.str(a, "url")), Json.str(a, "adressen", "host")}) {
+            if (h == null) continue;
+            String sub = h.equals(z) ? "" : h.endsWith("." + z) ? h.substring(0, h.length() - z.length() - 1) : null;
+            if (sub == null || seen.contains(sub)) continue;
+            seen.add(sub);
+            out.add(Json.obj("sub", sub, "type", "A", "value", v4));
+            out.add(Json.obj("sub", sub, "type", "AAAA", "value", v6));
+        }
+        return out;
+    }
+
+    private static String recKey(Object x) { return Json.str(x, "sub") + "/" + Json.str(x, "type"); }
+
+    /**
+     * Brings the records at the own DNS link up to date (syncOwnDns in TS): only what differs from what the console set
+     * before ({@code dns.set}); records no longer needed are removed. {ok, changed, detail}.
+     */
+    public static Object[] syncOwnDns(Map<String, Object> a, Offers deps) {
+        Map<String, Object> d = Json.map(a, "dns");
+        if (d == null) return new Object[] {true, 0, null};
+        List<Object> want = ownDnsWant(a);
+        Map<String, Object> done = new java.util.LinkedHashMap<>();
+        for (Object x : Json.listAt(d, "set")) done.put(recKey(x), x);
+        List<Object> todo = new ArrayList<>();
+        for (Object w : want) {
+            Object p = done.get(recKey(w));
+            String pv = p == null ? "" : nz(Json.str(p, "value"));
+            if (!pv.equals(Json.str(w, "value"))) todo.add(w);
+        }
+        for (Object p : Json.listAt(d, "set")) {
+            boolean still = false;
+            for (Object w : want) if (recKey(w).equals(recKey(p))) still = true;
+            if (!still) { Map<String, Object> x = Json.copy(Json.asMap(p)); x.put("value", ""); todo.add(x); }
+        }
+        if (todo.isEmpty()) {
+            d.remove("error");
+            return new Object[] {true, 0, null};
+        }
+        int changed = 0;
+        try {
+            Adapters.Adapter ad = Adapters.get(Json.str(d, "provider"));
+            if (ad == null || ad.dns == null) throw new IOException("Onbekende DNS-aanbieder " + Json.str(d, "provider"));
+            Map<String, Object> fields = Json.map(d, "fields") != null ? Json.copy(Json.map(d, "fields")) : Json.obj();
+            DnsProvider dns = ad.dns.create.make("dienst", fields, Json.str(d, "zone"));
+            for (Object t : todo) {
+                String v = Json.str(t, "value");
+                List<String> values = new ArrayList<>();
+                if (nonEmpty(v)) values.add(v);
+                dns.setRecords(Json.str(t, "sub"), Json.str(t, "type"), values, DNS_TTL);
+                changed++;
+                if (nonEmpty(v)) done.put(recKey(t), t); else done.remove(recKey(t));
+            }
+            d.remove("error");
+            d.put("at", System.currentTimeMillis());
+            return new Object[] {true, changed, null};
+        } catch (IOException | RuntimeException e) {
+            String m = String.valueOf(e.getMessage()).replaceAll("https?://\\S+", "");
+            d.put("error", dnsName(Json.str(d, "provider"), deps) + ": " + Bytes.head(m, 160));
+            return new Object[] {false, changed, d.get("error")};
+        } finally {
+            d.put("set", new ArrayList<>(done.values()));
+        }
+    }
+
+    /**
+     * Who puts the Dienst's address in DNS (saveDns in TS): "cloud", "handmatig", or the id of a DNS provider with the
+     * zone and credentials (also from the cloud's providers, the server keys, and deSEC/Scaleway keys at Accounts).
+     * Checked live with the adapter's connect; with a running Dienst the records are set right away.
+     */
+    public static Map<String, Object> saveDns(Map<String, Object> c, Map<String, Object> b, Offers deps) throws IOException {
+        Map<String, Object> a = state(c);
+        String host = hostOf(Json.str(a, "url"));
+        if (host == null) throw new IllegalArgumentException("Kies eerst het adres van je Dienst");
+        String p = b.get("provider") == null ? "" : Json.jsString(b.get("provider"));
+        final Map<String, Object> old = Json.map(a, "dns");
+        if ("cloud".equals(p) || "handmatig".equals(p)) {
+            if ("cloud".equals(p) && !(cloudSub(c, host) != null && cloudDns(c))) throw new IllegalArgumentException("Je cloud kan " + host + " niet in de DNS zetten; kies een DNS-aanbieder of zet het record zelf");
+            boolean cleared = clearOld(a, old, deps);
+            a.remove("dns");
+            if ("handmatig".equals(p)) a.put("dnsHandmatig", true); else a.remove("dnsHandmatig");
+            return Json.obj("ok", true, "dns", dnsInfo(c), "nameservers", null, "synced", null, "detail", cleared ? null : "De oude records konden niet weg; haal ze zelf weg bij je DNS-aanbieder");
+        }
+        Map<String, Object> offer = find(deps.dnsOffers(), p);
+        Adapters.Adapter ad = Adapters.get(p);
+        if (offer == null || ad == null || ad.dns == null) throw new IllegalArgumentException("Kies een DNS-aanbieder");
+        String zone = (b.get("zone") == null ? "" : Json.jsString(b.get("zone"))).trim().toLowerCase(Locale.ROOT).replaceAll("^\\.+|\\.+$", "");
+        if (zone.isEmpty()) zone = old != null && p.equals(Json.str(old, "provider")) ? Json.str(old, "zone") : nz(defaultZone(host));
+        if (!ZONE.matcher(zone).matches()) throw new IllegalArgumentException("Vul het domein in waar het adres onder valt, zoals vanes.nl");
+        if (!host.equals(zone) && !host.endsWith("." + zone)) throw new IllegalArgumentException(host + " valt niet onder " + zone);
+        Map<String, Object> fields = Json.obj();
+        for (Object f : Json.listAt(offer, "fields")) {
+            String k = Json.str(f, "key");
+            String v = Json.str(c, "providers", p, k);
+            if (!nonEmpty(v)) v = Json.str(a, "keys", p, k);
+            if (!nonEmpty(v) && "desec".equals(p) && "token".equals(k)) v = Json.str(a, "accounts", "desecToken");
+            if (!nonEmpty(v) && "scaleway".equals(p) && "secretKey".equals(k)) v = Json.str(a, "accounts", "scalewaySecretKey");
+            if (nonEmpty(v)) fields.put(k, v);
+        }
+        if (old != null && p.equals(Json.str(old, "provider")) && Json.map(old, "fields") != null) fields.putAll(Json.map(old, "fields"));
+        Map<String, Object> in = Json.map(b, "fields");
+        if (in != null) for (Map.Entry<String, Object> e : in.entrySet()) {
+            if (!(e.getValue() instanceof String)) continue;
+            String v = (String) e.getValue();
+            boolean known = false;
+            for (Object f : Json.listAt(offer, "fields")) if (e.getKey().equals(Json.str(f, "key"))) known = true;
+            if (v.trim().isEmpty() || v.startsWith("••") || !known) continue;
+            if (v.indexOf('\n') >= 0 || v.indexOf('\r') >= 0) throw new IllegalArgumentException("Een sleutel past op één regel");
+            fields.put(e.getKey(), v.trim());
+        }
+        List<String> missing = new ArrayList<>();
+        for (Object f : Json.listAt(offer, "fields")) if (!Json.truthy(Json.path(f, "optional")) && !nonEmpty(Json.str(fields, Json.str(f, "key")))) missing.add(Json.str(f, "label"));
+        if (!missing.isEmpty()) throw new IllegalArgumentException("Vul in: " + String.join(", ", missing));
+        List<String> ns;
+        try {
+            ns = ad.dns.connect.connect(fields, zone);
+        } catch (IOException | RuntimeException e) {
+            throw new IOException(Json.str(offer, "name").replaceFirst(" \\(.*\\)$", "") + ": " + e.getMessage(), e);
+        }
+        boolean same = old != null && p.equals(Json.str(old, "provider")) && zone.equals(Json.str(old, "zone"));
+        boolean cleared = same || clearOld(a, old, deps);
+        a.put("dns", Json.obj("provider", p, "zone", zone, "fields", fields, "set", same && old.get("set") != null ? old.get("set") : Json.list(), "nameservers", new ArrayList<Object>(ns)));
+        a.remove("dnsHandmatig");
+        Object[] sync = a.get("server") != null ? syncOwnDns(a, deps) : null;
+        return Json.obj("ok", true, "dns", dnsInfo(c), "nameservers", new ArrayList<Object>(ns), "synced", sync == null ? null : sync[0],
+                "detail", sync != null && !(Boolean) sync[0] ? sync[2] : cleared ? null : "De oude records konden niet weg; haal ze zelf weg bij je vorige DNS-aanbieder");
+    }
+
+    /** Removes the records of a previous link (true when that worked or there were none). */
+    private static boolean clearOld(Map<String, Object> a, Map<String, Object> old, Offers deps) {
+        if (old == null || Json.listAt(old, "set").isEmpty()) return true;
+        Map<String, Object> tmp = Json.copy(a);
+        tmp.put("dns", Json.copy(old));
+        tmp.put("server", null);
+        tmp.put("removed", true);
+        return (Boolean) syncOwnDns(tmp, deps)[0];
+    }
+
+    // ───────── Hersteltest ─────────
+
+    private static S3Store backupStoreOf(Map<String, Object> bk) {
+        return new S3Store(Json.obj("name", "dienst-backup", "type", "s3", "purpose", "backup", "endpoint", bk.get("endpoint"), "region", bk.get("region"),
+                "bucket", bk.get("bucket"), "accessKey", bk.get("accessKey"), "secretKey", bk.get("secretKey")));
+    }
+
+    private static final Pattern BACKUP_KEY = Pattern.compile("^dienst/(\\d{4})(\\d{2})(\\d{2})T(\\d{2})(\\d{2})(\\d{2})Z");
+
+    /** backupTime in src/broker/backup.ts: "dienst/20261011T120000Z-ab12.enc" → ms, or -1. */
+    static long backupTime(String key) {
+        java.util.regex.Matcher m = BACKUP_KEY.matcher(key);
+        if (!m.find()) return -1;
+        java.util.Calendar cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"));
+        cal.clear();
+        cal.set(Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)) - 1, Integer.parseInt(m.group(3)), Integer.parseInt(m.group(4)), Integer.parseInt(m.group(5)), Integer.parseInt(m.group(6)));
+        return cal.getTimeInMillis();
+    }
+
+    /**
+     * Hersteltest (hersteltest in TS): the newest backup, decrypted with the Dienst's key (from BROKER_SECRET), checked for
+     * a readable database. Read only.
+     */
+    public static Map<String, Object> hersteltest(Map<String, Object> c, Deps deps) throws IOException {
+        Map<String, Object> a = existing(c);
+        Map<String, Object> bk = Json.map(a, "backup");
+        if (a == null || !nonEmpty(Json.str(a, "secret")) || bk == null || !nonEmpty(Json.str(bk, "bucket")) || !nonEmpty(Json.str(bk, "accessKey")) || !nonEmpty(Json.str(bk, "secretKey")))
+            throw new IllegalArgumentException("Er zijn nog geen back-ups van je Dienst");
+        S3Store store = backupStoreOf(bk);
+        String lastKey = null;
+        long lastAt = -1;
+        byte[] buf = null;
+        boolean reached = true;
+        try {
+            for (ObjectStore.Entry e : store.list("dienst/")) {
+                long t = backupTime(e.key);
+                if (t < 0) continue;
+                if (lastKey == null || t > lastAt || (t == lastAt && e.key.compareTo(lastKey) > 0)) { lastKey = e.key; lastAt = t; }
+            }
+            if (lastKey != null) buf = store.getBuffer(lastKey);
+        } catch (IOException | RuntimeException e) {
+            reached = false;
+        }
+        Map<String, Object> res;
+        if (!reached) res = Json.obj("ok", false, "backupAt", lastKey == null ? null : (Object) lastAt, "detail", "De back-upopslag is niet bereikbaar");
+        else if (lastKey == null) res = Json.obj("ok", false, "backupAt", null, "detail", "Er staat nog geen back-up in de opslag");
+        else if (buf == null) res = Json.obj("ok", false, "backupAt", lastAt, "detail", "De back-upopslag is niet bereikbaar");
+        else {
+            try {
+                byte[] plain = EigenCrypto.decryptBuffer(EigenCrypto.deriveKey(Bytes.fromHex(Json.str(a, "secret")), "dienst-backup"), buf);
+                byte[] json;
+                try (java.util.zip.GZIPInputStream in = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(plain))) { json = Bytes.readAll(in); }
+                Map<String, Object> pack = Json.parseObject(Bytes.utf8(json));
+                Map<String, Object> files = Json.map(pack, "files");
+                java.util.TreeSet<String> names = new java.util.TreeSet<>(files == null ? new ArrayList<String>() : files.keySet());
+                String b64 = files == null ? null : Json.str(files, "dienst.sqlite");
+                byte[] db = b64 == null ? new byte[0] : java.util.Base64.getDecoder().decode(b64);
+                byte[] head = Bytes.utf8("SQLite format 3\0");
+                boolean ok = db.length >= 16 && java.util.Arrays.equals(java.util.Arrays.copyOf(db, 16), head);
+                Number at = Json.num(pack, "at");
+                res = Json.obj("ok", ok, "backupAt", at != null ? (Object) at.longValue() : lastAt,
+                        "detail", ok ? "Terug te zetten: " + String.join(", ", names) + " (database " + ((db.length + 1023) / 1024) + " KB)" : "De database in de back-up is beschadigd");
+            } catch (IOException | RuntimeException e) {
+                res = Json.obj("ok", false, "backupAt", lastAt, "detail", "De back-up is niet te openen met de sleutel van je Dienst");
+            }
+        }
+        Map<String, Object> ht = Json.obj("at", System.currentTimeMillis());
+        ht.putAll(res);
+        a.put("hersteltest", ht);
+        deps.save();
+        return Json.copy(ht);
+    }
+
+    // ───────── Herstelkopie zonder eigen cloud ─────────
+
+    private static volatile String lastCopy = "";
+
+    /**
+     * Without an own cloud there is no storage for the vault's recovery copy: it goes (sealed with the master key, as for a
+     * cloud) into the Dienst's backup bucket as admin-config.enc, only when something changed (saveDienstCopy in TS).
+     */
+    public static boolean saveDienstCopy(Map<String, Object> c) throws IOException {
+        if (!Json.truthy(Json.path(c, "console", "alleenDienst")) || !Json.truthy(c.get("masterKey"))) return false;
+        Map<String, Object> a = existing(c);
+        Map<String, Object> bk = Json.map(a, "backup");
+        if (bk == null || !nonEmpty(Json.str(bk, "bucket")) || !nonEmpty(Json.str(bk, "accessKey")) || !nonEmpty(Json.str(bk, "secretKey"))) return false;
+        Map<String, Object> stable = Json.copy(c);
+        Map<String, Object> sa = Json.map(stable, "console", "aanbieder");
+        if (sa != null) sa.remove("lastHealth");
+        String h = sha(stable);
+        if (h.equals(lastCopy)) return false;
+        backupStoreOf(bk).put("admin-config.enc", EigenCrypto.sealJson(ClusterConfig.keysFor(c).manifest, c, "admin-config"));
+        lastCopy = h;
+        return true;
     }
 
     private static final AtomicBoolean CLEANING = new AtomicBoolean();
@@ -1104,19 +1500,34 @@ public final class Aanbieder {
                 // volgende keer
             }
         }
+        // Eigen DNS-koppeling: records bijwerken als ze anders zijn dan wat er moet staan.
+        if (Json.map(a, "dns") != null) syncOwnDns(a, deps);
         String host = hostOf(url);
         List<String> have = new ArrayList<>(resolver.resolve4(host));
         java.util.Collections.sort(have);
+        Object overzicht = Boolean.TRUE.equals(h.get("reachable")) && nonEmpty(Json.str(a, "secret")) ? dienstOverzicht(a) : null;
         deps.save();
         cleanupRetiredAsync(c, deps);
         Object want = server.get("ipv4");
         Map<String, Object> out = Json.copy(h);
         out.put("server", true);
         out.put("removed", false);
-        out.put("dns", Json.obj("host", host, "want", want, "have", new ArrayList<Object>(have), "ok", want != null && have.contains(Json.jsString(want))));
+        out.put("dns", Json.obj("host", host, "want", want, "have", new ArrayList<Object>(have), "ok", want != null && have.contains(Json.jsString(want)),
+                "mode", dnsInfo(c).get("mode"), "error", Json.path(a, "dns", "error")));
         out.put("retired", (long) Json.listAt(a, "retired").size());
         out.put("adressen", adressenStatus(a));
+        out.put("overzicht", overzicht);
         return out;
+    }
+
+    /** Key figures of the Dienst via GET /v1/status/overzicht (dienstOverzicht in TS); null when that fails. */
+    private static Object dienstOverzicht(Map<String, Object> a) {
+        try {
+            Res r = http("GET", reach.base(Json.str(a, "url")) + "/v1/status/overzicht", Http.headers("authorization", "Beheer " + beheerToken(Json.str(a, "secret"))), null, 8000);
+            return r.ok() && r.json instanceof Map ? r.json : null;
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
     }
 
     /**
@@ -1143,7 +1554,7 @@ public final class Aanbieder {
         }
         if (r.status == 404) throw new IOException("Je Dienst kent dit nog niet; wacht tot hij is bijgewerkt, of kies Opnieuw opzetten");
         if (!r.ok()) throw new IOException(Json.truthy(Json.path(r.json, "error")) ? "De Dienst weigert: " + Json.str(r.json, "error") : "De Dienst antwoordt " + r.status);
-        a.put("deployed", Json.obj("env", sha(envList(env)), "shape", dep != null ? dep.get("shape") : sha(shapeOf(a))));
+        a.put("deployed", Json.obj("env", sha(envList(env)), "shape", dep != null ? dep.get("shape") : sha(shapeOf(a)), "keys", envKeys(c, a)));
         deps.save();
         List<Object> keys = Json.listAt(r.json, "keys");
         return Json.obj("ok", true, "restart", Json.truthy(Json.path(r.json, "restart")), "keys", keys);
@@ -1183,7 +1594,11 @@ public final class Aanbieder {
             a.put("step", "klaar");
         }
         deps.save();
+        // Eigen DNS-koppeling: de records weghalen.
+        Object[] dns = Json.map(a, "dns") != null ? syncOwnDns(a, deps) : null;
+        if (dns != null) deps.save();
         cleanupRetiredAsync(c, deps);
-        return Json.obj("ok", true, "finalBackup", h[0], "detail", h[1], "bucket", Json.path(a, "backup", "bucket"), "pending", (long) Json.listAt(a, "retired").size());
+        return Json.obj("ok", true, "finalBackup", h[0], "detail", h[1], "bucket", Json.path(a, "backup", "bucket"), "pending", (long) Json.listAt(a, "retired").size(),
+                "dns", dns == null ? null : dns[0]);
     }
 }

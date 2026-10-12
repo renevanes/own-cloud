@@ -300,7 +300,9 @@ public final class MainActivity extends Activity {
                     "updates", Json.obj("on", Prefs.flag(c, Prefs.UPDATES), "status", Updater.status(c)),
                     "sync", Json.obj("last", Prefs.num(c, "sync.last"), "error", Prefs.str(c, "sync.error")),
                     "biometric", Biometrics.available(c), "console", ConsoleBackend.get(c).vault.exists(),
-                    "dienst", Prefs.str(c, Prefs.DIENST_URL)));
+                    "dienst", Prefs.str(c, Prefs.DIENST_URL),
+                    "dienstOwn", Prefs.str(c, Prefs.DIENST_OWN_URL), "dienstName", Prefs.str(c, Prefs.DIENST_OWN_NAME),
+                    "dienstOnly", "1".equals(Prefs.str(c, Prefs.DIENST_OWN_ONLY))));
         }
 
         @JavascriptInterface
@@ -341,6 +343,13 @@ public final class MainActivity extends Activity {
             ConsoleActivity.open(MainActivity.this);
         }
 
+        /** De console op een route openen: "#aanbieder" (aanbieder worden, of je eigen Dienst beheren). */
+        @JavascriptInterface
+        public void openConsoleAt(String hash) {
+            if (!trusted()) return;
+            ConsoleActivity.open(MainActivity.this, hash);
+        }
+
         /** Voor aanbieders: het beheer van je Eigen Cloud Dienst openen. Bij een fout komt er een event {type:"dienst", error}. */
         @JavascriptInterface
         public void openDienst(String url) {
@@ -349,7 +358,7 @@ public final class MainActivity extends Activity {
                 try {
                     String u = DienstActivity.normalize(url);
                     Prefs.setStr(MainActivity.this, Prefs.DIENST_URL, u);
-                    DienstActivity.open(MainActivity.this, u);
+                    DienstActivity.open(MainActivity.this, url);
                     event(Json.obj("type", "dienst", "url", u));
                 } catch (IllegalArgumentException e) {
                     event(Json.obj("type", "dienst", "error", e.getMessage()));

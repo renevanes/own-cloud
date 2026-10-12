@@ -19,6 +19,11 @@ final class Prefs {
     static final String AUTO_INSTALL = "autoInstall";
     /** Laatst geopende Eigen Cloud Dienst (beheer voor aanbieders). */
     static final String DIENST_URL = "dienst.url";
+    /** Je eigen Dienst (opgezet in de console van deze telefoon): adres en naam, voor "<naam> beheren" op het startscherm. */
+    static final String DIENST_OWN_URL = "dienst.own.url";
+    static final String DIENST_OWN_NAME = "dienst.own.name";
+    /** De kluis op deze telefoon is alleen voor die Dienst (nog geen eigen cloud): "1" of leeg. */
+    static final String DIENST_OWN_ONLY = "dienst.own.only";
     /** Uitnodiging van een aanbieder (via een eigencloud://uitnodiging-link), tot de console hem heeft verwerkt. */
     static final String INVITE_DIENST = "invite.dienst";
     static final String INVITE_CODE = "invite.code";

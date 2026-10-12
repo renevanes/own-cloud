@@ -24,7 +24,7 @@ import { type InvoiceRow, readInvoice, renderInvoiceHtml } from "./invoice.js";
 import { RateLimit, EMAIL, issueCode, checkCode } from "./codes.js";
 import { getBrand, loadOfferingFromDb, publicBundle } from "./brand.js";
 import { registerStaffAuth, ensureOwner } from "./staff.js";
-import { registerAdmin } from "./admin.js";
+import { registerAdmin, dienstOverzicht } from "./admin.js";
 import { registerCustomerSupport, checkHealth, useInvite, SupportError, getInvite, inviteState } from "./support.js";
 import { DienstBackup, beheerToken } from "./backup.js";
 import { discoverAdres } from "./adres.js";
@@ -135,6 +135,11 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     event(db, null, "instellingen", { keys });
     if (deps.restart) setTimeout(() => deps.restart!(), 300).unref?.();
     return { ok: true, keys, restart: !!deps.restart };
+  });
+  /** Kerncijfers voor "Je dienst" in de console (alleen aantallen en bedragen). */
+  app.get("/v1/status/overzicht", async (req, reply) => {
+    if (!beheerOk(req)) return httpError(reply, 401, "Geen toegang");
+    return { version: VERSION(), ...dienstOverzicht(ctx) };
   });
   app.post("/v1/status/handover", async (req, reply) => {
     if (!beheerOk(req)) return httpError(reply, 401, "Geen toegang");

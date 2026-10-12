@@ -7,20 +7,28 @@
  * "eigen-cloud-dienst" en (back-ups bij Scaleway zonder eigen sleutels) een sleutel die alleen opslag in dat project mag.
  * De Scaleway-sleutel bij Accounts blijft nodig: daarmee zet de Dienst de clouds van klanten op (src/broker/provision.ts).
  * De toestand staat in de kluis onder console.aanbieder.
+ * Zonder eigen cloud (kluis met console.alleenDienst) koppelt de Dienst zijn eigen DNS-aanbieder (`dns`): de console
+ * zet dan zelf de A/AAAA-records via de DNS-adapter, en werkt ze bij als het IP-adres verandert of de Dienst weggaat.
+ * Na het opzetten is er één plek voor alles ("Je dienst", `hub` in de view): wat in de kluis staat beheert de console,
+ * wat in de database van de Dienst staat opent /beheer op de juiste pagina.
  * De Android-app heeft hetzelfde in Java (android/core Aanbieder.java); de JSON van de routes is gelijk.
  */
 import crypto from "node:crypto";
 import dnsp from "node:dns/promises";
+import zlib from "node:zlib";
 import nodemailer from "nodemailer";
 import type { AdminConfig } from "./vault.js";
 import { DESEC_URL } from "./extras.js";
 import { makeProvider, scwApi, type Provider } from "../cluster/providers.js";
 import { prepareStore, type StepResult } from "../cluster/admin.js";
-import type { StoreConfig } from "../cluster/stores.js";
+import { S3Store, type StoreConfig } from "../cluster/stores.js";
 import { dienstUserData } from "../cluster/cloudinit.js";
-import { deriveKey, randomKeyHex } from "../cluster/crypto.js";
-import { fetchSizes, pickSize, type ServerOffer, type StoreOffer, type SizeOption } from "./catalog.js";
+import { decryptBuffer, deriveKey, randomKeyHex, sealJson } from "../cluster/crypto.js";
+import { keysFor } from "../cluster/config.js";
+import { getAdapter } from "../cluster/adapters.js";
+import { dnsOffers as catalogDnsOffers, fetchSizes, pickSize, type DnsOffer, type ServerOffer, type StoreOffer, type SizeOption } from "./catalog.js";
 import { INSTELBAAR } from "../broker/instellingen.js";
+import { latestBackup } from "../broker/backup.js";
 
 export const MOLLIE_URL = () => (process.env.EIGEN_MOLLIE_URL ?? "https://api.mollie.com/v2").replace(/\/+$/, "");
 export const OPENPROVIDER_URL = () => (process.env.EIGEN_OPENPROVIDER_URL ?? "https://api.openprovider.eu/v1beta").replace(/\/+$/, "");
@@ -67,9 +75,22 @@ export interface AanbiederState {
   adressen?: { zone: string; desecToken: string; host: string };
   /** Wanneer de console dienst.env voor de huidige server schreef (BROKER_ENV_AT). */
   envAt?: number;
-  /** Wat er op de server staat (sha256): de instellingen die "Toepassen" kan wijzigen, en wat een nieuwe server vraagt. */
-  deployed?: { env: string; shape: string };
+  /**
+   * Wat er op de server staat (sha256): de instellingen die "Toepassen" kan wijzigen, en wat een nieuwe server vraagt.
+   * `keys`: per instelling (sha256 van de waarde), zodat de console per onderdeel kan laten zien wat nog niet is toegepast.
+   */
+  deployed?: { env: string; shape: string; keys?: Record<string, string> };
+  /**
+   * Eigen DNS-koppeling van de Dienst (zonder eigen cloud, of als je dat liever hebt): aanbieder uit de registry, de zone
+   * waar het adres onder valt, inloggegevens (nooit in een antwoord), en de records die de console daar zette (`set`).
+   */
+  dns?: { provider: string; zone: string; fields: Record<string, string>; set?: DnsRec[]; error?: string; at?: number; nameservers?: string[] };
+  /** Bewust gekozen: je zet het record zelf (anders kiest de console standaard een DNS-aanbieder). */
+  dnsHandmatig?: boolean;
+  /** Laatste hersteltest: de nieuwste back-up ophalen, ontsleutelen en de database controleren. */
+  hersteltest?: { at: number; ok: boolean; backupAt: number | null; detail: string };
 }
+export interface DnsRec { sub: string; type: "A" | "AAAA"; value: string }
 export interface Health { at: number; reachable: boolean; version: string | null; uptime: number | null; lastBackupAt: number | null; backup: string | null; closing: boolean; error?: string }
 
 /** Te vervangen in tests: hoe de console de Dienst bereikt en DNS opzoekt. */
@@ -110,7 +131,7 @@ const existing = (c: AdminConfig) => {
 
 /** De mailserver van de Dienst: zelf ingevuld, anders de relay van je eigen cloud. */
 const smtpOf = (c: AdminConfig, a: AanbiederState) => a.accounts?.smtpUrl || c.console.mailRelay || "";
-const mailFromOf = (c: AdminConfig, a: AanbiederState) => a.accounts?.mailFrom || `noreply@${c.domain ?? "localhost"}`;
+const mailFromOf = (c: AdminConfig, a: AanbiederState) => a.accounts?.mailFrom || `noreply@${c.domain ?? defaultZone(hostOf(a.url)) ?? "localhost"}`;
 
 /** "smtp://gebruiker@host:587", zonder wachtwoord. */
 export function smtpDisplay(url: string) {
@@ -125,22 +146,40 @@ function hostOf(url?: string) {
   try { return url ? new URL(url).hostname : null; } catch { return null; }
 }
 
-/** Waar het adres van de Dienst naartoe wijst en of je cloud dat record zelf publiceert. */
+/** De subnaam van `host` onder het domein van je cloud (bijv. "dienst"), of null. */
+function cloudSub(c: AdminConfig, host: string | null | undefined) {
+  const d = c.domain ?? "";
+  return host && d && host.endsWith(`.${d}`) ? host.slice(0, -(d.length + 1)) : null;
+}
+/** Kan je cloud records publiceren (draaiende cloud met een DNS-koppeling)? */
+const cloudDns = (c: AdminConfig) => c.dns.length > 0 && !!c.console.done && !!c.domain;
+
+/**
+ * Wie het record voor `host` zet: "eigen" (de console, via de eigen DNS-koppeling van de Dienst), "cloud" (je cloud,
+ * via extra_dns) of "handmatig" (jij zelf). Met de aanbieder en de zone.
+ */
+function dnsFor(c: AdminConfig, a: AanbiederState | null, host: string | null) {
+  const value = a?.server?.ipv4 ?? null;
+  if (a?.dns) {
+    const z = a.dns.zone;
+    const sub = host ? (host === z ? "" : host.endsWith(`.${z}`) ? host.slice(0, -(z.length + 1)) : null) : null;
+    return { host, sub, managed: sub !== null, value, mode: "eigen", provider: a.dns.provider, zone: z };
+  }
+  const sub = cloudSub(c, host);
+  const managed = !!sub && cloudDns(c);
+  return { host, sub, managed, value, mode: managed ? "cloud" : "handmatig", provider: managed ? c.console.dnsMode ?? c.dns[0]?.type ?? null : null, zone: managed ? c.domain ?? null : null };
+}
+
+/** Waar het adres van de Dienst naartoe wijst en wie dat record zet (je cloud, de console of jijzelf). */
 export function dnsInfo(c: AdminConfig) {
   const a = existing(c);
-  const host = hostOf(a?.url);
-  const d = c.domain ?? "";
-  const sub = host && d && host.endsWith(`.${d}`) ? host.slice(0, -(d.length + 1)) : null;
-  return { host, sub, managed: !!sub && c.dns.length > 0 && !!c.console.done, value: a?.server?.ipv4 ?? null };
+  return dnsFor(c, a, hostOf(a?.url));
 }
 
 /** Zelfde voor de hostnaam van de adressendienst (als die op deze server draait). */
 export function adressenDns(c: AdminConfig) {
   const a = existing(c);
-  const host = a?.adressen?.host ?? null;
-  const d = c.domain ?? "";
-  const sub = host && d && host.endsWith(`.${d}`) ? host.slice(0, -(d.length + 1)) : null;
-  return { host, sub, managed: !!sub && c.dns.length > 0 && !!c.console.done, value: a?.server?.ipv4 ?? null };
+  return dnsFor(c, a, a?.adressen?.host ?? null);
 }
 
 const accountsReady = (a: AanbiederState) => ["scaleway", "mollie", "desec", "smtp"].every((k) => a.checked?.[k] === true) && a.checked?.adres !== false;
@@ -151,6 +190,8 @@ const serverReady = (a: AanbiederState) => !!(a.hosting && a.backup);
 export interface Offers {
   serverOffers: () => ServerOffer[];
   storeOffers: () => StoreOffer[];
+  /** DNS-aanbieders (standaard die uit de registry). */
+  dnsOffers?: () => DnsOffer[];
 }
 
 /** De server: aanbieder, regio (met stad en land) en formaat, zoals de console hem laat zien. */
@@ -209,7 +250,84 @@ export function view(c: AdminConfig, o: Offers) {
     adressen: a.adressen ? { zone: a.adressen.zone, desecToken: mask(a.adressen.desecToken), host: a.adressen.host, url: `https://${a.adressen.host}` } : null,
     defaultAdressenHost: defaultAdressenHost(c, a),
     wijzigingen: wijzigingen(c, a),
+    /** Zonder eigen cloud opgezet (kluis alleen voor de Dienst), en of je cloud records kan publiceren. */
+    alleenDienst: !!c.console.alleenDienst,
+    cloudDns: cloudDns(c),
+    /** De eigen DNS-koppeling van de Dienst: aanbieder, zone, welke velden bewaard zijn (nooit de waarden) en de records. */
+    dnsLink: a.dns ? { provider: a.dns.provider, zone: a.dns.zone, fields: Object.keys(a.dns.fields), records: a.dns.set ?? [], error: a.dns.error ?? null, at: a.dns.at ?? null, nameservers: a.dns.nameservers ?? [] } : null,
+    /** Wat er bij "Wie zet het adres in de DNS?" gekozen is: een DNS-aanbieder, "cloud", "handmatig", of null (nog niets). */
+    dnsKeuze: a.dns?.provider ?? (a.dnsHandmatig ? "handmatig" : dnsInfo(c).mode === "cloud" ? "cloud" : null),
+    defaultZone: defaultZone(hostOf(a.url)),
+    hersteltest: a.hersteltest ?? null,
+    pending: pendingSections(c, a),
+    hub: hubOf(c, a),
   };
+}
+
+/** Het beheer van de Dienst op een bepaalde pagina, bijv. https://dienst.vanes.nl/beheer#/klanten. */
+export const beheerLink = (url: string, page: string) => `${url}/beheer#/${page}`;
+
+/** Standaardzone voor de eigen DNS-koppeling: dienst.vanes.nl → vanes.nl (twee labels blijven zoals ze zijn). */
+export function defaultZone(host: string | null) {
+  if (!host) return null;
+  const parts = host.split(".");
+  return parts.length > 2 ? parts.slice(1).join(".") : host;
+}
+
+/**
+ * De onderdelen van "Je dienst", in vaste volgorde: id, naam, waar de gegevens staan ("console" = in je kluis, "dienst" =
+ * in de database van de Dienst, "beide") en de pagina van /beheer (of null).
+ */
+export const HUB: [string, string, "console" | "dienst" | "beide", string | null][] = [
+  ["overzicht", "Overzicht", "console", null],
+  ["bedrijf", "Bedrijf", "console", null],
+  ["accounts", "Accounts en sleutels", "console", null],
+  ["aanbod", "Aanbod en prijzen", "dienst", "aanbod"],
+  ["huisstijl", "Huisstijl", "dienst", "huisstijl"],
+  ["medewerkers", "Medewerkers", "dienst", "medewerkers"],
+  ["klanten", "Klanten", "dienst", "klanten"],
+  ["hulpvragen", "Hulpvragen", "dienst", "hulpvragen"],
+  ["berichten", "Berichten", "dienst", "berichten"],
+  ["adressendienst", "Adressendienst", "beide", "adressen"],
+  ["lijst", "Op de lijst", "dienst", "lijst"],
+  ["server", "Server en back-ups", "console", null],
+  ["kosten", "Kosten", "beide", "kosten"],
+  ["updates", "Updates", "console", null],
+];
+
+/** Bij welk onderdeel een instelling van de Dienst hoort (voor "nog niet toegepast"). */
+const SECTION_OF: Record<string, string> = {
+  BROKER_OWNER_EMAIL: "bedrijf", BROKER_ADMIN_EMAIL: "bedrijf", BROKER_BRAND_NAME: "bedrijf", BROKER_COMPANY_NAME: "bedrijf",
+  BROKER_COMPANY_ADDRESS: "bedrijf", BROKER_COMPANY_KVK: "bedrijf", BROKER_COMPANY_VAT: "bedrijf", BROKER_VAT_PERCENT: "bedrijf", BROKER_ENFORCE: "bedrijf",
+  BROKER_ADRES_PUBLIEK: "adressendienst",
+};
+
+/** Sha256 per instelling (zoals in deployed.keys). */
+const envKeys = (c: AdminConfig, a: AanbiederState) => Object.fromEntries(instelbaarEnv(c, a).map(([k, v]) => [k, sha(v)]));
+
+/** Onderdelen met wijzigingen die nog niet op de Dienst staan (in de volgorde van HUB). */
+export function pendingSections(c: AdminConfig, a: AanbiederState): string[] {
+  const w = wijzigingen(c, a);
+  if (!w || w === "geen") return [];
+  const out = new Set<string>();
+  if (w === "opnieuw") out.add("server");
+  const keys = a.deployed?.keys;
+  if (keys) {
+    const now = envKeys(c, a);
+    for (const k of new Set([...Object.keys(keys), ...Object.keys(now)])) if (keys[k] !== now[k]) out.add(SECTION_OF[k] ?? "accounts");
+  }
+  return HUB.map(([id]) => id).filter((id) => out.has(id));
+}
+
+/** "Je dienst": de onderdelen met een link naar /beheer en of er iets wacht. Alleen als de Dienst er is (of was). */
+function hubOf(c: AdminConfig, a: AanbiederState) {
+  if (!a.url || (!a.server && !a.removed)) return null;
+  const pend = pendingSections(c, a);
+  return HUB.map(([id, label, waar, page]) => ({
+    id, label, waar,
+    link: page && a.server && !(id === "adressendienst" && !a.adressen) ? beheerLink(a.url!, page) : null,
+    pending: pend.includes(id),
+  }));
 }
 
 /** Standaardhost van de adressendienst: dienst.x.nl → adressen.x.nl, anders adressen.<domein van je cloud>. */
@@ -226,7 +344,7 @@ export const instelbaarEnv = (c: AdminConfig, a: AanbiederState) => dienstEnv(c,
 const shapeOf = (a: AanbiederState) => [a.url ?? "", a.hosting?.provider ?? "", a.hosting?.region ?? "", a.hosting?.size ?? "", a.backup?.bucket ?? "", a.adressen?.host ?? "", a.adressen?.zone ?? "", a.adressen?.desecToken ?? ""];
 
 /** Wat er nu op een (nieuwe) server zou staan, als sha256 (zoals in `deployed`). */
-export const deployedHashes = (c: AdminConfig, a: AanbiederState) => ({ env: sha(instelbaarEnv(c, a)), shape: sha(shapeOf(a)) });
+export const deployedHashes = (c: AdminConfig, a: AanbiederState) => ({ env: sha(instelbaarEnv(c, a)), shape: sha(shapeOf(a)), keys: envKeys(c, a) });
 
 /** "geen", "toepassen" (kan zonder nieuwe server) of "opnieuw" (nieuwe server nodig); null = onbekend of geen server. */
 export function wijzigingen(c: AdminConfig, a: AanbiederState): "geen" | "toepassen" | "opnieuw" | null {
@@ -403,13 +521,14 @@ export function saveAdres(c: AdminConfig, b: { url?: string }) {
   const a = state(c);
   const def = c.domain ? `https://dienst.${c.domain}` : "";
   const url = cleanUrl(b.url || def);
-  if (a.url && a.url !== url && a.server) {
-    // Het oude adres weghalen uit de DNS van je cloud (alleen als de cloud het beheerde).
-    const old = dnsInfo(c).sub;
+  if (a.url && a.url !== url && a.server && !a.dns) {
+    // Het oude adres weghalen uit de DNS van je cloud (alleen als de cloud het beheerde). Met een eigen DNS-koppeling
+    // haalt de console het oude record zelf weg bij (opnieuw) opzetten.
+    const old = cloudSub(c, hostOf(a.url));
     if (old) a.dnsRemove = [...new Set([...(a.dnsRemove ?? []), old])];
   }
   a.url = url;
-  a.dnsRemove = (a.dnsRemove ?? []).filter((x) => x !== dnsInfo(c).sub);
+  a.dnsRemove = (a.dnsRemove ?? []).filter((x) => x !== cloudSub(c, hostOf(a.url)));
   if (!a.dnsRemove.length) delete a.dnsRemove;
   if (a.step === "adres") a.step = "server";
   return { ok: true, url, step: a.step, dns: dnsInfo(c), pending: !!a.server };
@@ -426,7 +545,7 @@ const ZONE = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/;
  */
 export async function saveAdressen(c: AdminConfig, b: { aan?: boolean; zone?: string; desecToken?: string; host?: string }) {
   const a = state(c);
-  const oldSub = a.server ? adressenDns(c).sub : null;
+  const oldSub = a.server && !a.dns ? cloudSub(c, a.adressen?.host) : null;
   if (b.aan === false) {
     if (oldSub) a.dnsRemove = [...new Set([...(a.dnsRemove ?? []), oldSub])];
     delete a.adressen;
@@ -458,8 +577,8 @@ export async function saveAdressen(c: AdminConfig, b: { aan?: boolean; zone?: st
   const ok = checks.length === 2 && checks.every((x) => x.ok);
   if (ok) {
     a.adressen = { zone, desecToken: token, host };
-    if (oldSub && oldSub !== adressenDns(c).sub) a.dnsRemove = [...new Set([...(a.dnsRemove ?? []), oldSub])];
-    a.dnsRemove = (a.dnsRemove ?? []).filter((x) => x !== adressenDns(c).sub && x !== dnsInfo(c).sub);
+    if (oldSub && oldSub !== cloudSub(c, host)) a.dnsRemove = [...new Set([...(a.dnsRemove ?? []), oldSub])];
+    a.dnsRemove = (a.dnsRemove ?? []).filter((x) => x !== cloudSub(c, host) && x !== cloudSub(c, hostOf(a.url)));
     if (!a.dnsRemove.length) delete a.dnsRemove;
   }
   const x = a.adressen;
@@ -755,15 +874,13 @@ export async function opzetten(c: AdminConfig, deps: Deps) {
     deps.save();
     steps.push({ label: `Server bij ${offer.name} in ${where?.city ?? hosting.region} (${hosting.size})`, ok: true, detail: info.ipv4 ? `IP-adres ${info.ipv4}` : undefined });
     if (old?.serverId) steps.push({ label: "De vorige server wordt opgeruimd", ok: true });
+    const sync = a.dns ? await syncOwnDns(a) : null;
+    if (sync) deps.save();
     const d = dnsInfo(c);
-    steps.push(d.managed
-      ? { label: `${d.host} wijst naar ${info.ipv4}`, ok: true, detail: "Je cloud zet dit record zelf in je DNS" }
-      : { label: `Zet bij je DNS een A-record: ${d.host} → ${info.ipv4}`, ok: true });
+    steps.push(dnsStep(d, info.ipv4, sync, `${d.host} wijst naar ${info.ipv4}`, false));
     if (a.adressen) {
       const ad = adressenDns(c);
-      steps.push(ad.managed
-        ? { label: `Adressendienst op ${ad.host}`, ok: true, detail: "Je cloud zet ook dit record zelf in je DNS" }
-        : { label: `Zet bij je DNS een A-record: ${ad.host} → ${info.ipv4}`, ok: true });
+      steps.push(dnsStep(ad, info.ipv4, sync, `Adressendienst op ${ad.host}`, true));
     }
     if (a.retired?.length) void cleanupRetired(c, deps);
     return { ok: true, replaced: replace, steps, server: view(c, deps).server };
@@ -771,6 +888,206 @@ export async function opzetten(c: AdminConfig, deps: Deps) {
     deps.save();
     throw fail((e as Error).message, steps);
   }
+}
+
+/** De stap over DNS na het opzetten: wie het record zet, of wat je zelf moet doen. */
+function dnsStep(d: ReturnType<typeof dnsInfo>, ip: string | undefined, sync: { ok: boolean; detail?: string } | null, label: string, also: boolean): StepResult {
+  if (d.mode === "eigen" && d.managed) {
+    return sync && !sync.ok ? { label: `${d.host} in de DNS zetten bij ${dnsName(d.provider)}`, ok: false, detail: sync.detail }
+      : { label, ok: true, detail: `De console zet dit record bij ${dnsName(d.provider)}` };
+  }
+  if (d.managed) return { label, ok: true, detail: also ? "Je cloud zet ook dit record zelf in je DNS" : "Je cloud zet dit record zelf in je DNS" };
+  return { label: `Zet bij je DNS een A-record: ${d.host} → ${ip}`, ok: true };
+}
+
+/** "deSEC" in plaats van "desec" (de naam van de DNS-aanbieder in de registry). */
+function dnsName(id: string | null) {
+  const a = id ? getAdapter(id) : undefined;
+  return (a?.dns?.name ?? a?.name ?? id ?? "").replace(/ \(.*\)$/, "");
+}
+
+// ───────── Eigen DNS van de Dienst ─────────
+
+/** TTL voor de records van de Dienst (deSEC rondt op naar zijn minimum van een uur). */
+export const DNS_TTL = 300;
+
+/**
+ * De records die er moeten staan bij de eigen DNS-koppeling: A en AAAA voor het adres van de Dienst en (als die meedraait)
+ * de adressendienst, voor zover ze onder de zone vallen. Zonder server (of na verwijderen) met lege waarden: weghalen.
+ */
+export function ownDnsWant(a: AanbiederState): DnsRec[] {
+  if (!a.dns) return [];
+  const z = a.dns.zone, out: DnsRec[] = [];
+  const live = !!a.server && !a.removed;
+  for (const h of [hostOf(a.url), a.adressen?.host ?? null]) {
+    if (!h) continue;
+    const sub = h === z ? "" : h.endsWith(`.${z}`) ? h.slice(0, -(z.length + 1)) : null;
+    if (sub === null || out.some((x) => x.sub === sub)) continue;
+    out.push({ sub, type: "A", value: live ? a.server?.ipv4 ?? "" : "" }, { sub, type: "AAAA", value: live ? a.server?.ipv6 ?? "" : "" });
+  }
+  return out;
+}
+
+function ownDnsProvider(d: NonNullable<AanbiederState["dns"]>) {
+  const ad = getAdapter(d.provider);
+  if (!ad?.dns) throw new Error(`Onbekende DNS-aanbieder ${d.provider}`);
+  return ad.dns.create("dienst", d.fields, d.zone);
+}
+
+/**
+ * De records bij de eigen DNS-koppeling bijwerken: alleen wat anders is dan wat de console er eerder zette (`dns.set`),
+ * en wat niet meer nodig is weghalen. Mislukt het, dan blijft `dns.error` staan en probeert de status het opnieuw.
+ */
+export async function syncOwnDns(a: AanbiederState): Promise<{ ok: boolean; changed: number; detail?: string }> {
+  const d = a.dns;
+  if (!d) return { ok: true, changed: 0 };
+  const want = ownDnsWant(a);
+  const key = (x: DnsRec) => `${x.sub}/${x.type}`;
+  const done = new Map((d.set ?? []).map((x) => [key(x), x] as const));
+  const todo: DnsRec[] = [];
+  for (const w of want) if ((done.get(key(w))?.value ?? "") !== w.value) todo.push(w);
+  for (const p of d.set ?? []) if (!want.some((w) => key(w) === key(p))) todo.push({ ...p, value: "" });
+  if (!todo.length) {
+    if (d.error) delete d.error;
+    return { ok: true, changed: 0 };
+  }
+  let changed = 0;
+  try {
+    const dns = ownDnsProvider(d);
+    for (const t of todo) {
+      await dns.setRecords(t.sub, t.type, t.value ? [t.value] : [], DNS_TTL);
+      changed++;
+      if (t.value) done.set(key(t), t); else done.delete(key(t));
+    }
+    delete d.error;
+    d.at = Date.now();
+    return { ok: true, changed };
+  } catch (e) {
+    d.error = `${dnsName(d.provider)}: ${(e as Error).message.replace(/https?:\/\/\S+/g, "").slice(0, 160)}`;
+    return { ok: false, changed, detail: d.error };
+  } finally {
+    d.set = [...done.values()];
+  }
+}
+
+/**
+ * Wie het adres van de Dienst in de DNS zet. `provider`: "cloud" (je cloud, als die DNS heeft en het adres onder zijn
+ * domein valt), "handmatig" (je zet het record zelf), of de id van een DNS-aanbieder uit de registry (deSEC, Scaleway,
+ * Hetzner, Exoscale, OVHcloud …) met de zone en inloggegevens. Inloggegevens komen ook van wat al gekoppeld is: je cloud
+ * (`providers`), de server van de Dienst (`keys`), en bij deSEC/Scaleway de sleutels bij Accounts. Live gecontroleerd met
+ * `connect` van de adapter (bij deSEC: de zone wordt aangemaakt als hij er nog niet is). Draait de Dienst al, dan zet de
+ * console de records meteen; records bij een vorige koppeling haalt hij weg.
+ */
+export async function saveDns(c: AdminConfig, b: { provider?: string; zone?: string; fields?: Record<string, unknown> }, deps: Offers) {
+  const a = state(c);
+  const host = hostOf(a.url);
+  if (!host) throw new Error("Kies eerst het adres van je Dienst");
+  const p = String(b.provider ?? "");
+  const old = a.dns;
+  /** Records bij de vorige koppeling weghalen (lukt dat niet, dan blijven ze staan; geen fout). */
+  const clearOld = async () => {
+    if (!old?.set?.length) return true;
+    const tmp: AanbiederState = { ...a, dns: { ...old }, server: null, removed: true };
+    const r = await syncOwnDns(tmp);
+    return r.ok;
+  };
+  if (p === "cloud" || p === "handmatig") {
+    if (p === "cloud" && !(cloudSub(c, host) !== null && cloudDns(c))) throw new Error(`Je cloud kan ${host} niet in de DNS zetten; kies een DNS-aanbieder of zet het record zelf`);
+    const cleared = await clearOld();
+    delete a.dns;
+    if (p === "handmatig") a.dnsHandmatig = true; else delete a.dnsHandmatig;
+    return { ok: true, dns: dnsInfo(c), nameservers: null, synced: null, detail: cleared ? null : "De oude records konden niet weg; haal ze zelf weg bij je DNS-aanbieder" };
+  }
+  const offer = (deps.dnsOffers?.() ?? catalogDnsOffers()).find((o) => o.id === p);
+  const ad = getAdapter(p);
+  if (!offer || !ad?.dns) throw new Error("Kies een DNS-aanbieder");
+  const zone = String(b.zone ?? "").trim().toLowerCase().replace(/^\.+|\.+$/g, "") || (old?.provider === p ? old.zone : defaultZone(host) ?? "");
+  if (!ZONE.test(zone)) throw new Error("Vul het domein in waar het adres onder valt, zoals vanes.nl");
+  if (host !== zone && !host.endsWith(`.${zone}`)) throw new Error(`${host} valt niet onder ${zone}`);
+  const fields: Record<string, string> = {};
+  const fallback: Record<string, string | undefined> = p === "desec" ? { token: a.accounts?.desecToken } : p === "scaleway" ? { secretKey: a.accounts?.scalewaySecretKey } : {};
+  for (const f of offer.fields) {
+    const v = c.providers[p]?.[f.key] || a.keys?.[p]?.[f.key] || fallback[f.key];
+    if (v) fields[f.key] = v;
+  }
+  if (old?.provider === p) Object.assign(fields, old.fields);
+  for (const [k, v] of Object.entries(b.fields ?? {})) {
+    if (typeof v !== "string" || !v.trim() || v.startsWith("••") || !offer.fields.some((f) => f.key === k)) continue;
+    if (/[\r\n]/.test(v)) throw new Error("Een sleutel past op één regel");
+    fields[k] = v.trim();
+  }
+  const missing = offer.fields.filter((f) => !f.optional && !fields[f.key]);
+  if (missing.length) throw new Error(`Vul in: ${missing.map((f) => f.label).join(", ")}`);
+  let nameservers: string[];
+  try { nameservers = (await ad.dns.connect(fields, zone)).nameservers; }
+  catch (e) { throw new Error(`${offer.name.replace(/ \(.*\)$/, "")}: ${(e as Error).message}`); }
+  const same = old?.provider === p && old.zone === zone;
+  const cleared = same ? true : await clearOld();
+  a.dns = { provider: p, zone, fields, set: same ? old!.set ?? [] : [], nameservers };
+  delete a.dnsHandmatig;
+  // Records van je cloud: die haalt de cloud weg (extra_dns) als het adres niet onder deze zone valt.
+  const sync = a.server ? await syncOwnDns(a) : null;
+  return { ok: true, dns: dnsInfo(c), nameservers, synced: sync ? sync.ok : null, detail: sync && !sync.ok ? sync.detail : cleared ? null : "De oude records konden niet weg; haal ze zelf weg bij je vorige DNS-aanbieder" };
+}
+
+// ───────── Hersteltest ─────────
+
+const backupStoreOf = (bk: NonNullable<AanbiederState["backup"]>) =>
+  new S3Store({ name: "dienst-backup", type: "s3", purpose: "backup", endpoint: bk.endpoint, region: bk.region, bucket: bk.bucket!, accessKey: bk.accessKey!, secretKey: bk.secretKey! });
+
+/**
+ * Hersteltest: de nieuwste back-up ophalen, met de sleutel van de Dienst (afgeleid van BROKER_SECRET) ontsleutelen en
+ * nagaan dat de database erin zit en leesbaar is. Alleen lezen; er verandert niets aan de Dienst of de back-ups.
+ */
+export async function hersteltest(c: AdminConfig, deps: Pick<Deps, "save">) {
+  const a = existing(c);
+  const bk = a?.backup;
+  if (!a?.secret || !bk?.bucket || !bk.accessKey || !bk.secretKey) throw new Error("Er zijn nog geen back-ups van je Dienst");
+  let res: { ok: boolean; backupAt: number | null; detail: string };
+  const store = backupStoreOf(bk);
+  let buf: Buffer | null = null, last: { key: string; at: number } | null = null, reached = true;
+  try {
+    last = await latestBackup(store);
+    if (last) buf = await store.getBuffer(last.key);
+  } catch { reached = false; }
+  if (!reached) res = { ok: false, backupAt: last?.at ?? null, detail: "De back-upopslag is niet bereikbaar" };
+  else if (!last) res = { ok: false, backupAt: null, detail: "Er staat nog geen back-up in de opslag" };
+  else if (!buf) res = { ok: false, backupAt: last.at, detail: "De back-upopslag is niet bereikbaar" };
+  else {
+    try {
+      const pack = JSON.parse(zlib.gunzipSync(await decryptBuffer(deriveKey(Buffer.from(a.secret, "hex"), "dienst-backup"), buf)).toString("utf8")) as { at?: number; files?: Record<string, string> };
+      const files = Object.keys(pack.files ?? {}).sort();
+      const db = Buffer.from(pack.files?.["dienst.sqlite"] ?? "", "base64");
+      const ok = db.subarray(0, 16).toString("latin1") === "SQLite format 3\0";
+      res = { ok, backupAt: typeof pack.at === "number" ? pack.at : last.at,
+        detail: ok ? `Terug te zetten: ${files.join(", ")} (database ${Math.ceil(db.length / 1024)} KB)` : "De database in de back-up is beschadigd" };
+    } catch { res = { ok: false, backupAt: last.at, detail: "De back-up is niet te openen met de sleutel van je Dienst" }; }
+  }
+  a.hersteltest = { at: Date.now(), ...res };
+  deps.save();
+  return { ...a.hersteltest };
+}
+
+// ───────── Herstelkopie zonder eigen cloud ─────────
+
+let lastCopy = "";
+/**
+ * Zonder eigen cloud is er geen opslag voor de herstelkopie van de kluis: de console zet hem (versleuteld met je
+ * herstelsleutel, zoals bij een cloud) in de back-upbucket van de Dienst, als `admin-config.enc`. Alleen als er iets
+ * veranderde (niet bij elke statuscontrole). Herstellen: "Ik heb al een Eigen Cloud" met de sleutels van die opslag.
+ */
+export async function saveDienstCopy(c: AdminConfig) {
+  if (!c.console.alleenDienst || !c.masterKey) return false;
+  const a = existing(c);
+  const bk = a?.backup;
+  if (!bk?.bucket || !bk.accessKey || !bk.secretKey) return false;
+  const stable = JSON.parse(JSON.stringify(c)) as AdminConfig & { console: { aanbieder?: AanbiederState } };
+  if (stable.console.aanbieder) delete stable.console.aanbieder.lastHealth;
+  const h = sha(stable);
+  if (h === lastCopy) return false;
+  await backupStoreOf(bk).put("admin-config.enc", sealJson(keysFor(c).manifest!, c, "admin-config"));
+  lastCopy = h;
+  return true;
 }
 
 let cleaning: Promise<unknown> | null = null;
@@ -821,12 +1138,24 @@ export async function status(c: AdminConfig, deps: Pick<Deps, "save">) {
       }
     } catch { /* volgende keer */ }
   }
+  // Eigen DNS-koppeling: records bijwerken als ze anders zijn dan wat er moet staan (bijv. na een mislukte poging).
+  if (a.dns) await syncOwnDns(a);
   const host = hostOf(a.url)!;
   const have = (await aanbiederNet.resolve4(host).catch(() => [] as string[])).sort();
+  const overzicht = h.reachable && a.secret ? await dienstOverzicht(a) : null;
   deps.save();
   void cleanupRetired(c, deps);
-  return { ...h, server: true, removed: false, dns: { host, want: a.server.ipv4 ?? null, have, ok: !!a.server.ipv4 && have.includes(a.server.ipv4) }, retired: (a.retired ?? []).length,
-    adressen: await adressenStatus(c, a) };
+  return { ...h, server: true, removed: false,
+    dns: { host, want: a.server.ipv4 ?? null, have, ok: !!a.server.ipv4 && have.includes(a.server.ipv4), mode: dnsInfo(c).mode, error: a.dns?.error ?? null },
+    retired: (a.retired ?? []).length, adressen: await adressenStatus(c, a), overzicht };
+}
+
+/** Kerncijfers van de Dienst (klanten, omzet deze maand, open hulpvragen) via GET /v1/status/overzicht; null als dat niet kan. */
+async function dienstOverzicht(a: AanbiederState) {
+  try {
+    const r = await http(`${aanbiederNet.reach(a.url!)}/v1/status/overzicht`, { headers: { authorization: `Beheer ${beheerToken(a.secret!)}` } }, 8000);
+    return r.ok && r.json && typeof r.json === "object" ? r.json : null;
+  } catch { return null; }
 }
 
 /**
@@ -847,7 +1176,7 @@ export async function toepassen(c: AdminConfig, deps: Pick<Deps, "save">) {
   } catch { throw new Error("Je Dienst is nu niet bereikbaar; probeer het later opnieuw"); }
   if (r.status === 404) throw new Error("Je Dienst kent dit nog niet; wacht tot hij is bijgewerkt, of kies Opnieuw opzetten");
   if (!r.ok) throw new Error(r.json?.error ? `De Dienst weigert: ${r.json.error}` : `De Dienst antwoordt ${r.status}`);
-  a.deployed = { env: sha(env), shape: a.deployed?.shape ?? sha(shapeOf(a)) };
+  a.deployed = { env: sha(env), shape: a.deployed?.shape ?? sha(shapeOf(a)), keys: envKeys(c, a) };
   deps.save();
   return { ok: true, restart: !!r.json?.restart, keys: (r.json?.keys ?? []) as string[] };
 }
@@ -879,6 +1208,9 @@ export async function verwijderen(c: AdminConfig, b: { confirm?: string }, deps:
   a.lastHealth = null;
   a.step = "klaar";
   deps.save();
+  // Eigen DNS-koppeling: de records weghalen (lukt dat nu niet, dan bij de volgende keer opnieuw opzetten).
+  const dns = a.dns ? await syncOwnDns(a) : null;
+  if (dns) deps.save();
   void cleanupRetired(c, deps);
-  return { ok: true, finalBackup: h.ok, detail: h.detail, bucket: a.backup?.bucket ?? null, pending: (a.retired ?? []).length };
+  return { ok: true, finalBackup: h.ok, detail: h.detail, bucket: a.backup?.bucket ?? null, pending: (a.retired ?? []).length, dns: dns ? dns.ok : null };
 }

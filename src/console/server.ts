@@ -92,6 +92,9 @@ const save = () => {
   if (c.console.done) {
     void saveAdminCopy(c).catch(() => {});
     void pushAdminConfig(c, extras.DIENST_URL()).catch(() => {});
+  } else if (c.console.alleenDienst) {
+    // Zonder eigen cloud: de herstelkopie in de back-upbucket van de Dienst (zodra die er is).
+    void aanbieder.saveDienstCopy(c).catch(() => {});
   }
 };
 
@@ -115,6 +118,7 @@ function sanitized(c: AdminConfig) {
     dienst: c.console.dienst ? { url: c.console.dienst.url ?? null, invite: c.console.dienst.invite ?? null, email: c.console.dienst.email ?? null, loggedIn: !!c.console.dienst.token, orderId: c.console.dienst.orderId ?? null, bundle: c.console.dienst.bundle ?? null, applied: !!c.console.dienst.applied } : null,
     maxUsers: c.console.maxUsers ?? 0,
     overstap: c.console.overstap ? { naar: c.console.overstap.naar, stap: c.console.overstap.stap } : null,
+    alleenDienst: !!c.console.alleenDienst,
   };
 }
 
@@ -382,6 +386,40 @@ function normalizeDomain(input: string | undefined, mode: string) {
   return d;
 }
 
+type CloudInput = { domain: string; domainMode?: "own" | "free" | "buy" | "sub"; mailbox: string; alertEmail?: string; appPassword: string };
+
+/** Een nieuwe kluis voor een cloud (eerste stap "Jij en je adres"); gooit een fout in gewone taal. */
+function cloudConfig(b: CloudInput): AdminConfig {
+  const mode = b.domainMode ?? "own";
+  const domain = normalizeDomain(b.domain, mode);
+  if (!/^[a-z0-9._+-]+$/i.test(b.mailbox ?? "")) throw new Error("Vul het deel vóór de @ in, zoals rene");
+  if ((b.appPassword ?? "").length < 10) throw new Error("Kies een inlogwachtwoord van minstens 10 tekens");
+  if (b.alertEmail && !/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(b.alertEmail)) throw new Error("Het meldadres is geen geldig e-mailadres");
+  if (b.alertEmail?.endsWith("@" + domain)) throw new Error("Kies voor meldingen een adres buiten je eigen domein, zodat een melding je ook bereikt als je mail stuk is");
+  if (mode === "free" && !b.alertEmail) throw new Error("Vul een meldadres in; daarmee maakt de console je gratis deSEC-account aan");
+  return {
+    cluster: domain.split(".")[0].replace(/[^a-z0-9-]/g, "").slice(0, 20) || "eigen",
+    nodeId: "beheer", kind: "data", masterKey: randomKeyHex(), clusterPort: 7946, advertise: { clusterUrl: "" }, seeds: [], domain,
+    stores: [], providers: {}, dns: [],
+    image: { ref: "ghcr.io/renevanes/eigen-cloud:latest", caddyRef: "ghcr.io/renevanes/eigen-caddy:latest" } as AdminConfig["image"],
+    appEnv: { MAIL_DOMAINS: domain, MAIL_FROM: `${b.mailbox}@${domain}`, HOSTNAME_FQDN: `mail.${domain}`, NODE_ENV: "production" },
+    policy: adminPolicy([]),
+    console: { step: "sleutel", done: false, keyConfirmed: false, appPasswordHash: hashPassword(b.appPassword), alertEmail: b.alertEmail ?? "", domainMode: mode },
+  };
+}
+
+/** Een kluis alleen voor de Eigen Cloud Dienst (aanbieder worden zonder eigen cloud). */
+function dienstConfig(): AdminConfig {
+  return {
+    cluster: "eigen", nodeId: "beheer", kind: "data", masterKey: randomKeyHex(), clusterPort: 7946, advertise: { clusterUrl: "" }, seeds: [],
+    stores: [], providers: {}, dns: [],
+    image: { ref: "ghcr.io/renevanes/eigen-cloud:latest", caddyRef: "ghcr.io/renevanes/eigen-caddy:latest" } as AdminConfig["image"],
+    appEnv: { NODE_ENV: "production" },
+    policy: adminPolicy([]),
+    console: { step: "sleutel", done: false, keyConfirmed: false, alleenDienst: true },
+  };
+}
+
 // ───────── Server ─────────
 
 export async function buildConsole() {
@@ -430,27 +468,19 @@ export async function buildConsole() {
     try { return await extras.dienstInvite(extras.cleanDienstUrl(req.query.url ?? ""), req.query.code ?? ""); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
   });
 
-  app.post<{ Body: { passphrase: string; domain: string; domainMode?: "own" | "free" | "buy" | "sub"; mailbox: string; alertEmail?: string; appPassword: string } }>("/api/setup/create", async (req, reply) => {
+  app.post<{ Body: CloudInput & { passphrase: string } }>("/api/setup/create", async (req, reply) => {
     if (vault.exists()) return reply.code(409).send({ error: "Er is al een kluis. Ontgrendel hem." });
-    const b = req.body;
-    const mode = b.domainMode ?? "own";
-    let domain: string;
-    try { domain = normalizeDomain(b.domain, mode); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
-    if (!/^[a-z0-9._+-]+$/i.test(b.mailbox ?? "")) return reply.code(400).send({ error: "Vul het deel vóór de @ in, zoals rene" });
-    if ((b.appPassword ?? "").length < 10) return reply.code(400).send({ error: "Kies een inlogwachtwoord van minstens 10 tekens" });
-    if (b.alertEmail && !/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(b.alertEmail)) return reply.code(400).send({ error: "Het meldadres is geen geldig e-mailadres" });
-    if (b.alertEmail?.endsWith("@" + domain)) return reply.code(400).send({ error: "Kies voor meldingen een adres buiten je eigen domein, zodat een melding je ook bereikt als je mail stuk is" });
-    if (mode === "free" && !b.alertEmail) return reply.code(400).send({ error: "Vul een meldadres in; daarmee maakt de console je gratis deSEC-account aan" });
-    const cfg: AdminConfig = {
-      cluster: domain.split(".")[0].replace(/[^a-z0-9-]/g, "").slice(0, 20) || "eigen",
-      nodeId: "beheer", kind: "data", masterKey: randomKeyHex(), clusterPort: 7946, advertise: { clusterUrl: "" }, seeds: [], domain,
-      stores: [], providers: {}, dns: [],
-      image: { ref: "ghcr.io/renevanes/eigen-cloud:latest", caddyRef: "ghcr.io/renevanes/eigen-caddy:latest" } as AdminConfig["image"],
-      appEnv: { MAIL_DOMAINS: domain, MAIL_FROM: `${b.mailbox}@${domain}`, HOSTNAME_FQDN: `mail.${domain}`, NODE_ENV: "production" },
-      policy: adminPolicy([]),
-      console: { step: "sleutel", done: false, keyConfirmed: false, appPasswordHash: hashPassword(b.appPassword), alertEmail: b.alertEmail ?? "", domainMode: mode },
-    };
-    try { vault.create(b.passphrase ?? "", cfg); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    let cfg: AdminConfig;
+    try { cfg = cloudConfig(req.body ?? ({} as CloudInput)); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    try { vault.create(req.body.passphrase ?? "", cfg); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    newSession(reply);
+    return { ok: true };
+  });
+
+  // Aanbieder worden zonder eigen cloud: een kluis alleen voor de Dienst (herstelsleutel zoals bij een cloud).
+  app.post<{ Body: { passphrase: string } }>("/api/setup/aanbieder", async (req, reply) => {
+    if (vault.exists()) return reply.code(409).send({ error: "Er is al een kluis. Ontgrendel hem." });
+    try { vault.create(req.body?.passphrase ?? "", dienstConfig()); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     newSession(reply);
     return { ok: true };
   });
@@ -462,7 +492,9 @@ export async function buildConsole() {
     try {
       // Bucketnaam vergeten? Dan zoeken we hem op met de sleutel van de opslag.
       const { config: recovered } = await findAdminConfig(key, req.body.store);
-      const cfg = { ...recovered, console: { ...(recovered as AdminConfig).console, step: "klaar", done: true, keyConfirmed: true } } as AdminConfig;
+      const rc = (recovered as AdminConfig).console;
+      // Een kluis alleen voor een Dienst (herstelkopie uit zijn back-upbucket) heeft geen cloud om "klaar" te zijn.
+      const cfg = { ...recovered, console: { ...rc, ...(rc?.alleenDienst ? {} : { step: "klaar", done: true }), keyConfirmed: true } } as AdminConfig;
       vault.create(req.body.passphrase ?? "", cfg);
       newSession(reply);
       return { ok: true };
@@ -625,6 +657,8 @@ export async function buildConsole() {
     s.post<{ Body: { cleanup?: boolean } }>("/api/setup/reset", async (req, reply) => {
       const c = cfg();
       if (c.console.done || c.console.firstLaunch) return reply.code(409).send({ error: "Je cloud is al gestart. Opnieuw beginnen kan dan niet meer vanuit de assistent." });
+      const dienst = (c.console as { aanbieder?: aanbieder.AanbiederState }).aanbieder;
+      if (dienst?.server || dienst?.removed || dienst?.backup?.bucket) return reply.code(409).send({ error: "In deze kluis staat ook je Eigen Cloud Dienst. Wissen kan niet: dan ben je de sleutel van je Dienst kwijt." });
       const done: string[] = [], left: string[] = [];
       if (req.body?.cleanup) {
         for (const st of c.stores) {
@@ -812,7 +846,7 @@ export async function buildConsole() {
     });
 
     // ── Aanbieder worden: je eigen Eigen Cloud Dienst opzetten en bijhouden ──
-    const aDeps = (): aanbieder.Deps => ({ save, serverOffers, storeOffers });
+    const aDeps = (): aanbieder.Deps => ({ save, serverOffers, storeOffers, dnsOffers });
     const aFail = (reply: FastifyReply, e: unknown) => reply.code(400).send({ error: (e as Error).message, ...((e as { steps?: unknown }).steps ? { steps: (e as { steps?: unknown }).steps } : {}) });
     s.get("/api/aanbieder", async () => aanbieder.view(cfg(), aDeps()));
     s.post<{ Body: { step?: string } }>("/api/aanbieder/stap", async (req, reply) => {
@@ -847,6 +881,24 @@ export async function buildConsole() {
     });
     s.post<{ Body: { confirm?: string } }>("/api/aanbieder/verwijderen", async (req, reply) => {
       try { return await aanbieder.verwijderen(cfg(), req.body ?? {}, aDeps()); } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: { provider?: string; zone?: string; fields?: Record<string, unknown> } }>("/api/aanbieder/dns", async (req, reply) => {
+      try { const r = await aanbieder.saveDns(cfg(), req.body ?? {}, aDeps()); save(); return r; } catch (e) { save(); return aFail(reply, e); }
+    });
+    s.post("/api/aanbieder/hersteltest", async (_req, reply) => {
+      try { return await aanbieder.hersteltest(cfg(), aDeps()); } catch (e) { return aFail(reply, e); }
+    });
+    // Kluis alleen voor een Dienst: er komt toch een eigen cloud bij (de stap "Jij en je adres", zonder nieuwe kluis).
+    s.post<{ Body: CloudInput }>("/api/setup/cloud", async (req, reply) => {
+      const c = cfg();
+      if (!c.console.alleenDienst) return reply.code(409).send({ error: "Je hebt al een eigen cloud" });
+      let n: AdminConfig;
+      try { n = cloudConfig(req.body ?? ({} as CloudInput)); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+      Object.assign(c, { cluster: n.cluster, domain: n.domain, appEnv: n.appEnv });
+      Object.assign(c.console, { appPasswordHash: n.console.appPasswordHash, alertEmail: n.console.alertEmail, domainMode: n.console.domainMode, step: c.console.keyConfirmed ? "regelen" : "sleutel" });
+      delete c.console.alleenDienst;
+      save();
+      return { ok: true, step: c.console.step };
     });
 
     // ── Mail ──

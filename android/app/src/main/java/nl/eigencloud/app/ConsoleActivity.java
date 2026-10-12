@@ -37,7 +37,17 @@ public final class ConsoleActivity extends Activity {
     private final ExecutorService pool = Executors.newCachedThreadPool();
     private final Handler main = new Handler(Looper.getMainLooper());
 
+    /** Route van de console om mee te openen, bijv. "#aanbieder" (Je dienst / aanbieder worden). */
+    static final String EXTRA_HASH = "consoleHash";
+
     static void open(Context c) { c.startActivity(new Intent(c, ConsoleActivity.class)); }
+
+    /** De console op een route openen; alleen "#aanbieder", "#aanbieder/<onderdeel>" en "#jij" (toch een eigen cloud). */
+    static void open(Context c, String hash) {
+        Intent i = new Intent(c, ConsoleActivity.class);
+        if (hash != null && hash.matches("^#(aanbieder(/[a-z]{1,20})?|jij)$")) i.putExtra(EXTRA_HASH, hash);
+        c.startActivity(i);
+    }
 
     @Override
     protected void onCreate(Bundle b) {
@@ -69,7 +79,10 @@ public final class ConsoleActivity extends Activity {
         });
         web.addJavascriptInterface(new Bridge(), "EigenNative");
         if (b != null) web.restoreState(b);
-        else web.loadUrl(Assets.ORIGIN + "/index.html");
+        else {
+            String hash = getIntent().getStringExtra(EXTRA_HASH);
+            web.loadUrl(Assets.ORIGIN + "/index.html" + (hash != null && hash.matches("^#(aanbieder(/[a-z]{1,20})?|jij)$") ? hash : ""));
+        }
     }
 
     @Override
@@ -210,7 +223,10 @@ public final class ConsoleActivity extends Activity {
             Prefs.setStr(ConsoleActivity.this, Prefs.INVITE_CODE, null);
         }
 
-        /** Voor aanbieders: het beheer van de eigen Dienst openen (zelfde scherm als vanuit de app, met vingerafdruk). */
+        /**
+         * Voor aanbieders: het beheer van de eigen Dienst openen (zelfde scherm als vanuit de app, met vingerafdruk), ook
+         * meteen op een pagina: {@code https://dienst.x.nl/beheer#/klanten}.
+         */
         @JavascriptInterface
         public void openDienst(String url) {
             if (!onOurPage()) return;
@@ -218,12 +234,28 @@ public final class ConsoleActivity extends Activity {
                 try {
                     String u = DienstActivity.normalize(url);
                     Prefs.setStr(ConsoleActivity.this, Prefs.DIENST_URL, u);
-                    DienstActivity.open(ConsoleActivity.this, u);
+                    DienstActivity.open(ConsoleActivity.this, url);
                 } catch (IllegalArgumentException e) {
                     Uri x = Uri.parse(url);
                     if ("https".equals(x.getScheme())) openExternal(x);
                 }
             });
+        }
+
+        /** Je eigen Dienst onthouden voor het startscherm van de app ("<naam> beheren"); lege waarden = vergeten. */
+        @JavascriptInterface
+        public void rememberDienst(String url, String name, String alleen) {
+            if (!onOurPage()) return;
+            Prefs.setStr(ConsoleActivity.this, Prefs.DIENST_OWN_ONLY, "1".equals(alleen) ? "1" : null);
+            String u = url == null ? "" : url.trim(), n = name == null ? "" : name.trim();
+            if (u.isEmpty()) {
+                Prefs.setStr(ConsoleActivity.this, Prefs.DIENST_OWN_URL, null);
+                Prefs.setStr(ConsoleActivity.this, Prefs.DIENST_OWN_NAME, null);
+                return;
+            }
+            try { u = DienstActivity.normalize(u); } catch (IllegalArgumentException e) { return; }
+            Prefs.setStr(ConsoleActivity.this, Prefs.DIENST_OWN_URL, u);
+            Prefs.setStr(ConsoleActivity.this, Prefs.DIENST_OWN_NAME, n.length() > 60 ? n.substring(0, 60) : n);
         }
 
         @JavascriptInterface

@@ -498,6 +498,23 @@ public final class Admin {
         String host = "";
         try { host = Json.truthy(a.get("url")) ? new java.net.URI(Json.jsString(a.get("url"))).getHost() : ""; } catch (java.net.URISyntaxException | RuntimeException e) { host = ""; }
         if (host == null) host = "";
+        String adHost0 = Json.str(a, "adressen", "host");
+        if (Json.map(a, "dns") != null) {
+            // De Dienst heeft een eigen DNS-koppeling: de console zet zijn records zelf. Wat de cloud eerder publiceerde,
+            // haalt de cloud weg, behalve namen onder de zone van die koppeling.
+            String z = Json.str(a, "dns", "zone");
+            java.util.LinkedHashSet<String> subs = new java.util.LinkedHashSet<>();
+            for (Object x : out) subs.add(Json.str(x, "sub"));
+            for (String h : new String[] {host, adHost0 == null ? "" : adHost0}) if (!h.isEmpty() && h.endsWith("." + d)) subs.add(h.substring(0, h.length() - d.length() - 1));
+            List<Object> res = new ArrayList<>();
+            for (String sub : subs) {
+                String fqdn = sub + "." + d;
+                if (z != null && (fqdn.equals(z) || fqdn.endsWith("." + z))) continue;
+                res.add(Json.obj("sub", sub, "type", "A", "value", ""));
+                res.add(Json.obj("sub", sub, "type", "AAAA", "value", ""));
+            }
+            return res;
+        }
         boolean removed = Json.truthy(a.get("removed"));
         Object ipv4 = Json.path(a, "server", "ipv4"), ipv6 = Json.path(a, "server", "ipv6");
         // De Dienst en (als hij er draait) de adressendienst op dezelfde server.

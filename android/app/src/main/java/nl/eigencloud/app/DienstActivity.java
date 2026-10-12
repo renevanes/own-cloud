@@ -34,6 +34,7 @@ import java.security.cert.Certificate;
 import java.security.spec.ECGenParameterSpec;
 import java.util.Locale;
 
+import nl.eigencloud.core.BeheerLink;
 import nl.eigencloud.core.Bytes;
 import nl.eigencloud.core.Json;
 
@@ -44,6 +45,8 @@ import nl.eigencloud.core.Json;
  */
 public final class DienstActivity extends Activity {
     static final String EXTRA_URL = "dienstUrl";
+    /** Pagina van het beheer om mee te openen (bijv. "klanten"); zie {@link BeheerLink}. */
+    static final String EXTRA_PAGE = "dienstPage";
     private static final String PREFIX = "eigen-dienst-login:";
 
     private WebView web;
@@ -52,11 +55,37 @@ public final class DienstActivity extends Activity {
     private final Handler main = new Handler(Looper.getMainLooper());
     private CancellationSignal prompting;
 
-    /** Opent het beheer van de Dienst op {@code url} (wordt eerst gecontroleerd; zie {@link #normalize}). */
+    /**
+     * Opent het beheer van de Dienst op {@code url} (wordt eerst gecontroleerd; zie {@link #normalize}). Met een pagina in
+     * het adres ({@code …/beheer#/klanten}) meteen op die pagina. Staat het beheer van deze Dienst al open, dan gaat die
+     * (met de bestaande inlog) naar voren en naar de pagina, zodat je niet steeds opnieuw inlogt.
+     */
     static void open(Context c, String url) {
-        Intent i = new Intent(c, DienstActivity.class).putExtra(EXTRA_URL, normalize(url));
+        Intent i = new Intent(c, DienstActivity.class).putExtra(EXTRA_URL, normalize(url)).putExtra(EXTRA_PAGE, BeheerLink.page(url))
+                .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
         if (!(c instanceof Activity)) i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         c.startActivity(i);
+    }
+
+    @Override
+    protected void onNewIntent(Intent i) {
+        super.onNewIntent(i);
+        String base;
+        try { base = normalize(i.getStringExtra(EXTRA_URL)); } catch (IllegalArgumentException e) { return; }
+        String page = i.getStringExtra(EXTRA_PAGE);
+        if (web == null) return;
+        if (!Uri.parse(base).equals(dienst)) {
+            // Een andere Dienst: opnieuw beginnen op dat adres.
+            setIntent(i);
+            dienst = Uri.parse(base);
+            setTitle("Beheer " + dienst.getHost());
+            web.loadUrl(BeheerLink.url(base, page));
+            return;
+        }
+        if (page != null && !page.isEmpty()) {
+            String js = "location.hash = " + Json.quote("#/" + page);
+            main.post(() -> { if (web != null && trusted()) web.evaluateJavascript(js, null); else if (web != null) web.loadUrl(BeheerLink.url(base, page)); });
+        }
     }
 
     /**
@@ -115,7 +144,7 @@ public final class DienstActivity extends Activity {
         });
         web.addJavascriptInterface(new Bridge(), "EigenNative");
         if (b != null) web.restoreState(b);
-        else web.loadUrl(base + "/beheer/");
+        else web.loadUrl(BeheerLink.url(base, getIntent().getStringExtra(EXTRA_PAGE)));
     }
 
     /** Eenvoudige melding als de Dienst niet bereikbaar is (zonder brug: de pagina heeft geen dienst-adres). */

@@ -205,7 +205,7 @@ export async function prepareStore(cfg: StoreConfig): Promise<StepResult[]> {
 
 /** Stuurt gewijzigde beheerinstellingen naar het draaiende cluster (ondertekend). */
 type ConsolePart = { budget?: number | null; catalog?: Parameters<typeof serverPrices>[0]; mailRelay?: string; spfExtra?: string; alertEmail?: string; extraDns?: unknown[]; maxUsers?: number; dienst?: { url?: string; orderId?: string; applied?: boolean };
-  aanbieder?: { url?: string; removed?: boolean; dnsRemove?: string[]; server?: { ipv4?: string; ipv6?: string } | null; adressen?: { host?: string } } };
+  aanbieder?: { url?: string; removed?: boolean; dnsRemove?: string[]; server?: { ipv4?: string; ipv6?: string } | null; adressen?: { host?: string }; dns?: { zone: string } } };
 
 /**
  * DNS-records voor de Eigen Cloud Dienst van een aanbieder die de cloud zelf publiceert (extra_dns): A/AAAA voor het
@@ -220,6 +220,14 @@ export function aanbiederDns(c: { domain?: string } & { console?: ConsolePart })
   for (const sub of a.dnsRemove ?? []) out.push({ sub, type: "A", value: "" }, { sub, type: "AAAA", value: "" });
   let host = "";
   try { host = a.url ? new URL(a.url).hostname : ""; } catch { /* geen geldig adres */ }
+  if (a.dns) {
+    // De Dienst heeft een eigen DNS-koppeling: de console zet zijn records zelf. Wat de cloud eerder publiceerde, haalt
+    // de cloud weg, behalve namen onder de zone van die koppeling (die zet de console nu).
+    const z = a.dns.zone;
+    const own = (fqdn: string) => fqdn === z || fqdn.endsWith(`.${z}`);
+    const subs = new Set([...out.map((x) => x.sub), ...[host, a.adressen?.host ?? ""].map((h) => (h ? subOf(h) : null)).filter((x): x is string => !!x)]);
+    return [...subs].filter((sub) => !own(`${sub}.${d}`)).flatMap((sub) => [{ sub, type: "A" as const, value: "" }, { sub, type: "AAAA" as const, value: "" }]);
+  }
   // De Dienst en (als hij er draait) de adressendienst op dezelfde server.
   for (const h of [host, a.adressen?.host ?? ""]) {
     const sub = h ? subOf(h) : null;

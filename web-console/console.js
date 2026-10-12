@@ -100,23 +100,57 @@ async function boot() {
   render();
 }
 
+/** "#aanbieder" en "#aanbieder/<onderdeel>": aanbieder worden, of "Je dienst" met al zijn onderdelen. */
+const isDienstHash = (h) => h === "aanbieder" || h.startsWith("aanbieder/");
+
 async function render() {
   clearInterval(timer);
   clearTimeout(dienstTimer);
   clearInterval(aanbiederTimer);
   clearTimeout(overstapTimer);
   $("#lockBtn").hidden = !state.unlocked;
-  if (!state.vault) return renderStart();
-  if (!state.unlocked) return renderLock();
+  const hash = location.hash.slice(1);
+  if (!state.vault) { $("#dienstLink").hidden = true; return isDienstHash(hash) ? renderAanbiederCreate() : renderStart(); }
+  if (!state.unlocked) { $("#dienstLink").hidden = true; return renderLock(); }
   config = await api("/api/config");
   STEPS = stepsFor(config);
-  const hash = location.hash.slice(1);
+  void updateDienstLink();
+  if (config.alleenDienst) {
+    // Kluis alleen voor een Dienst: eerst de herstelsleutel, daarna "Je dienst". "#jij": toch een eigen cloud erbij.
+    if (state.step === "sleutel") return stepKey(true);
+    if (hash === "jij") return renderCreate(true);
+    return renderHub(isDienstHash(hash) ? hash : "aanbieder");
+  }
+  if (isDienstHash(hash)) return renderHub(hash);
   if (state.done && !STEPS.some((s) => s.id === hash)) return renderDash();
   renderStep(STEPS.some((s) => s.id === hash) ? hash : state.step ?? "sleutel");
 }
 
+/** Naar een adres binnen de console; ook als je er al bent (dan komt er geen hashchange). */
+function goHash(h) {
+  if (location.hash.slice(1) === h) render(); else location.hash = h;
+}
+
+/** De link bovenin: "Aanbieder worden", of "<naam> beheren" zodra je Dienst er is. */
+async function updateDienstLink() {
+  const l = $("#dienstLink");
+  try {
+    const a = await api("/api/aanbieder");
+    l.textContent = a.hub ? `${a.company?.name || "Je dienst"} beheren` : a.started ? "Je dienst opzetten" : "Aanbieder worden";
+    l.title = l.textContent;
+    // Zonder eigen cloud is "Je dienst" het beginscherm; dan alleen bij "Eigen cloud maken" een weg terug.
+    l.hidden = !!config?.alleenDienst && location.hash.slice(1) !== "jij";
+    rememberDienst(a);
+  } catch { l.hidden = true; }
+}
+
+/** De app onthoudt je eigen Dienst (adres en naam) voor het startscherm: "<naam> beheren". */
+function rememberDienst(a) {
+  try { NATIVE?.rememberDienst?.(a?.hub ? a.url ?? "" : "", a?.hub ? a.company?.name ?? "" : "", config?.alleenDienst ? "1" : ""); } catch { /* oude app */ }
+}
+
 $("#lockBtn").onclick = async () => { await api("/api/lock", { method: "POST" }); location.hash = ""; boot(); };
-window.addEventListener("hashchange", () => state?.unlocked && render());
+window.addEventListener("hashchange", () => { if (state?.unlocked || (state && !state.vault)) render(); });
 
 function formMsg(form, text, ok = false) {
   const m = $(".msg", form);
@@ -162,10 +196,46 @@ function renderStart() {
     <p class="lead">Mail, agenda en foto's op servers die jij kiest. Deze console helpt je in een paar stappen op weg.</p>
     <div class="choices">
       <button class="choice" id="new"><b>Nieuwe Eigen Cloud maken</b><span class="muted">Ongeveer een kwartier, plus het wachten op een export van Google als je wilt overstappen.</span></button>
-      <button class="choice" id="recover"><b>Ik heb al een Eigen Cloud</b><span class="muted">Op een nieuwe ${NATIVE ? "telefoon" : "computer"}, of na een storing: herstellen met je herstelsleutel.</span></button>
+      <button class="choice" id="recover"><b>Ik heb al een Eigen Cloud</b><span class="muted">Op een nieuwe ${NATIVE ? "telefoon" : "computer"}, of na een storing: herstellen met je herstelsleutel. Ook voor het beheer van je Dienst.</span></button>
+      <button class="choice" id="provider"><b>Aanbieder worden</b><span class="muted">Draai je eigen Eigen Cloud Dienst, met je eigen naam en prijzen. Mensen nemen dan bij jou een cloud. Een eigen cloud is niet nodig.</span></button>
     </div></section>`;
-  $("#new").onclick = renderCreate;
+  $("#new").onclick = () => renderCreate();
   $("#recover").onclick = renderRecover;
+  $("#provider").onclick = () => goHash("aanbieder");
+}
+
+/** Aanbieder worden zonder eigen cloud: eerst een kluis op dit toestel (daarna de herstelsleutel, dan de stappen). */
+function renderAanbiederCreate() {
+  root.innerHTML = `<section class="center">
+    <h1>Aanbieder worden</h1>
+    <p class="lead">Met een eigen Eigen Cloud Dienst nemen mensen bij jou een cloud, met jouw naam en prijzen. Ze betalen via jouw Mollie.</p>
+    <div class="panel" style="margin:0 0 22px"><b>Wat je nodig hebt</b>
+      <ul class="results" style="margin:0">
+        <li>Een domein voor je Dienst, bijvoorbeeld dienst.jouwbedrijf.nl</li>
+        <li>Accounts bij Scaleway (voor de clouds van je klanten), Mollie en deSEC</li>
+        <li>Een mailserver voor inlogcodes en facturen</li>
+        <li>Ongeveer een half uur</li>
+      </ul>
+      <small class="muted">Een eigen cloud is niet nodig. Die kun je later altijd nog maken.</small></div>
+    <form class="fields" id="f">
+      <h2 style="margin:0">Kluis op ${DEVICE}</h2>
+      <p class="muted" style="margin:0">De console bewaart de sleutels van je Dienst versleuteld op ${DEVICE}. Kies een wachtwoordzin die je nergens anders gebruikt, bijvoorbeeld vier losse woorden.</p>
+      <div class="row"><label>Wachtwoordzin<input type="password" name="pass" minlength="12" autocomplete="new-password" required></label>
+      <label>Nog een keer<input type="password" name="pass2" minlength="12" autocomplete="new-password" required></label></div>
+      <p class="msg"></p>
+      <div class="actions" style="margin:0"><button class="btn primary">Verder</button><button type="button" class="btn quiet" id="back">Terug</button></div>
+    </form></section>`;
+  $("#back").onclick = () => { location.hash = ""; renderStart(); };
+  const f = $("#f");
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    if (f.pass.value !== f.pass2.value) return formMsg(f, "De wachtwoordzinnen zijn niet gelijk");
+    try {
+      await busy($("button.primary", f), () => api("/api/setup/aanbieder", { method: "POST", body: { passphrase: f.pass.value } }));
+      location.hash = "aanbieder";
+      boot();
+    } catch (err) { formMsg(f, err.message); }
+  };
 }
 
 function renderLock() {
@@ -222,7 +292,7 @@ function wizardShell(current, inner) {
     ${STEPS.map((s, i) => `<li class="${i < idx ? "done" : i === idx ? "now" : ""}" ${i === idx ? 'aria-current="step"' : ""}>
       <span class="pip">${i < idx ? "✓" : ""}</span>${i < idx && (s.id !== "jij" || state?.vault) ? `<a href="#${s.id}">${s.label}</a>` : `<span class="t">${s.label}</span>`}</li>`).join("")}
   </ol><section class="pane">${inner}
-    ${state?.vault && !state.done ? `<nav class="wiz-nav">${idx > 0 ? `<button type="button" class="link" data-wiz="prev">Vorige stap</button>` : "<span></span>"}<button type="button" class="link quiet" data-wiz="reset">Opnieuw beginnen</button></nav>` : ""}
+    ${state?.vault && !state.done && !config?.alleenDienst ? `<nav class="wiz-nav">${idx > 0 ? `<button type="button" class="link" data-wiz="prev">Vorige stap</button>` : "<span></span>"}<button type="button" class="link quiet" data-wiz="reset">Opnieuw beginnen</button></nav>` : ""}
   </section></div>`;
 }
 
@@ -271,8 +341,10 @@ const DOMAIN_HINTS = {
   free: "Gratis van deSEC (open source, non-profit, Berlijn). Prima om te beginnen. Voor mail is een eigen domein beter: sommige ontvangers vertrouwen gratis adressen minder.",
 };
 
-function renderCreate() {
+/** Stap "Jij en je adres". `upgrade`: je hebt al een kluis voor je Dienst; er komt een eigen cloud bij (geen nieuwe kluis). */
+function renderCreate(upgrade = false) {
   root.innerHTML = wizardShell("jij", `
+    ${upgrade ? `<p><a class="link" href="#aanbieder">Terug naar je dienst</a></p>` : ""}
     <h1>Jij en je adres</h1>
     <p class="lead">Je cloud krijgt een eigen adres op internet. Daaraan hangen je mailadres en de link naar je cloud.</p>
     <form class="fields" id="f">
@@ -286,10 +358,10 @@ function renderCreate() {
       <label>Je e-mailadres<div class="suffix"><input name="mailbox" placeholder="rene" autocapitalize="off" required><span id="at">@…</span></div></label>
       <label>Wachtwoord om in je cloud in te loggen<input type="password" name="appPassword" minlength="10" autocomplete="new-password" required><small>Minstens 10 tekens. Dit gebruik je dagelijks, ook op je telefoon.</small></label>
       <label>Meldingen bij problemen naar<input type="email" name="alertEmail" placeholder="een adres bij een andere aanbieder"><small id="alertHint">Kies een adres buiten je nieuwe domein, zodat een melding ook aankomt als je mail stuk is.</small></label>
-      <h2>Kluis van deze console</h2>
+      ${upgrade ? "" : `<h2>Kluis van deze console</h2>
       <p class="muted" style="margin:0">De console bewaart je sleutels en API-tokens versleuteld op ${DEVICE}. Kies een wachtwoordzin die je nergens anders gebruikt, bijvoorbeeld vier losse woorden.</p>
       <div class="row"><label>Wachtwoordzin<input type="password" name="pass" minlength="12" autocomplete="new-password" required></label>
-      <label>Nog een keer<input type="password" name="pass2" minlength="12" autocomplete="new-password" required></label></div>
+      <label>Nog een keer<input type="password" name="pass2" minlength="12" autocomplete="new-password" required></label></div>`}
       <p class="msg"></p>
       <div class="next"><button class="btn primary">Verder</button></div>
     </form>`);
@@ -323,9 +395,19 @@ function renderCreate() {
   upd();
   f.onsubmit = async (e) => {
     e.preventDefault();
+    const body = { domain: f.domain.value, domainMode: f.domainMode.value, mailbox: f.mailbox.value, appPassword: f.appPassword.value, alertEmail: f.alertEmail.value };
+    if (upgrade) {
+      try {
+        const r = await busy($("button.primary", f), () => api("/api/setup/cloud", { method: "POST", body }));
+        state.step = r.step;
+        location.hash = r.step;
+        boot();
+      } catch (err) { formMsg(f, err.message); }
+      return;
+    }
     if (f.pass.value !== f.pass2.value) return formMsg(f, "De wachtwoordzinnen zijn niet gelijk");
     try {
-      await busy($("button", f), () => api("/api/setup/create", { method: "POST", body: { domain: f.domain.value, domainMode: f.domainMode.value, mailbox: f.mailbox.value, appPassword: f.appPassword.value, alertEmail: f.alertEmail.value, passphrase: f.pass.value } }));
+      await busy($("button.primary", f), () => api("/api/setup/create", { method: "POST", body: { ...body, passphrase: f.pass.value } }));
       location.hash = "sleutel";
       boot();
     } catch (err) { formMsg(f, err.message); }
@@ -430,15 +512,16 @@ async function go(step) {
 }
 
 function renderStep(id) {
-  const fn = ({ jij: stepJij, sleutel: stepKey, regelen: stepRegelen, opslag: stepStores, servers: stepServers, domein: stepDns, mail: stepMail, starten: stepLaunch, klaar: renderDash })[id] ?? stepKey;
+  const fn = ({ jij: stepJij, sleutel: () => stepKey(), regelen: stepRegelen, opslag: stepStores, servers: stepServers, domein: stepDns, mail: stepMail, starten: stepLaunch, klaar: renderDash })[id] ?? stepKey;
   fn();
 }
 
-async function stepKey() {
+/** De herstelsleutel opschrijven en controleren. `dienst`: kluis alleen voor een Dienst (daarna naar "Je dienst"). */
+async function stepKey(dienst = false) {
   const k = await api("/api/key");
-  root.innerHTML = wizardShell("sleutel", `
+  const inner = `
     <h1>Je herstelsleutel</h1>
-    <p class="lead">Alles wat je cloud opslaat, wordt hiermee versleuteld. Zonder deze sleutel kan niemand je back-ups lezen — ook jij niet.</p>
+    <p class="lead">${dienst ? "Hiermee haal je het beheer van je Dienst terug op een ander toestel. De console bewaart een versleutelde kopie bij de back-ups van je Dienst; alleen deze sleutel opent hem." : "Alles wat je cloud opslaat, wordt hiermee versleuteld. Zonder deze sleutel kan niemand je back-ups lezen — ook jij niet."}</p>
     <div class="key">${k.groups.map((g, i) => `<div>${g}<small>groep ${i + 1}</small></div>`).join("")}</div>
     <p class="muted">Controlegetal ${k.check}</p>
     <div class="note">Schrijf hem op of druk het herstelblad af, en bewaar het op twee plekken: thuis bij je belangrijke papieren en bij iemand die je vertrouwt. Niet als foto op je telefoon.</div>
@@ -448,13 +531,19 @@ async function stepKey() {
       <div class="row"><label>Groep 3<input name="g3" autocomplete="off" required></label><label>Groep 7<input name="g7" autocomplete="off" required></label></div>
       <p class="msg"></p>
       <div class="next"><button class="btn primary">${k.confirmed ? "Verder" : "Klopt, verder"}</button></div>
-    </form>`);
+    </form>`;
+  root.innerHTML = dienst ? `<section class="center keypage">${inner}</section>` : wizardShell("sleutel", inner);
   const f = $("#f");
   if (k.confirmed) { f.g3.value = k.groups[2]; f.g7.value = k.groups[6]; }
   f.onsubmit = async (e) => {
     e.preventDefault();
-    try { await api("/api/key/confirm", { method: "POST", body: { g3: f.g3.value, g7: f.g7.value } }); go("regelen"); }
-    catch (err) { formMsg(f, err.message); }
+    try {
+      await api("/api/key/confirm", { method: "POST", body: { g3: f.g3.value, g7: f.g7.value } });
+      if (!dienst) return go("regelen");
+      await api("/api/step", { method: "POST", body: { step: "dienst" } });
+      state.step = "dienst";
+      goHash("aanbieder");
+    } catch (err) { formMsg(f, err.message); }
   };
 }
 
@@ -1457,13 +1546,16 @@ const A_HELP = {
   mollie: `Voor de betalingen van je klanten. Begin met de testsleutel (test_…); later zet je hier de live-sleutel. <a href="https://my.mollie.com/dashboard/developers/api-keys" target="_blank" rel="noopener">Sleutels bij Mollie</a>`,
   desec: `Voor de DNS van je klanten. Maak bij deSEC een token dat domeinen mag aanmaken. <a href="https://desec.io/tokens" target="_blank" rel="noopener">Tokens bij deSEC</a>`,
   smtp: `Voor inlogcodes, facturen en meldingen. Leeg laten = via de mail van je eigen cloud.`,
+  smtpZelf: `Voor inlogcodes, facturen en meldingen, bijvoorbeeld Scaleway Transactional Email of de SMTP-server van je mailprovider: smtp://gebruiker:wachtwoord@server:587.`,
+  dns: `Op dit adres vinden je klanten je Dienst. Kies wie het in de DNS zet. Met een DNS-aanbieder doet de console het zelf, ook als je server later een ander IP-adres krijgt.`,
   openprovider: `Alleen nodig als klanten via jou een domein kopen. Zet bij Openprovider het IP-adres van je server op de lijst. <a href="https://cp.openprovider.eu" target="_blank" rel="noopener">Openprovider</a>`,
   adres: `Gratis adressen (naam.eigencloud.nl) voor je klanten, via de centrale adressendienst. Leeg laten = vanzelf: staat je Dienst op de lijst van aanbieders, dan gebruikt hij de adressendienst van het project.`,
   adressen: `Alleen voor de beheerders van het open-sourceproject. De gratis-adressendienst geeft klanten van <b>alle</b> aanbieders een gratis adres (bijvoorbeeld vanes.eigencloud.nl) dat ze houden als ze van aanbieder wisselen. Hij draait mee op de server van je Dienst. Je hebt nodig: een eigen domein voor die adressen, bij deSEC (de "gedeelde zone", bijvoorbeeld eigencloud.nl), en een deSEC-token van dat account dat tokens mag beheren. Vraag deSEC om een hogere zonelimiet: elk gratis adres is een zone. <a href="https://desec.io/tokens" target="_blank" rel="noopener">Tokens bij deSEC</a>`,
 };
 
+/** Het beheer van je Dienst openen, eventueel meteen op een pagina (…/beheer#/klanten). In de app: met vingerafdruk. */
 function openBeheer(url) {
-  if (NATIVE?.openDienst) NATIVE.openDienst(url.replace(/\/beheer$/, ""));
+  if (NATIVE?.openDienst) NATIVE.openDienst(url);
   else if (NATIVE) NATIVE.openUrl(url);
   else window.open(url, "_blank", "noopener");
 }
@@ -1480,15 +1572,19 @@ async function renderAanbieder(msg) {
   clearInterval(aanbiederTimer);
   let a;
   try { a = await api("/api/aanbieder"); } catch { return; }
+  rememberDienst(a);
   if (!a.started) {
-    box.innerHTML = `<h2>Aanbieder worden</h2><div class="panel"><p style="margin:0">Draai zelf een Eigen Cloud Dienst: mensen nemen dan bij jou een cloud, met jouw prijzen en jouw naam, en betalen via je eigen Mollie. De console zet de Dienst op een eigen server bij een Europese aanbieder naar keuze, maakt elk uur een back-up en houdt hem bij.</p>
-      <div><button class="btn" id="aStart">Aanbieder worden</button></div></div>`;
+    box.innerHTML = `<div class="panel"><p style="margin:0">Draai zelf een Eigen Cloud Dienst: mensen nemen dan bij jou een cloud, met jouw prijzen en jouw naam, en betalen via je eigen Mollie. De console zet de Dienst op een eigen server bij een Europese aanbieder naar keuze, maakt elk uur een back-up en houdt hem bij.</p>
+      <ol class="steps-mini">${A_STEPS.map(([, l]) => `<li>${esc(l)}</li>`).join("")}</ol>
+      <div><button class="btn primary" id="aStart">Beginnen</button></div></div>`;
     $("#aStart").onclick = () => aStep("bedrijf").catch(() => {});
     return;
   }
-  if (a.step === "klaar") return aanbiederKlaar(box, a, msg);
+  if (a.step === "klaar" && a.hub) return renderHub(isDienstHash(location.hash.slice(1)) ? location.hash.slice(1) : "aanbieder", msg);
+  if (a.step === "klaar") a.step = "opzetten";
   const i = A_STEPS.findIndex(([id]) => id === a.step);
-  const head = `<h2>Aanbieder worden <small class="muted">· stap ${i + 1} van ${A_STEPS.length}: ${esc(A_STEPS[i][1])}</small></h2>`;
+  const head = `<ol class="atrail" aria-label="Stappen">${A_STEPS.map(([, l], k) => `<li class="${k < i ? "done" : k === i ? "now" : ""}" ${k === i ? 'aria-current="step"' : ""}><span class="pip">${k < i ? "✓" : k + 1}</span><span class="t">${esc(l)}</span></li>`).join("")}</ol>
+    <h2 class="astep">Stap ${i + 1} van ${A_STEPS.length}: ${esc(A_STEPS[i][1])}</h2>`;
   const nav = (canNext, nextLabel = "Volgende") => `<div class="actions" style="margin:0"><button type="button" class="btn" id="aPrev">${i > 0 ? "Vorige" : a.server || a.removed ? "Terug" : "Stoppen"}</button><button class="btn primary" ${canNext === false ? "disabled" : ""}>${nextLabel}</button></div>`;
   const wire = () => {
     $("#aPrev").onclick = () => {
@@ -1525,8 +1621,8 @@ async function renderAanbieder(msg) {
       ${field("mollieKey", "API-sleutel", ac.mollieKey, 'placeholder="test_…"')}
       <h3 style="margin:0">deSEC</h3><small class="muted">${A_HELP.desec}</small>
       ${field("desecToken", "Token", ac.desecToken)}
-      <h3 style="margin:0">Mail versturen</h3><small class="muted">${A_HELP.smtp}</small>
-      <label class="check"><input type="checkbox" name="smtpCloud" ${!ac.smtp || ac.smtpFromCloud ? "checked" : ""}> Via de mail van mijn eigen cloud${ac.smtpFromCloud ? ` (${esc(ac.smtp)})` : ""}</label>
+      <h3 style="margin:0">Mail versturen</h3><small class="muted">${config?.mailRelay ? A_HELP.smtp : A_HELP.smtpZelf}</small>
+      ${config?.mailRelay ? `<label class="check"><input type="checkbox" name="smtpCloud" ${!ac.smtp || ac.smtpFromCloud ? "checked" : ""}> Via de mail van mijn eigen cloud${ac.smtpFromCloud ? ` (${esc(ac.smtp)})` : ""}</label>` : ""}
       <div class="row">${field("smtpUrl", "Andere mailserver", "", `placeholder="${ac.smtp && !ac.smtpFromCloud ? `Nu ${esc(ac.smtp)}; leeg = zo laten` : "smtp://gebruiker:wachtwoord@smtp.tem.scaleway.com:587"}"`)}${field("mailFrom", "Afzender", ac.mailFrom, 'type="email"')}</div>
       <details ${ac.openproviderUser || ac.adresUrl ? "open" : ""}><summary>Optioneel: domeinen verkopen en gratis adressen</summary><div class="fields" style="margin-top:10px">
         <small class="muted">${A_HELP.openprovider}</small>
@@ -1537,13 +1633,13 @@ async function renderAanbieder(msg) {
       <ul class="results" id="aChecks"></ul>
       <p class="msg"></p>${nav(undefined, a.ready.accounts ? "Controleren en verder" : "Controleren")}</form>`;
     wire();
-    $("#af").smtpUrl.oninput = (e) => { if (e.target.value.trim()) $("#af").smtpCloud.checked = false; };
+    $("#af").smtpUrl.oninput = (e) => { if (e.target.value.trim() && $("#af").smtpCloud) $("#af").smtpCloud.checked = false; };
     $("#af").onsubmit = async (e) => {
       e.preventDefault();
       const f = e.target;
       const body = Object.fromEntries(["scalewaySecretKey", "scalewayOrgId", "mollieKey", "desecToken", "mailFrom", "openproviderUser", "openproviderPass", "adresUrl"].map((n) => [n, f[n].value]));
       // Mailserver: leeg laten = de bewaarde houden (het wachtwoord staat er niet in het scherm bij).
-      if (f.smtpCloud.checked && !f.smtpUrl.value.trim()) body.smtpUrl = "";
+      if (f.smtpCloud?.checked && !f.smtpUrl.value.trim()) body.smtpUrl = "";
       else if (f.smtpUrl.value.trim()) body.smtpUrl = f.smtpUrl.value;
       try {
         const r = await busy($("button.primary", f), () => api("/api/aanbieder/accounts", { method: "POST", body }));
@@ -1555,34 +1651,36 @@ async function renderAanbieder(msg) {
     return;
   }
   if (a.step === "adres") {
-    const d = a.dns ?? {};
-    box.innerHTML = `${head}<form class="fields panel" id="af"><p class="muted" style="margin:0">Op dit adres vinden je klanten en de app je Dienst, en log je in op het beheer. ${a.defaultUrl ? `Je cloud zet het adres onder ${esc(config.domain)} zelf in je DNS.` : ""}</p>
-      <label>Adres van je Dienst<input name="url" value="${esc(a.url ?? a.defaultUrl ?? "")}" autocapitalize="off" spellcheck="false" required><small>Een adres onder een ander domein kan ook; dan zet je het record zelf.</small></label>
-      ${a.server ? `<p class="note warn" style="margin:0">Een nieuw adres gaat pas in na <b>Opnieuw opzetten</b>.${d.host ? "" : ""}</p>` : ""}
+    box.innerHTML = `${head}<form class="fields panel" id="af"><p class="muted" style="margin:0">Op dit adres vinden je klanten en de app je Dienst, en log je in op het beheer.</p>
+      <label>Adres van je Dienst<input name="url" value="${esc(a.url ?? a.defaultUrl ?? "")}" placeholder="dienst.jouwbedrijf.nl" autocapitalize="off" spellcheck="false" required></label>
+      ${a.server ? `<p class="note warn" style="margin:0">Een nieuw adres gaat pas in na <b>Opnieuw opzetten</b>.</p>` : ""}
+      <div id="aDns" class="fields"></div>
       <details ${a.adressen ? "open" : ""}><summary>Ook de gratis-adressendienst draaien</summary><div class="fields" style="margin-top:10px">
         <small class="muted">${A_HELP.adressen}</small>
         <label class="check"><input type="checkbox" name="adrAan" ${a.adressen ? "checked" : ""}> Ja, draai de gratis-adressendienst op de server van mijn Dienst</label>
         <div class="row"><label>Gedeelde zone<input name="adrZone" value="${esc(a.adressen?.zone ?? "")}" placeholder="eigencloud.nl" autocapitalize="off" spellcheck="false"></label>
           <label>deSEC-token voor die zone<input name="adrToken" value="${esc(a.adressen?.desecToken ?? "")}" autocomplete="off" autocapitalize="off" spellcheck="false"></label></div>
-        <label>Adres van de adressendienst<input name="adrHost" value="${esc(a.adressen?.host ?? a.defaultAdressenHost ?? "")}" autocapitalize="off" spellcheck="false"><small>Je cloud zet dit adres zelf in je DNS als het onder ${esc(config.domain ?? "je domein")} valt. Andere Diensten vinden het via de lijst van aanbieders ("adressen" op de standaardregel).</small></label>
+        <label>Adres van de adressendienst<input name="adrHost" value="${esc(a.adressen?.host ?? a.defaultAdressenHost ?? "")}" autocapitalize="off" spellcheck="false"><small>Dit adres komt in de DNS op dezelfde manier als dat van je Dienst. Andere Diensten vinden het via de lijst van aanbieders ("adressen" op de standaardregel).</small></label>
         ${a.server ? `<p class="note warn" style="margin:0">Aan- of uitzetten gaat in na <b>Opnieuw opzetten</b>.</p>` : ""}
         <ul class="results" id="adrChecks"></ul>
       </div></details>
       <p class="msg"></p>${nav()}</form>`;
     wire();
+    const dnsUi = dnsChooser($("#aDns"), a, $("#af").url);
     $("#af").onsubmit = async (e) => {
       e.preventDefault();
       const f = e.target;
       try {
         await busy($("button.primary", f), async () => {
           await api("/api/aanbieder/adres", { method: "POST", body: { url: f.url.value } });
+          await dnsUi.save();
           if (f.adrAan.checked) {
             const r = await api("/api/aanbieder/adressen", { method: "POST", body: { zone: f.adrZone.value, desecToken: f.adrToken.value, host: f.adrHost.value } });
             $("#adrChecks").innerHTML = resultItems(r.checks);
             if (!r.ok) throw new Error("De adressendienst kan zo nog niet: pas aan wat rood is.");
           } else if (a.adressen) await api("/api/aanbieder/adressen", { method: "POST", body: { aan: false } });
         });
-        await aStep("opzetten");
+        await aStep("server");
       } catch (err) { formMsg(f, err.message); }
     };
     return;
@@ -1692,74 +1790,392 @@ function aanbiederServer(box, a, head, nav, wire) {
   };
 }
 
-function aanbiederKlaar(box, a, msg) {
-  if (a.removed && !a.server) {
-    box.innerHTML = `<h2>Je dienst</h2><div class="panel"><p style="margin:0">Je Dienst is verwijderd. De back-ups staan nog in <b>${esc(a.backup?.bucket ?? "je opslag")}</b>; met <b>Opnieuw opzetten</b> komt alles terug op een nieuwe server.</p>
-      <div class="actions" style="margin:0"><button class="btn primary" id="aAgain">Opnieuw opzetten</button><button class="btn" id="aEdit">Instellingen wijzigen</button></div><p class="msg" id="amsg2"></p></div>`;
-    $("#aAgain").onclick = () => aStep("opzetten").catch(() => {});
-    $("#aEdit").onclick = () => aStep("bedrijf").catch(() => {});
-    return;
+// ═════════ Je dienst: één plek voor alles ═════════
+
+/** Korte uitleg per onderdeel van "Je dienst" (de onderdelen zelf komen uit GET /api/aanbieder → hub). */
+const HUB_TEXT = {
+  overzicht: "Status, versie, klanten en omzet",
+  bedrijf: "Naam, adres, KvK, btw en contact",
+  accounts: "Mollie, deSEC, Scaleway, Openprovider en mail",
+  aanbod: "Bundels, prijzen en waar de servers staan",
+  huisstijl: "Naam, logo, kleur en voorwaarden",
+  medewerkers: "Wie mag wat in het beheer",
+  klanten: "Zoeken, opschorten, hervatten en opruimen",
+  hulpvragen: "Vragen van je klanten beantwoorden",
+  berichten: "Meldingen en storingen aan je klanten",
+  adressendienst: "Gratis adressen voor alle aanbieders",
+  lijst: "Je regel op de lijst van aanbieders",
+  server: "Plek, adres, DNS, back-ups en hersteltest",
+  kosten: "Wat je Dienst en je klanten kosten",
+  updates: "Versie en automatisch bijwerken",
+};
+/** Waar de gegevens van een onderdeel staan. */
+const WAAR = { console: "In je kluis", dienst: "In het beheer", beide: "Hier en in het beheer" };
+let lastChecks = null;
+
+const cloudLater = () => `<p class="muted cloudlater"><small>Ook zelf een cloud voor je mail, agenda en foto's? <a href="#jij">Eigen cloud maken</a></small></p>`;
+
+/** Wat er nog niet op de Dienst staat, met de knop om het toe te passen (of naar Opnieuw opzetten). */
+function pendingBar(a) {
+  const label = (id) => a.hub.find((x) => x.id === id)?.label ?? id;
+  const others = a.pending.filter((x) => x !== "server");
+  if (a.wijzigingen === "toepassen") return `<div class="note pendingbar"><div><b>Nog niet op je Dienst</b><br><small>${others.length ? `Gewijzigd: ${esc(others.map(label).join(", "))}. ` : "Je hebt instellingen gewijzigd. "}Je Dienst start daarvoor even opnieuw, zonder nieuwe server.</small></div><button class="btn primary" id="hApply">Wijzigingen toepassen</button></div>`;
+  if (a.wijzigingen === "opnieuw") return `<div class="note warn pendingbar"><div><b>Nieuwe server nodig</b><br><small>Je hebt het adres, de plek van de server of de adressendienst gewijzigd${others.length ? ` (en ${esc(others.map(label).join(", "))})` : ""}. Dat gaat in met Opnieuw opzetten.</small></div><a class="btn" href="#aanbieder/server">Bekijken</a></div>`;
+  return "";
+}
+
+/** "#aanbieder" / "#aanbieder/<onderdeel>": nog niet opgezet → de stappen; daarna "Je dienst" met alle onderdelen. */
+async function renderHub(hash, msg) {
+  clearInterval(aanbiederTimer);
+  const section = hash.split("/")[1] ?? "";
+  let a;
+  try { a = await api("/api/aanbieder"); } catch (err) { root.innerHTML = `<section class="center"><p class="msg err">${esc(err.message)}</p></section>`; return; }
+  rememberDienst(a);
+  const back = config?.alleenDienst ? "" : `<a class="link" href="#">${state.done ? "Naar je cloud" : "Terug naar je cloud opzetten"}</a>`;
+  if (!a.hub || a.step !== "klaar") {
+    const exists = a.server || a.removed;
+    root.innerHTML = `<div class="hubwrap setup"><header class="hubhead"><div><h1>${exists ? "Je dienst wijzigen" : a.started ? "Je dienst opzetten" : "Aanbieder worden"}</h1>
+        ${a.started ? "" : `<p class="lead">Je eigen Eigen Cloud Dienst, met je eigen naam en prijzen. Een eigen cloud is niet nodig.</p>`}</div>
+        <div class="actions" style="margin:0">${exists ? `<button class="btn" id="hBack">Terug naar je dienst</button>` : ""}${back}</div></header>
+      <div id="aanbieder"></div>${config?.alleenDienst && !a.started ? cloudLater() : ""}</div>`;
+    $("#hBack")?.addEventListener("click", () => aStep("klaar").catch(() => {}));
+    return renderAanbieder(msg);
   }
-  const h = a.lastHealth;
-  const show = (s) => {
-    const dot = !s ? "" : s.reachable ? (s.closing ? "verhuist" : "bereikbaar") : "niet bereikbaar";
-    $("#aStatus").innerHTML = `<ul class="results">
-      <li class="${s?.reachable ? "" : "meh"}">${esc(a.url)} ${esc(dot)}${s?.version ? `<small>Versie ${esc(s.version)}${s.uptime != null ? ` · draait ${s.uptime < 3600 ? Math.max(1, Math.round(s.uptime / 60)) + " minuten" : Math.round(s.uptime / 3600) + " uur"}` : ""}</small>` : s?.error ? `<small>${esc(s.error)}${a.server?.createdAt && Date.now() - a.server.createdAt < 15 * 60_000 ? " — de server start nog op" : ""}</small>` : ""}</li>
-      <li class="${s?.lastBackupAt ? (s.backup === "fout" ? "bad" : "") : "meh"}">Back-up${s?.lastBackupAt ? `: ${time(s.lastBackupAt)}` : ": nog geen"}${s?.backup === "fout" ? "<small>De laatste poging mislukte</small>" : ""}</li>
-      ${s?.dns ? `<li class="${s.dns.ok ? "" : "meh"}">${esc(s.dns.host)} wijst ${s.dns.ok ? "naar je server" : s.dns.have?.length ? `naar ${esc(s.dns.have.join(", "))}` : "nog nergens heen"}${s.dns.ok ? "" : `<small>${a.dns?.managed ? "Je cloud zet dit record zelf; DNS-wijzigingen kunnen tot een uur duren." : `Zet bij je DNS een A-record: ${esc(s.dns.host)} → ${esc(s.dns.want ?? "")}`}</small>`}</li>` : ""}
-      ${s?.adressen ? `<li class="${s.adressen.ok ? "" : "meh"}">Gratis-adressendienst ${esc(s.adressen.url.replace(/^https:\/\//, ""))} ${s.adressen.reachable ? (s.adressen.ok ? "werkt" : `geeft zone ${esc(s.adressen.zone ?? "")}`) : "niet bereikbaar"}${s.adressen.error ? `<small>${esc(s.adressen.error)}</small>` : ""}</li>` : ""}
-    </ul>`;
-  };
-  const changes = a.wijzigingen === "toepassen" ? `<p class="note" style="margin:0">Je hebt instellingen gewijzigd. Pas ze toe; de Dienst start daarvoor even opnieuw (een halve minuut), zonder nieuwe server.</p>`
-    : a.wijzigingen === "opnieuw" ? `<p class="note warn" style="margin:0">Je hebt het adres, de plek van de server of de adressendienst gewijzigd. Dat gaat in met <b>Opnieuw opzetten</b>.</p>` : "";
-  box.innerHTML = `<h2>Je dienst</h2><div class="panel">
-    <div><b>${esc(a.company?.name ?? "")}</b><br><span class="muted">${esc(a.url ?? "")} · server ${esc(a.server?.ipv4 ?? "")} bij ${esc(a.server ? placeName(a.server) : "")}${a.backup?.bucket ? ` · back-ups in ${esc(a.backup.bucket)} bij ${esc(a.backup.name)}` : ""}</span></div>
-    <div id="aStatus"><p class="muted" style="margin:0">Status ophalen…</p></div>
-    ${changes}
-    <div class="actions" style="margin:0">
-      <button class="btn primary" id="aOpen">Beheer openen</button>
-      <button class="btn" id="aEdit">Instellingen wijzigen</button>
-      ${a.wijzigingen !== "geen" && a.wijzigingen !== "opnieuw" ? `<button class="btn${a.wijzigingen === "toepassen" ? " primary" : ""}" id="aApply">Wijzigingen toepassen</button>` : ""}
-      <button class="btn" id="aAgain">Opnieuw opzetten</button>
-      <button class="btn danger" id="aDel">Dienst verwijderen</button>
-    </div>
-    <p class="muted" style="margin:0"><small>Log in op het beheer met <b>${esc(a.company?.email ?? "")}</b>; je krijgt een code per mail. Je sleutel voor de lijst van aanbieders (aanbieders.json) staat in het beheer onder <i>Op de lijst</i>.</small></p>
-    <div id="aExtra"></div>
-    <p class="msg ${msg?.ok ? "ok" : msg ? "err" : ""}" id="amsg2">${esc(msg?.text ?? "")}</p></div>`;
-  if (h) show(h);
-  const refresh = async () => { try { show(await api("/api/aanbieder/status")); } catch { /* volgende keer */ } };
-  refresh();
-  aanbiederTimer = setInterval(refresh, 30_000);
-  const m = $("#amsg2");
-  $("#aOpen").onclick = () => openBeheer(a.beheerUrl);
-  $("#aEdit").onclick = () => aStep("bedrijf").catch((e) => { m.textContent = e.message; m.className = "msg err"; });
-  $("#aApply")?.addEventListener("click", async (e) => {
+  const cur = a.hub.some((x) => x.id === section && x.waar !== "dienst") ? section : "overzicht";
+  const host = (a.url ?? "").replace(/^https:\/\//, "");
+  root.innerHTML = `<div class="hubwrap">
+    <header class="hubhead">
+      <div><small class="muted">Je dienst</small><h1>${esc(a.company?.name ?? "Je dienst")}</h1><span class="muted">${esc(host)}${a.server ? "" : " · verwijderd"}</span></div>
+      <div class="actions" style="margin:0">${a.server ? `<button class="btn primary" id="hOpen">Beheer openen</button>` : ""}${back}</div>
+    </header>
+    ${pendingBar(a)}
+    <p class="msg ${msg?.ok ? "ok" : msg ? "err" : ""}" id="hmsg">${esc(msg?.text ?? "")}</p>
+    <div class="hub">
+      <nav class="hubnav" aria-label="Onderdelen van je dienst">${a.hub.map((x) => x.waar === "dienst"
+        ? `<button type="button" class="hubitem" data-link="${esc(x.link ?? "")}" ${x.link ? "" : "disabled"}>${esc(x.label)}<span class="ext" aria-label="opent het beheer">↗</span></button>`
+        : `<a class="hubitem${x.id === cur ? " now" : ""}" href="#aanbieder/${esc(x.id)}" ${x.id === cur ? 'aria-current="page"' : ""}>${esc(x.label)}${x.pending ? `<i class="dot" title="Nog niet toegepast"></i>` : ""}</a>`).join("")}</nav>
+      <section class="hubpane" id="hubPane"></section>
+    </div></div>`;
+  $("#hOpen")?.addEventListener("click", () => openBeheer(a.beheerUrl));
+  root.querySelectorAll(".hubnav [data-link]").forEach((b) => b.onclick = () => openBeheer(b.dataset.link));
+  $("#hApply")?.addEventListener("click", async (e) => {
     try {
       const r = await busy(e.target, () => api("/api/aanbieder/toepassen", { method: "POST" }));
-      renderAanbieder({ ok: true, text: r.restart ? "Toegepast. Je Dienst start nu opnieuw met de nieuwe instellingen." : "Toegepast. De nieuwe instellingen gaan in bij de volgende herstart van je Dienst." });
-    } catch (err) { m.textContent = err.message; m.className = "msg err"; }
+      renderHub(hash, { ok: true, text: r.restart ? "Toegepast. Je Dienst start nu opnieuw met de nieuwe instellingen (een halve minuut)." : "Toegepast. De nieuwe instellingen gaan in bij de volgende herstart van je Dienst." });
+    } catch (err) { hubMsg(err.message); }
   });
-  $("#aAgain").onclick = async (e) => {
-    if (!confirm("Je Dienst opnieuw opzetten op een nieuwe server?\n\nDe huidige server maakt eerst een laatste back-up; de nieuwe zet die terug. Een paar minuten is de Dienst niet bereikbaar.")) return;
+  const pane = $("#hubPane");
+  const fn = { overzicht: hubOverzicht, bedrijf: hubBedrijf, accounts: hubAccounts, adressendienst: hubAdressen, server: hubServer, kosten: hubKosten, updates: hubUpdates }[cur] ?? hubOverzicht;
+  fn(pane, a);
+  // Op de telefoon: het gekozen onderdeel in beeld schuiven.
+  root.querySelector(".hubitem.now")?.scrollIntoView?.({ block: "nearest", inline: "center" });
+}
+
+function hubMsg(text, ok = false) {
+  const m = $("#hmsg");
+  if (!m) return;
+  m.textContent = text;
+  m.className = "msg " + (ok ? "ok" : "err");
+  m.scrollIntoView({ block: "nearest" });
+}
+
+const sectionHead = (a, id, extra = "") => {
+  const x = a.hub.find((y) => y.id === id);
+  return `<h2 class="hubtitle">${esc(x?.label ?? id)}${x?.pending ? ` <span class="chip">nog niet toegepast</span>` : ""}</h2><p class="muted hubsub">${esc(HUB_TEXT[id] ?? "")} · ${esc(WAAR[x?.waar] ?? "")}${extra}</p>`;
+};
+
+/** De status van de Dienst (bereikbaar, versie, back-up, DNS, adressendienst). */
+function statusList(a, s) {
+  const dot = !s ? "" : s.reachable ? (s.closing ? "verhuist" : "bereikbaar") : "niet bereikbaar";
+  const dnsHint = (d) => d.error ? d.error : d.mode === "eigen" ? "De console zet dit record; DNS-wijzigingen kunnen tot een uur duren." : d.mode === "cloud" ? "Je cloud zet dit record zelf; DNS-wijzigingen kunnen tot een uur duren." : `Zet bij je DNS een A-record: ${d.host} → ${d.want ?? ""}`;
+  return `<ul class="results">
+    <li class="${s?.reachable ? "" : "meh"}">${esc((a.url ?? "").replace(/^https:\/\//, ""))} ${esc(dot)}${s?.version ? `<small>Versie ${esc(s.version)}${s.uptime != null ? ` · draait ${s.uptime < 3600 ? Math.max(1, Math.round(s.uptime / 60)) + " minuten" : Math.round(s.uptime / 3600) + " uur"}` : ""}</small>` : s?.error ? `<small>${esc(s.error === "Nog niet bereikbaar" ? "Even geduld, of kijk of de server draait" : s.error)}${a.server?.createdAt && Date.now() - a.server.createdAt < 15 * 60_000 ? " — de server start nog op" : ""}</small>` : ""}</li>
+    <li class="${s?.lastBackupAt ? (s.backup === "fout" ? "bad" : "") : "meh"}">Back-up${s?.lastBackupAt ? `: ${time(s.lastBackupAt)}` : ": nog geen"}${s?.backup === "fout" ? "<small>De laatste poging mislukte</small>" : ""}</li>
+    ${s?.dns ? `<li class="${s.dns.ok && !s.dns.error ? "" : s.dns.error ? "bad" : "meh"}">${esc(s.dns.host)} wijst ${s.dns.ok ? "naar je server" : s.dns.have?.length ? `naar ${esc(s.dns.have.join(", "))}` : "nog nergens heen"}${s.dns.ok && !s.dns.error ? "" : `<small>${esc(dnsHint(s.dns))}</small>`}</li>` : ""}
+    ${s?.adressen ? `<li class="${s.adressen.ok ? "" : "meh"}">Gratis-adressendienst ${esc(s.adressen.url.replace(/^https:\/\//, ""))} ${s.adressen.reachable ? (s.adressen.ok ? "werkt" : `geeft zone ${esc(s.adressen.zone ?? "")}`) : "niet bereikbaar"}${s.adressen.error ? `<small>${esc(s.adressen.error)}</small>` : ""}</li>` : ""}
+  </ul>`;
+}
+
+/** Kerncijfers uit de Dienst (GET /v1/status/overzicht via de console). */
+function cards(o) {
+  if (!o) return `<p class="muted wide" style="margin:0"><small>Kerncijfers verschijnen zodra je Dienst bereikbaar is.</small></p>`;
+  const card = (label, big, sub = "") => `<div class="card"><span class="muted">${esc(label)}</span><b>${esc(big)}</b>${sub ? `<small class="muted">${esc(sub)}</small>` : ""}</div>`;
+  return card("Klanten", String(o.actief ?? 0), `${o.klanten ?? 0} account${o.klanten === 1 ? "" : "s"}`)
+    + card("Omzet deze maand", eur(Number(o.omzetMaand?.net ?? 0)), `${o.omzetMaand?.count ?? 0} betaling${o.omzetMaand?.count === 1 ? "" : "en"}, incl. btw`)
+    + card("Open hulpvragen", String(o.openHulpvragen ?? 0))
+    + card("Achterstanden", String(o.achterstanden ?? 0));
+}
+
+const tile = (x) => x.waar === "dienst"
+  ? `<button type="button" class="tile" data-link="${esc(x.link ?? "")}" ${x.link ? "" : "disabled"}><b>${esc(x.label)} <span class="ext">↗</span></b><small>${esc(HUB_TEXT[x.id] ?? "")}</small></button>`
+  : `<a class="tile" href="#aanbieder/${esc(x.id)}"><b>${esc(x.label)}${x.pending ? `<i class="dot" title="Nog niet toegepast"></i>` : ""}</b><small>${esc(HUB_TEXT[x.id] ?? "")}</small></a>`;
+
+function hubOverzicht(pane, a) {
+  pane.innerHTML = `${sectionHead(a, "overzicht")}
+    <div id="aStatus">${a.lastHealth ? statusList(a, a.lastHealth) : `<p class="muted" style="margin:0">Status ophalen…</p>`}</div>
+    <div class="cards" id="hCards">${cards(null)}</div>
+    <h2 class="hubtitle small">Alles voor je dienst</h2>
+    <p class="muted hubsub">Met ↗ open je het beheer van je Dienst op die pagina${NATIVE ? " (met je vingerafdruk)" : ""}.</p>
+    <div class="tiles">${a.hub.filter((x) => x.id !== "overzicht").map(tile).join("")}</div>
+    ${config?.alleenDienst ? cloudLater() : ""}`;
+  pane.querySelectorAll(".tiles [data-link]").forEach((b) => b.onclick = () => openBeheer(b.dataset.link));
+  if (!a.server) { $("#aStatus").innerHTML = `<p style="margin:0">Je Dienst is verwijderd. De back-ups staan nog in <b>${esc(a.backup?.bucket ?? "je opslag")}</b>; met <a href="#aanbieder/server">Opnieuw opzetten</a> komt alles terug op een nieuwe server.</p>`; return; }
+  const refresh = async () => {
+    try {
+      const s = await api("/api/aanbieder/status");
+      if (!$("#aStatus")) return;
+      $("#aStatus").innerHTML = statusList(a, s);
+      $("#hCards").innerHTML = cards(s.overzicht);
+    } catch { /* volgende keer */ }
+  };
+  refresh();
+  aanbiederTimer = setInterval(refresh, 30_000);
+}
+
+/** Opslaan en "Je dienst" opnieuw tonen (met wat er nu nog toegepast moet worden). */
+const savedMsg = (a) => ({ ok: true, text: a.server ? "Opgeslagen. Pas het toe met Wijzigingen toepassen (bovenaan)." : "Opgeslagen." });
+
+function hubBedrijf(pane, a) {
+  const co = a.company ?? {};
+  pane.innerHTML = `${sectionHead(a, "bedrijf")}
+    <form class="fields" id="hf"><p class="muted" style="margin:0">Deze gegevens komen op de facturen aan je klanten. De eigenaar krijgt de inlogcode voor het beheer.</p>
+      <label>Bedrijfsnaam<input name="name" required value="${esc(co.name ?? "")}"><small>Ook de naam van je Dienst in de app en in mails.</small></label>
+      <label>Adres<textarea name="address" rows="2" placeholder="Blaak 10&#10;3011 TA Rotterdam">${esc((co.address ?? []).join("\n"))}</textarea></label>
+      <div class="row"><label>KvK-nummer<input name="kvk" inputmode="numeric" value="${esc(co.kvk ?? "")}"></label><label>Btw-nummer<input name="vat" placeholder="NL001234567B01" value="${esc(co.vat ?? "")}"></label></div>
+      <label>E-mailadres van de eigenaar<input type="email" name="email" required value="${esc(co.email ?? "")}"><small>Krijgt meldingen en logt in op het beheer.</small></label>
+      <div class="row"><label>Btw-percentage op je facturen<input name="vatPercent" inputmode="decimal" value="${esc(co.vatPercent ?? "21")}"><small>Je prijzen zijn inclusief deze btw.</small></label></div>
+      <label class="check"><input type="checkbox" name="enforce" ${co.enforce ? "checked" : ""}> Extra servers van klanten echt uitzetten</label>
+      <p class="msg"></p><div><button class="btn primary">Opslaan</button></div></form>`;
+  $("#hf").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try {
+      await busy($("button.primary", f), () => api("/api/aanbieder/bedrijf", { method: "POST", body: { name: f.elements.name.value, address: f.address.value, kvk: f.kvk.value, vat: f.vat.value, email: f.email.value, vatPercent: f.vatPercent.value, enforce: f.enforce.checked } }));
+      renderHub("aanbieder/bedrijf", savedMsg(a));
+    } catch (err) { formMsg(f, err.message); }
+  };
+}
+
+function hubAccounts(pane, a) {
+  const ac = a.accounts ?? {};
+  const field = (name, label, value, extra = "") => `<label>${label}<input name="${name}" value="${esc(value ?? "")}" autocomplete="off" autocapitalize="off" spellcheck="false" ${extra}></label>`;
+  pane.innerHTML = `${sectionHead(a, "accounts")}
+    <form class="fields" id="hf"><p class="muted" style="margin:0">Sleutels staan versleuteld in je kluis; je ziet alleen de laatste vier tekens. Leeg laten of zo laten = niet wijzigen. Elke sleutel wordt meteen gecontroleerd.</p>
+      <h3 style="margin:0">Mollie <small class="muted">${ac.mollieMode === "live" ? "· live: echte betalingen" : ac.mollieMode === "test" ? "· testsleutel" : ""}</small></h3><small class="muted">${A_HELP.mollie}</small>
+      ${field("mollieKey", "API-sleutel", ac.mollieKey, 'placeholder="test_… of live_…"')}
+      <h3 style="margin:0">deSEC</h3><small class="muted">${A_HELP.desec}</small>
+      ${field("desecToken", "Token", ac.desecToken)}
+      <h3 style="margin:0">Scaleway</h3><small class="muted">${A_HELP.scaleway}</small>
+      <div class="row">${field("scalewaySecretKey", "Geheime sleutel", ac.scalewaySecretKey)}${field("scalewayOrgId", "Organisatie-ID", ac.scalewayOrgId)}</div>
+      <h3 style="margin:0">Mail versturen</h3><small class="muted">${config?.mailRelay ? A_HELP.smtp : A_HELP.smtpZelf}</small>
+      <div class="row">${field("smtpUrl", "Mailserver", "", `placeholder="${ac.smtp ? `Nu ${esc(ac.smtp)}; leeg = zo laten` : "smtp://gebruiker:wachtwoord@server:587"}"`)}${field("mailFrom", "Afzender", ac.mailFrom, 'type="email"')}</div>
+      <h3 style="margin:0">Openprovider <small class="muted">· optioneel</small></h3><small class="muted">${A_HELP.openprovider}</small>
+      <div class="row">${field("openproviderUser", "Gebruiker", ac.openproviderUser)}${field("openproviderPass", "Wachtwoord", ac.openproviderPass, 'type="password"')}</div>
+      <h3 style="margin:0">Gratis adressen <small class="muted">· optioneel</small></h3><small class="muted">${A_HELP.adres}</small>
+      ${field("adresUrl", "Adressendienst", ac.adresUrl, 'placeholder="https://adressen.eigencloud.nl"')}
+      <ul class="results" id="hChecks">${lastChecks ? resultItems(lastChecks) : ""}</ul>
+      <p class="msg"></p><div><button class="btn primary">Opslaan en controleren</button></div></form>`;
+  lastChecks = null;
+  $("#hf").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const body = Object.fromEntries(["scalewaySecretKey", "scalewayOrgId", "mollieKey", "desecToken", "mailFrom", "openproviderUser", "openproviderPass", "adresUrl"].map((n) => [n, f[n].value]));
+    if (f.smtpUrl.value.trim()) body.smtpUrl = f.smtpUrl.value;
+    try {
+      const r = await busy($("button.primary", f), () => api("/api/aanbieder/accounts", { method: "POST", body }));
+      lastChecks = r.checks;
+      renderHub("aanbieder/accounts", r.ok ? savedMsg(a) : { ok: false, text: "Opgeslagen, maar niet alles werkt. Pas aan wat rood is; zolang kan je Dienst de wijziging niet krijgen." });
+    } catch (err) { formMsg(f, err.message); }
+  };
+}
+
+function hubAdressen(pane, a) {
+  const x = a.hub.find((y) => y.id === "adressendienst");
+  pane.innerHTML = `${sectionHead(a, "adressendienst")}
+    <p style="margin:0"><small class="muted">${A_HELP.adressen}</small></p>
+    ${a.adressen ? `<p style="margin:0">Draait op <b>${esc(a.adressen.host)}</b> met de gedeelde zone <b>${esc(a.adressen.zone)}</b>.</p>` : `<p style="margin:0">Draait nu niet op de server van je Dienst.</p>`}
+    ${x?.link ? `<div><button class="btn" id="hAdrOpen">Uitgegeven adressen bekijken ↗</button></div>` : ""}
+    <form class="fields panel" id="hf">
+      <label class="check"><input type="checkbox" name="adrAan" ${a.adressen ? "checked" : ""}> De gratis-adressendienst draait op de server van mijn Dienst</label>
+      <div class="row"><label>Gedeelde zone<input name="adrZone" value="${esc(a.adressen?.zone ?? "")}" placeholder="eigencloud.nl" autocapitalize="off" spellcheck="false"></label>
+        <label>deSEC-token voor die zone<input name="adrToken" value="${esc(a.adressen?.desecToken ?? "")}" autocomplete="off" autocapitalize="off" spellcheck="false"></label></div>
+      <label>Adres van de adressendienst<input name="adrHost" value="${esc(a.adressen?.host ?? a.defaultAdressenHost ?? "")}" autocapitalize="off" spellcheck="false"></label>
+      <p class="note warn" style="margin:0">Aan- of uitzetten, of een ander adres, gaat in na <b>Opnieuw opzetten</b> (Server en back-ups).</p>
+      <ul class="results" id="adrChecks"></ul>
+      <p class="msg"></p><div><button class="btn primary">Opslaan</button></div></form>`;
+  $("#hAdrOpen")?.addEventListener("click", () => openBeheer(x.link));
+  $("#hf").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try {
+      const r = await busy($("button.primary", f), () => f.adrAan.checked
+        ? api("/api/aanbieder/adressen", { method: "POST", body: { zone: f.adrZone.value, desecToken: f.adrToken.value, host: f.adrHost.value } })
+        : api("/api/aanbieder/adressen", { method: "POST", body: { aan: false } }));
+      if (!r.ok) { $("#adrChecks").innerHTML = resultItems(r.checks); return formMsg(f, "Zo kan het nog niet: pas aan wat rood is."); }
+      renderHub("aanbieder/adressendienst", { ok: true, text: "Opgeslagen. Het gaat in na Opnieuw opzetten." });
+    } catch (err) { formMsg(f, err.message); }
+  };
+}
+
+/** De DNS-aanbieders, met wat de console al weet (bewaarde velden, sleutels bij Accounts of van je cloud). */
+/** "deSEC" in plaats van "deSEC (gratis, open source, Berlijn)". */
+const dnsLabel = (id) => (state.offers.dns ?? []).find((o) => o.id === id)?.name.replace(/ \(.*\)$/, "") ?? id;
+/** dienst.jouwbedrijf.nl → jouwbedrijf.nl (zoals defaultZone in aanbieder.ts). */
+const zoneOf = (v) => {
+  const h = String(v ?? "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(h)) return null;
+  const p = h.split(".");
+  return p.length > 2 ? p.slice(1).join(".") : h;
+};
+
+/** `urlInput`: het adresveld in dezelfde stap; het domein volgt dat zolang je het niet zelf wijzigt. */
+function dnsChooser(box, a, urlInput = null) {
+  const offers = (state.offers.dns ?? []);
+  const link = a.dnsLink;
+  const initial = a.dnsKeuze ?? (a.cloudDns ? "cloud" : offers.some((o) => o.id === "desec") ? "desec" : "handmatig");
+  const known = (o, key) => (link?.provider === o.id && link.fields.includes(key)) || !!config?.providers?.[o.id]?.[key]
+    || (o.id === "desec" && key === "token" && !!a.accounts?.desecToken) || (o.id === "scaleway" && key === "secretKey" && !!a.accounts?.scalewaySecretKey);
+  const hint = (o, key) => (link?.provider === o.id && link.fields.includes(key) ? "Bewaard; leeg laten = zo laten"
+    : o.id === "desec" && key === "token" && a.accounts?.desecToken ? "Leeg laten: het deSEC-token van Accounts"
+    : o.id === "scaleway" && key === "secretKey" && a.accounts?.scalewaySecretKey ? "Leeg laten: de Scaleway-sleutel van Accounts"
+    : config?.providers?.[o.id]?.[key] ? "Leeg laten: de sleutel van je cloud" : "");
+  box.innerHTML = `<h3 style="margin:0">Wie zet het adres in de DNS?</h3><small class="muted">${A_HELP.dns}</small>
+    <label>DNS<select name="dnsProv">
+      ${a.cloudDns ? `<option value="cloud">Mijn eigen cloud (${esc(config?.domain ?? "")})</option>` : ""}
+      ${offers.map((o) => `<option value="${esc(o.id)}">${esc(dnsLabel(o.id))}</option>`).join("")}
+      <option value="handmatig">Ik zet het record zelf</option></select></label>
+    <div class="fields" data-dnsf></div>`;
+  const sel = $("select", box);
+  sel.value = [...sel.options].some((o) => o.value === initial) ? initial : "handmatig";
+  const draw = () => {
+    const o = offers.find((x) => x.id === sel.value);
+    $("[data-dnsf]", box).innerHTML = sel.value === "cloud" ? `<small class="muted">Je cloud zet het record zodra de server er is. Het adres moet dan onder ${esc(config?.domain ?? "het domein van je cloud")} vallen.</small>`
+      : sel.value === "handmatig" ? `<small class="muted">Na het opzetten zie je welk A-record je bij je DNS-aanbieder moet zetten. Krijgt de server een ander IP-adres, dan pas je het zelf aan.</small>`
+      : `${o.keyHelp ? `<small class="muted">${esc(o.keyHelp)}</small>` : ""}
+        <label>Domein bij ${esc(dnsLabel(o.id))}<input name="dnsZone" value="${esc(link?.provider === o.id ? link.zone : a.defaultZone ?? zoneOf(urlInput?.value) ?? "")}" placeholder="jouwbedrijf.nl" autocapitalize="off" spellcheck="false"><small>Het domein waar het adres van je Dienst onder valt.</small></label>
+        ${fieldInputs(o.fields, { optional: o.fields.every((fl) => fl.optional || known(o, fl.key)), placeholder: (k) => hint(o, k) })}`;
+  };
+  sel.onchange = draw;
+  draw();
+  urlInput?.addEventListener("input", () => {
+    const z = $("[name=dnsZone]", box);
+    if (z && !z.dataset.touched && !(link?.provider === sel.value)) z.value = zoneOf(urlInput.value) ?? "";
+  });
+  box.addEventListener("input", (e) => { if (e.target.name === "dnsZone") e.target.dataset.touched = "1"; });
+  return {
+    /** Bewaren als er iets te bewaren is; geeft het antwoord van POST /api/aanbieder/dns (of null). */
+    async save() {
+      const p = sel.value;
+      const inputs = $$("[data-dnsf] input", box).filter((i) => i.name !== "dnsZone");
+      const fields = Object.fromEntries(inputs.map((i) => [i.name, i.value]));
+      const zone = $("[name=dnsZone]", box)?.value.trim() ?? "";
+      const typed = inputs.some((i) => i.value.trim());
+      if (p === initial && (p === "cloud" || p === "handmatig" || (link?.provider === p && !typed && zone === link.zone))) return null;
+      return api("/api/aanbieder/dns", { method: "POST", body: { provider: p, zone, fields } });
+    },
+  };
+}
+
+function hubServer(pane, a) {
+  const h = a.hosting ?? {}, bk = a.backup ?? {}, d = a.dns ?? {}, l = a.dnsLink;
+  const ht = a.hersteltest;
+  const records = (l?.records ?? []).filter((r) => r.value);
+  pane.innerHTML = `${sectionHead(a, "server")}
+    <div class="panel" style="margin-top:0">
+      <div><b>Server</b><br><span class="muted">${a.server ? `${esc(a.server.ipv4 ?? "")} bij ${esc(placeName(a.server))} (${esc(a.server.size)})${h.monthly != null ? `, ${esc(eur(h.monthly))} per maand` : ""}` : "Geen server: je Dienst is verwijderd."}</span>
+        ${a.server && (h.provider !== a.server.provider || h.region !== a.server.region) ? `<br><small>Gekozen voor de volgende keer: ${esc(h.name)} in ${esc(h.city)}</small>` : ""}</div>
+      <div class="actions" style="margin:0"><button class="btn" id="hMove">Andere aanbieder of regio</button><button class="btn" id="hAddr">Ander adres</button></div>
+    </div>
+    <div class="panel">
+      <div><b>Adres en DNS</b><br><span class="muted">${esc((a.url ?? "").replace(/^https:\/\//, ""))} · ${d.mode === "eigen" ? `de console zet het record bij ${esc(dnsLabel(d.provider))} (${esc(d.zone)})` : d.mode === "cloud" ? "je cloud zet het record" : "je zet het record zelf"}</span></div>
+      ${l?.error ? `<p class="msg err" style="margin:0">${esc(l.error)}</p>` : ""}
+      ${records.length ? `<ul class="results">${records.map((r) => `<li>${esc(r.sub ? `${r.sub}.${l.zone}` : l.zone)} ${esc(r.type)} → ${esc(r.value)}</li>`).join("")}</ul>` : ""}
+      ${l?.nameservers?.length ? `<small class="muted">Staat ${esc(l.zone)} nog niet bij deze DNS-aanbieder? Zet bij de partij waar je het domein hebt de nameservers op: ${esc(l.nameservers.join(", "))}.</small>` : ""}
+      <form class="fields" id="hDns"><div id="hDnsBox" class="fields"></div><p class="msg"></p><div><button class="btn">DNS bewaren</button></div></form>
+    </div>
+    <div class="panel">
+      <div><b>Back-ups</b><br><span class="muted">${bk.bucket ? `Elk uur, versleuteld, 30 dagen niet te wissen: ${esc(bk.bucket)} bij ${esc(bk.name)} (${esc(bk.regionLabel)})` : "Nog geen back-ups"}</span></div>
+      ${ht ? `<p class="${ht.ok ? "" : "note warn"}" style="margin:0"><small>Hersteltest ${esc(time(ht.at))}: ${ht.ok ? "gelukt" : "mislukt"}${ht.backupAt ? `, back-up van ${esc(time(ht.backupAt))}` : ""}. ${esc(ht.detail)}</small></p>` : ""}
+      <div class="actions" style="margin:0"><button class="btn" id="hTest" ${bk.bucket ? "" : "disabled"}>Hersteltest</button></div>
+      <small class="muted">De hersteltest haalt de nieuwste back-up op, ontsleutelt hem en controleert de database. Er verandert niets aan je Dienst.</small>
+      ${a.alleenDienst && bk.bucket ? `<small class="muted">Je kluis staat ook versleuteld in deze opslag (met je herstelsleutel). Op een nieuw toestel: <i>Ik heb al een Eigen Cloud</i>, je herstelsleutel en de sleutels van deze opslag.</small>` : ""}
+    </div>
+    <div class="panel">
+      <div><b>Opnieuw opzetten of verwijderen</b><br><small class="muted">Opnieuw opzetten: de huidige server maakt een laatste back-up, een nieuwe server zet die terug en het adres gaat naar de nieuwe. Een paar minuten is je Dienst niet bereikbaar.</small></div>
+      <div class="actions" style="margin:0"><button class="btn${a.wijzigingen === "opnieuw" || !a.server ? " primary" : ""}" id="hAgain">Opnieuw opzetten</button>${a.server ? `<button class="btn danger" id="hDel">Dienst verwijderen</button>` : ""}</div>
+      <div id="hExtra"></div>
+    </div>`;
+  $("#hMove").onclick = () => aStep("server").catch((e) => hubMsg(e.message));
+  $("#hAddr").onclick = () => aStep("adres").catch((e) => hubMsg(e.message));
+  const dnsUi = dnsChooser($("#hDnsBox"), a);
+  $("#hDns").onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const r = await busy($("#hDns button"), () => dnsUi.save());
+      if (!r) return formMsg(e.target, "Niets gewijzigd.", true);
+      renderHub("aanbieder/server", r.detail ? { ok: false, text: r.detail } : { ok: true, text: r.synced ? "Bewaard; de records staan erin." : "Bewaard." });
+    } catch (err) { formMsg(e.target, err.message); }
+  };
+  $("#hTest").onclick = async (e) => {
+    try { const r = await busy(e.target, () => api("/api/aanbieder/hersteltest", { method: "POST" })); renderHub("aanbieder/server", { ok: r.ok, text: r.ok ? "Hersteltest gelukt." : `Hersteltest mislukt: ${r.detail}` }); }
+    catch (err) { hubMsg(err.message); }
+  };
+  $("#hAgain").onclick = async (e) => {
+    if (!confirm(a.server ? "Je Dienst opnieuw opzetten op een nieuwe server?\n\nDe huidige server maakt eerst een laatste back-up; de nieuwe zet die terug. Een paar minuten is de Dienst niet bereikbaar." : "Je Dienst opnieuw opzetten?\n\nEr komt een nieuwe server die de laatste back-up terugzet.")) return;
     try {
       const r = await busy(e.target, () => api("/api/aanbieder/opzetten", { method: "POST" }));
-      $("#aExtra").innerHTML = `<ul class="results">${resultItems(r.steps)}</ul>`;
-      m.textContent = "De nieuwe server start op."; m.className = "msg ok";
-    } catch (err) { if (err.data?.steps) $("#aExtra").innerHTML = `<ul class="results">${resultItems(err.data.steps)}</ul>`; m.textContent = err.message; m.className = "msg err"; }
+      $("#hExtra").innerHTML = `<ul class="results">${resultItems(r.steps)}</ul>`;
+      hubMsg("De nieuwe server start op; over een paar minuten is je Dienst weer bereikbaar.", true);
+    } catch (err) { if (err.data?.steps) $("#hExtra").innerHTML = `<ul class="results">${resultItems(err.data.steps)}</ul>`; hubMsg(err.message); }
   };
-  $("#aDel").onclick = () => {
+  $("#hDel")?.addEventListener("click", () => {
     const host = (a.url ?? "").replace(/^https:\/\//, "");
-    $("#aExtra").innerHTML = `<form class="fields" id="adf"><p class="note warn" style="margin:0">De server van je Dienst gaat weg. Je klanten kunnen dan niet meer inloggen, bestellen of betalen; hun clouds blijven wel draaien. Er komt eerst nog een laatste back-up; de back-ups blijven bewaard, zodat je de Dienst later terug kunt zetten.</p>
+    $("#hExtra").innerHTML = `<form class="fields" id="adf"><p class="note warn" style="margin:0">De server van je Dienst gaat weg. Je klanten kunnen dan niet meer inloggen, bestellen of betalen; hun clouds blijven wel draaien. Er komt eerst nog een laatste back-up; de back-ups blijven bewaard, zodat je de Dienst later terug kunt zetten.${d.mode === "eigen" ? " De console haalt ook de DNS-records weg." : ""}</p>
       <label>Typ <b>${esc(host)}</b> om te bevestigen<input name="confirm" autocomplete="off" autocapitalize="off" spellcheck="false" required></label>
       <div><button class="btn danger">Definitief verwijderen</button></div></form>`;
     $("#adf").onsubmit = async (ev) => {
       ev.preventDefault();
       try {
         const r = await busy($("#adf button"), () => api("/api/aanbieder/verwijderen", { method: "POST", body: { confirm: ev.target.confirm.value } }));
-        renderAanbieder({ ok: true, text: `Verwijderd.${r.finalBackup ? "" : " De laatste back-up lukte niet; de vorige blijft bewaard."}` });
-      } catch (err) { m.textContent = err.message; m.className = "msg err"; }
+        renderHub("aanbieder/server", { ok: true, text: `Verwijderd.${r.finalBackup ? "" : " De laatste back-up lukte niet; de vorige blijft bewaard."}` });
+      } catch (err) { formMsg(ev.target, err.message); }
     };
-  };
+  });
+}
+
+function hubKosten(pane, a) {
+  const h = a.hosting ?? {}, x = a.hub.find((y) => y.id === "kosten");
+  pane.innerHTML = `${sectionHead(a, "kosten")}
+    <ul class="items">
+      <li><span class="flag">${FLAGS[h.country] ?? "🖥️"}</span><b>Server van je Dienst</b><span class="sub">${esc(h.name ?? "")} ${esc(h.city ?? "")} (${esc(h.size ?? "")}), excl. btw</span><span class="end">${eur(h.monthly)}</span></li>
+      <li><span class="flag">🗄️</span><b>Back-ups</b><span class="sub">${esc(a.backup?.name ?? "")}: een paar MB per uur, meestal minder dan een euro per maand</span><span class="end"></span></li>
+    </ul>
+    <p style="margin:0">Wat de clouds van je klanten bij Scaleway kosten, naast wat ze jou betalen (marge per bundel), staat in het beheer.</p>
+    ${x?.link ? `<div><button class="btn" id="hK">Kosten in het beheer ↗</button></div>` : ""}`;
+  $("#hK")?.addEventListener("click", () => openBeheer(x.link));
+}
+
+function hubUpdates(pane, a) {
+  pane.innerHTML = `${sectionHead(a, "updates")}
+    <div id="hUpd"><p class="muted" style="margin:0">Versie ophalen…</p></div>
+    <p style="margin:0">Je Dienst werkt zichzelf elke nacht bij naar de nieuwste versie van Eigen Cloud. Gaat er iets mis, dan zet hij de vorige versie terug en probeert hij die versie niet opnieuw.</p>
+    <p class="muted" style="margin:0"><small>Wil je meteen de nieuwste versie, of draait er een versie die niet bijwerkt? Kies dan bij Server en back-ups <b>Opnieuw opzetten</b>: de nieuwe server start met de nieuwste versie en zet je gegevens terug.</small></p>`;
+  const show = (s) => { if ($("#hUpd")) $("#hUpd").innerHTML = s?.version ? `<p style="margin:0">Je Dienst draait versie <b>${esc(s.version)}</b>${s.uptime != null ? `, sinds ${s.uptime < 3600 ? Math.max(1, Math.round(s.uptime / 60)) + " minuten" : Math.round(s.uptime / 3600) + " uur"}` : ""}.</p>` : `<p class="muted" style="margin:0">${a.server ? "Je Dienst is nu niet bereikbaar." : "Er draait geen server."}</p>`; };
+  if (a.lastHealth) show(a.lastHealth);
+  if (a.server) api("/api/aanbieder/status").then(show).catch(() => {});
+}
+
+/** Op het overzicht van je cloud: een korte verwijzing naar "Je dienst" (of: aanbieder worden). */
+async function renderAanbiederTeaser() {
+  const box = $("#aanbiederTeaser");
+  if (!box) return;
+  let a;
+  try { a = await api("/api/aanbieder"); } catch { return; }
+  rememberDienst(a);
+  box.innerHTML = a.hub
+    ? `<h2>Je dienst</h2><div class="panel"><div><b>${esc(a.company?.name ?? "")}</b><br><span class="muted">${esc((a.url ?? "").replace(/^https:\/\//, ""))}${a.wijzigingen === "toepassen" ? " · wijzigingen wachten" : ""}</span></div><div><a class="btn primary" href="#aanbieder">${esc(a.company?.name ?? "Je dienst")} beheren</a></div></div>`
+    : a.started ? `<h2>Je dienst</h2><div class="panel"><p style="margin:0">Je bent bezig je eigen Dienst op te zetten.</p><div><a class="btn" href="#aanbieder">Verder met opzetten</a></div></div>`
+    : `<h2>Aanbieder worden</h2><div class="panel"><p style="margin:0">Draai zelf een Eigen Cloud Dienst: mensen nemen dan bij jou een cloud, met jouw prijzen en jouw naam.</p><div><a class="btn" href="#aanbieder">Aanbieder worden</a></div></div>`;
 }
 
 /** Op het overzicht: alle gekoppelde sleutels (servers, DNS, opslag), elk met "Sleutels controleren". */
@@ -1809,9 +2225,9 @@ async function renderKosten(msg) {
 }
 
 async function renderDash() {
-  root.innerHTML = `<div class="dash"><div class="mapwrap" id="map"></div><section><div id="side"><p class="muted">Status ophalen…</p></div>${config?.dienst?.orderId ? "" : `<div id="kosten"></div>`}${keysSection()}${config?.dienst?.orderId ? `<div id="abo"></div>` : ""}<div id="aanbieder"></div></section></div>`;
+  root.innerHTML = `<div class="dash"><div class="mapwrap" id="map"></div><section><div id="side"><p class="muted">Status ophalen…</p></div>${config?.dienst?.orderId ? "" : `<div id="kosten"></div>`}${keysSection()}${config?.dienst?.orderId ? `<div id="abo"></div>` : ""}<div id="aanbiederTeaser"></div></section></div>`;
   if (config?.dienst?.orderId) renderAbo(); else renderKosten();
-  renderAanbieder();
+  renderAanbiederTeaser();
   const draw = async () => {
     let s;
     try { s = await api("/api/status"); } catch { return; }

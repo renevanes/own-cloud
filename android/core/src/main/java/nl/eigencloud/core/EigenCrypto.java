@@ -8,7 +8,8 @@ import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
 /**
- * Port of src/cluster/crypto.ts (small messages only; stream encryption is not needed on the phone).
+ * Port of src/cluster/crypto.ts: small sealed messages, and the chunked file format of encryptBuffer/decryptBuffer
+ * (whole buffers in memory; used for the Dienst's backups in the hersteltest).
  *
  * <p>Sealed message format: {@code [0x01][nonce 12][ciphertext][tag 16]}, AES-256-GCM, optional AAD string.
  */
@@ -91,4 +92,78 @@ public final class EigenCrypto {
 
     /** JSON.parse(open(key, buf, aad)). */
     public static Object openJson(byte[] key, byte[] buf, String aad) { return Json.parse(Bytes.utf8(open(key, buf, aad))); }
+
+    // ───────── Large files: "EC1\n" + base nonce(8) + chunks [length u32 (top bit = last)][ciphertext][tag 16] ─────────
+
+    private static final byte[] MAGIC = Bytes.utf8("EC1\n");
+    private static final int CHUNK = 1024 * 1024;
+    private static final long FINAL = 0x80000000L;
+
+    private static byte[] chunkNonce(byte[] base, int i) {
+        byte[] n = new byte[12];
+        System.arraycopy(base, 0, n, 0, 8);
+        n[8] = (byte) (i >>> 24); n[9] = (byte) (i >>> 16); n[10] = (byte) (i >>> 8); n[11] = (byte) i;
+        return n;
+    }
+
+    private static Cipher gcm(int mode, byte[] key, byte[] nonce, boolean last) throws GeneralSecurityException {
+        Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+        c.init(mode, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, nonce));
+        c.updateAAD(new byte[] {(byte) (last ? 1 : 0)});
+        return c;
+    }
+
+    /** encryptBuffer in crypto.ts: the whole buffer in the chunked format (blocks of 1 MiB, the last one marked). */
+    public static byte[] encryptBuffer(byte[] key, byte[] plain) {
+        try {
+            byte[] base = Bytes.random(8);
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(plain.length + 64);
+            out.write(MAGIC, 0, MAGIC.length);
+            out.write(base, 0, 8);
+            int off = 0, i = 0;
+            do {
+                int len = Math.min(CHUNK, plain.length - off);
+                boolean last = off + len >= plain.length;
+                // Like the TS stream: only a block that is followed by more data is a full, non-final block.
+                if (len == CHUNK && off + len == plain.length) last = true;
+                byte[] ct = gcm(Cipher.ENCRYPT_MODE, key, chunkNonce(base, i++), last).doFinal(plain, off, len);
+                long head = len | (last ? FINAL : 0);
+                out.write(new byte[] {(byte) (head >>> 24), (byte) (head >>> 16), (byte) (head >>> 8), (byte) head}, 0, 4);
+                out.write(ct, 0, ct.length);
+                off += len;
+                if (last) break;
+            } while (true);
+            return out.toByteArray();
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** decryptBuffer in crypto.ts. Throws IllegalArgumentException (Dutch) for a damaged file or the wrong key. */
+    public static byte[] decryptBuffer(byte[] key, byte[] enc) {
+        if (enc.length < 12 || !java.util.Arrays.equals(java.util.Arrays.copyOf(enc, 4), MAGIC)) throw new IllegalArgumentException("Geen versleuteld Eigen Cloud-bestand");
+        byte[] base = java.util.Arrays.copyOfRange(enc, 4, 12);
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(enc.length);
+        int p = 12, i = 0;
+        boolean done = false;
+        while (p < enc.length) {
+            if (done) throw new IllegalArgumentException("Extra data na laatste blok");
+            if (enc.length - p < 4) throw new IllegalArgumentException("Versleuteld bestand is afgekapt of beschadigd");
+            long head = ((enc[p] & 0xffL) << 24) | ((enc[p + 1] & 0xffL) << 16) | ((enc[p + 2] & 0xffL) << 8) | (enc[p + 3] & 0xffL);
+            boolean last = (head & FINAL) != 0;
+            int len = (int) (head & ~FINAL);
+            if (len > CHUNK) throw new IllegalArgumentException("Ongeldige bloklengte");
+            if (enc.length - p < 4 + len + 16) throw new IllegalArgumentException("Versleuteld bestand is afgekapt of beschadigd");
+            try {
+                byte[] plain = gcm(Cipher.DECRYPT_MODE, key, chunkNonce(base, i++), last).doFinal(enc, p + 4, len + 16);
+                out.write(plain, 0, plain.length);
+            } catch (GeneralSecurityException e) {
+                throw new IllegalArgumentException("Kan niet ontsleutelen (verkeerde sleutel of beschadigd bestand)");
+            }
+            p += 4 + len + 16;
+            if (last) done = true;
+        }
+        if (!done) throw new IllegalArgumentException("Versleuteld bestand is afgekapt of beschadigd");
+        return out.toByteArray();
+    }
 }

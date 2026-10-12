@@ -184,6 +184,14 @@ public final class ConsoleApi {
             }, "eigen-save");
             t.setDaemon(true);
             t.start();
+        } else if (Json.truthy(Json.path(c, "console", "alleenDienst"))) {
+            // Zonder eigen cloud: de herstelkopie in de back-upbucket van de Dienst (zodra die er is).
+            Map<String, Object> copy = Json.copy(c);
+            Thread t = new Thread(() -> {
+                try { Aanbieder.saveDienstCopy(copy); } catch (IOException | RuntimeException ignored) { /* volgende keer */ }
+            }, "eigen-save");
+            t.setDaemon(true);
+            t.start();
         }
     }
 
@@ -250,7 +258,8 @@ public final class ConsoleApi {
                         "email", Json.str(con, "dienst", "email"), "loggedIn", Json.str(con, "dienst", "token") != null,
                         "orderId", Json.str(con, "dienst", "orderId"), "bundle", Json.path(con, "dienst", "bundle"), "applied", Json.truthy(Json.path(con, "dienst", "applied"))),
                 "maxUsers", con == null || con.get("maxUsers") == null ? (Object) 0L : con.get("maxUsers"),
-                "overstap", Json.map(con, "overstap") == null ? null : Json.obj("naar", Json.path(con, "overstap", "naar"), "stap", Json.path(con, "overstap", "stap")));
+                "overstap", Json.map(con, "overstap") == null ? null : Json.obj("naar", Json.path(con, "overstap", "naar"), "stap", Json.path(con, "overstap", "stap")),
+                "alleenDienst", Json.truthy(Json.path(con, "alleenDienst")));
     }
 
     /** What /api/state reports about biometric unlock (filled in by the app). */
@@ -393,6 +402,13 @@ public final class ConsoleApi {
                 touch();
                 return ok(Json.obj("ok", true));
             }
+            case "POST /api/setup/aanbieder": {
+                // Aanbieder worden zonder eigen cloud: een kluis alleen voor de Dienst.
+                if (vault.exists()) return err(409, "Er is al een kluis. Ontgrendel hem.");
+                vault.create(Json.str(b, "passphrase") == null ? "" : Json.str(b, "passphrase"), Console.newDienstConfig());
+                touch();
+                return ok(Json.obj("ok", true));
+            }
             case "POST /api/setup/recover": {
                 if (vault.exists()) return err(409, "Er is al een kluis op deze telefoon");
                 Map<String, Object> c = Console.recoverAdminConfig(Json.str(b, "masterKey"), Json.map(b, "store"));
@@ -527,6 +543,9 @@ public final class ConsoleApi {
             case "POST /api/setup/reset": {
                 Map<String, Object> con = Json.map(c, "console");
                 if (Json.truthy(Json.path(con, "done")) || Json.truthy(Json.path(con, "firstLaunch"))) return err(409, "Je cloud is al gestart. Opnieuw beginnen kan dan niet meer vanuit de assistent.");
+                Map<String, Object> dienst = Json.map(con, "aanbieder");
+                if (dienst != null && (dienst.get("server") != null || Json.truthy(dienst.get("removed")) || Json.truthy(Json.path(dienst, "backup", "bucket"))))
+                    return err(409, "In deze kluis staat ook je Eigen Cloud Dienst. Wissen kan niet: dan ben je de sleutel van je Dienst kwijt.");
                 List<Object> done = new ArrayList<>(), left = new ArrayList<>();
                 if (Json.truthy(b.get("cleanup"))) {
                     for (Map<String, Object> st : ClusterConfig.stores(c)) {
@@ -794,6 +813,28 @@ public final class ConsoleApi {
                 return ok(Aanbieder.status(c, aanbiederDeps()));
             case "POST /api/aanbieder/verwijderen":
                 return ok(Aanbieder.verwijderen(c, b, aanbiederDeps()));
+            case "POST /api/aanbieder/dns":
+                try {
+                    Map<String, Object> r = Aanbieder.saveDns(c, b, aanbiederDeps());
+                    save();
+                    return ok(r);
+                } catch (IOException | RuntimeException e) {
+                    save();
+                    throw e;
+                }
+            case "POST /api/aanbieder/hersteltest":
+                return ok(Aanbieder.hersteltest(c, aanbiederDeps()));
+            case "POST /api/setup/cloud": {
+                // Kluis alleen voor een Dienst: er komt toch een eigen cloud bij.
+                if (!Json.truthy(Json.path(c, "console", "alleenDienst"))) return err(409, "Je hebt al een eigen cloud");
+                String mode = Json.str(b, "domainMode") == null ? "own" : Json.str(b, "domainMode");
+                String domain = Extras.normalizeDomain(Json.str(b, "domain"), mode);
+                String alert = Json.str(b, "alertEmail");
+                if ("free".equals(mode) && (alert == null || alert.isEmpty())) return err(400, "Vul een meldadres in; daarmee maakt de console je gratis deSEC-account aan");
+                String step = Console.addCloud(c, domain, mode, Json.str(b, "mailbox"), alert, Json.str(b, "appPassword"));
+                save();
+                return ok(Json.obj("ok", true, "step", step));
+            }
 
             case "GET /api/checklist":
                 return ok(Console.checklist(c));
@@ -891,6 +932,8 @@ public final class ConsoleApi {
             @Override public List<Map<String, Object>> serverOffers() { return catalog.serverOffers(); }
 
             @Override public List<Map<String, Object>> storeOffers() { return catalog.storeOffers(); }
+
+            @Override public List<Map<String, Object>> dnsOffers() { return catalog.dnsOffers(); }
 
             @Override public void save() throws IOException { ConsoleApi.this.save(); }
         };

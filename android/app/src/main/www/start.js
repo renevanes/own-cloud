@@ -6,10 +6,38 @@
   var info = {};
   try { info = JSON.parse(phone.info()) || {}; } catch (e) { info = {}; }
 
-  if (info.console) {
-    $("#setup b").textContent = "Beheer openen";
-    $("#setup .muted").textContent = "Je cloud starten, laten slapen of wakker maken, en instellingen van je servers.";
+  // Kluis op deze telefoon: beheer van je cloud; alleen een Dienst (nog geen cloud): toch een eigen cloud maken.
+  function setup() {
+    if (info.console && info.dienstOnly) {
+      $("#setup b").textContent = "Ook een eigen cloud maken";
+      $("#setup .muted").textContent = "Mail, agenda en foto's voor jezelf, met dezelfde kluis. Je Dienst blijft zoals hij is.";
+    } else if (info.console) {
+      $("#setup b").textContent = "Beheer openen";
+      $("#setup .muted").textContent = "Je cloud starten, laten slapen of wakker maken, en instellingen van je servers.";
+    }
   }
+  setup();
+
+  // ── Aanbieder worden, of je eigen Dienst beheren ("ESAPE beheren") ──
+  function provider() {
+    var own = !!info.dienstOwn;
+    var name = info.dienstName || (info.dienstOwn || "").replace(/^https:\/\//, "");
+    var title = own ? name + " beheren" : "Aanbieder worden";
+    $("#providerTitle").textContent = title;
+    $("#providerText").textContent = own
+      ? "Je Dienst: klanten, aanbod en prijzen, sleutels, server en back-ups. Alles op één plek."
+      : "Draai je eigen Eigen Cloud Dienst, met je eigen naam en prijzen. Mensen nemen dan bij jou een cloud. Een eigen cloud is niet nodig.";
+    $("#dienstOwn").textContent = title;
+    $("#providerAbout").textContent = own
+      ? "Je eigen Dienst (" + (info.dienstOwn || "").replace(/^https:\/\//, "") + ") beheer je in de app. Ben je ook medewerker van een andere Dienst? Open dan het beheer daarvan."
+      : "Bied je Eigen Cloud aan anderen aan? Zet je eigen Dienst op, of open het beheer van een Dienst waar je medewerker bent.";
+  }
+  function openProvider() {
+    if (phone.openConsoleAt) phone.openConsoleAt("#aanbieder"); else phone.openConsole();
+  }
+  provider();
+  // Terug uit de console (bijv. net je Dienst opgezet): het startscherm bijwerken.
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) reload(); });
 
   var home = location.hash === "#offline" && info.cloud ? "offline" : "welcome";
   function show(id) {
@@ -22,7 +50,7 @@
   show(location.hash === "#over" ? "about" : home);
 
   // ── Over Eigen Cloud ──
-  function reload() { try { info = JSON.parse(phone.info()) || {}; } catch (e) { /* oud */ } renderAbout(); }
+  function reload() { try { info = JSON.parse(phone.info()) || {}; } catch (e) { /* oud */ } renderAbout(); provider(); setup(); }
   function when(ms) {
     if (!ms) return "nog niet";
     var d = new Date(ms), now = new Date();
@@ -130,7 +158,11 @@
     m.textContent = d.error;
     m.className = "msg err";
   });
-  $("#setup").addEventListener("click", function () { phone.openConsole(); });
+  $("#setup").addEventListener("click", function () {
+    if (info.console && info.dienstOnly && phone.openConsoleAt) phone.openConsoleAt("#jij"); else phone.openConsole();
+  });
+  $("#provider").addEventListener("click", openProvider);
+  $("#dienstOwn").addEventListener("click", openProvider);
   $("#manage").addEventListener("click", function () { phone.openConsole(); });
   $("#retry").addEventListener("click", function () { phone.retry(); });
   $("#other").addEventListener("click", function () { phone.forget(); });

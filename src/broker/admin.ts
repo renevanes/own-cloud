@@ -17,6 +17,7 @@ import { DEFAULT_LIST_URL } from "./config.js";
 import { type InvoiceRow, readInvoice, renderInvoiceHtml, toCents, fromCents, vatSplit } from "./invoice.js";
 import { readKit } from "./provision.js";
 import { getBrand, updateBrand, saveLogo, getLogo, putBundle, deleteBundle, publicBundle, saveCosts, LOGO_MAX } from "./brand.js";
+import { placementOptions, placementSizes, checkPlacement, checkStorage, fillCosts } from "./placement.js";
 import {
   type Perm, type Role, type StaffRow, ROLES, ROLE_LABELS, PERMISSIONS, can, StaffError, staffFromRequest, staffView, audit,
   addStaff, setRole, removeStaff, resetSecondFactor, getStaff, mailInvite,
@@ -94,6 +95,41 @@ function actionsFor(o: OrderRow) {
 }
 
 const monthOf = (ms: number) => todayNl(new Date(ms)).slice(0, 7);
+
+/** Omzet per maand (NL-tijd): betaalde betalingen incl./excl./btw, min terugbetalingen. Nieuwste maand eerst. */
+export function revenueMonths(ctx: Ctx, months: number) {
+  const db = ctx.db;
+  const map = new Map<string, { incl: number; excl: number; vat: number; refunded: number; count: number }>();
+  const get = (m: string) => { let x = map.get(m); if (!x) { x = { incl: 0, excl: 0, vat: 0, refunded: 0, count: 0 }; map.set(m, x); } return x; };
+  const pays = db.prepare("SELECT amount, paid_at, updated_at FROM payments WHERE status = 'paid' AND COALESCE(kind, 'first') IN ('first','recurring','settle')").all() as { amount: string | null; paid_at: number | null; updated_at: number }[];
+  for (const p of pays) {
+    const cents = toCents(p.amount ?? "0");
+    const { excl, vat } = vatSplit(cents, ctx.cfg.vatPercent);
+    const m = get(monthOf(p.paid_at ?? p.updated_at));
+    m.incl += cents; m.excl += excl; m.vat += vat; m.count++;
+  }
+  for (const r of db.prepare("SELECT amount, created_at FROM refunds").all() as { amount: string; created_at: number }[]) get(monthOf(r.created_at)).refunded += toCents(r.amount);
+  return [...map].sort((a, b) => b[0].localeCompare(a[0])).slice(0, months)
+    .map(([month, x]) => ({ month, incl: fromCents(x.incl), excl: fromCents(x.excl), vat: fromCents(x.vat), refunded: fromCents(x.refunded), net: fromCents(x.incl - x.refunded), count: x.count }));
+}
+
+/**
+ * Kerncijfers voor de console van de aanbieder ("Je dienst" → Overzicht), via GET /v1/status/overzicht met het
+ * beheertoken: alleen aantallen en bedragen, geen namen of adressen van klanten.
+ */
+export function dienstOverzicht(ctx: Ctx) {
+  const n = (sql: string) => (ctx.db.prepare(sql).get() as { n: number }).n;
+  const month = todayNl().slice(0, 7);
+  const m = revenueMonths(ctx, 1).find((r) => r.month === month);
+  return {
+    klanten: n("SELECT COUNT(*) AS n FROM customers"),
+    actief: n("SELECT COUNT(*) AS n FROM orders WHERE status IN ('paid','provisioning','ready','payment_problem')"),
+    achterstanden: n("SELECT COUNT(*) AS n FROM orders WHERE status = 'payment_problem'"),
+    openHulpvragen: n("SELECT COUNT(*) AS n FROM tickets WHERE status = 'open'"),
+    omzetMaand: { month, net: m?.net ?? "0.00", count: m?.count ?? 0 },
+    bundels: ctx.cfg.bundles.length,
+  };
+}
 
 // ───────── Routes ─────────
 
@@ -391,21 +427,7 @@ export function registerAdmin(app: FastifyInstance, ctx: Ctx, httpError: HttpErr
     return { ok: true, refund: { id, amount: value, status: r?.status ?? null } };
   }));
 
-  /** Omzet per maand (NL-tijd): betaalde betalingen incl./excl./btw, min terugbetalingen. */
-  const revenue = (months: number) => {
-    const map = new Map<string, { incl: number; excl: number; vat: number; refunded: number; count: number }>();
-    const get = (m: string) => { let x = map.get(m); if (!x) { x = { incl: 0, excl: 0, vat: 0, refunded: 0, count: 0 }; map.set(m, x); } return x; };
-    const pays = db.prepare("SELECT amount, paid_at, updated_at FROM payments WHERE status = 'paid' AND COALESCE(kind, 'first') IN ('first','recurring','settle')").all() as { amount: string | null; paid_at: number | null; updated_at: number }[];
-    for (const p of pays) {
-      const cents = toCents(p.amount ?? "0");
-      const { excl, vat } = vatSplit(cents, ctx.cfg.vatPercent);
-      const m = get(monthOf(p.paid_at ?? p.updated_at));
-      m.incl += cents; m.excl += excl; m.vat += vat; m.count++;
-    }
-    for (const r of db.prepare("SELECT amount, created_at FROM refunds").all() as { amount: string; created_at: number }[]) get(monthOf(r.created_at)).refunded += toCents(r.amount);
-    return [...map].sort((a, b) => b[0].localeCompare(a[0])).slice(0, months)
-      .map(([month, x]) => ({ month, incl: fromCents(x.incl), excl: fromCents(x.excl), vat: fromCents(x.vat), refunded: fromCents(x.refunded), net: fromCents(x.incl - x.refunded), count: x.count }));
-  };
+  const revenue = (months: number) => revenueMonths(ctx, months);
   app.get<{ Querystring: { months?: string } }>("/v1/admin/revenue", admin("money", async (_s, req) => ({
     vatPercent: ctx.cfg.vatPercent, months: revenue(Math.min(Math.max(Number(req.query.months) || 12, 1), 120)),
   })));
@@ -415,10 +437,20 @@ export function registerAdmin(app: FastifyInstance, ctx: Ctx, httpError: HttpErr
     bundles: ctx.cfg.bundles.map((b) => ({ ...b, ...priceAndMargin(ctx, b.monthly.value, b), orders: (db.prepare("SELECT COUNT(*) AS n FROM orders WHERE bundle = ? AND status NOT IN ('cancelled','failed','awaiting_payment')").get(b.id) as { n: number }).n })),
     costs: ctx.cfg.costs, vatPercent: ctx.cfg.vatPercent,
   })));
+  // Waar de servers van een bundel komen: regio's van Scaleway (uit de registry) met de formaten en live prijzen.
+  app.get("/v1/admin/placement", admin("offering", async () => placementOptions(ctx)));
   app.put<{ Params: { id: string }; Body: any }>("/v1/admin/bundles/:id", admin("offering", async (s, req) => {
     const before = bundleOf(ctx, req.params.id);
     const body = (req.body ?? {}) as any;
     const raw: any = { ...(before ?? {}), ...body, id: req.params.id, includes: { ...(before?.includes ?? {}), ...(body.includes ?? {}) } };
+    if (body.placement !== undefined) {
+      // Nieuwe plek van de servers: controleren (regio's, formaten, genoeg geheugen), aantallen in "includes" mee.
+      const sizes = await placementSizes(ctx).catch(() => null);
+      raw.placement = input(() => checkPlacement(body.placement, sizes));
+      raw.includes = { ...raw.includes, dataServers: raw.placement.filter((p: any) => p.kind === "data").length, witnesses: raw.placement.filter((p: any) => p.kind === "witness").length };
+      if (sizes) fillCosts(ctx, raw.placement, sizes);
+    }
+    if (body.storage !== undefined) raw.storage = input(() => checkStorage(body.storage));
     if (!body.placement && before) raw.placement = before.placement;
     if (!body.storage && before) raw.storage = before.storage;
     if (body.extraUserMonthly === null || body.extraUserMonthly === "") raw.extraUserMonthly = null;

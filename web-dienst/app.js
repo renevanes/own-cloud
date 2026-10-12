@@ -279,7 +279,18 @@ function renderLogin(step = "email", extra = {}) {
 async function loggedIn(r) {
   setToken(r.token);
   login = { email: "", pending: null, next: null, methods: [] };
+  // Geopend op een bepaalde pagina (bijv. /beheer#/klanten vanuit de app)? Dan na het inloggen daarheen.
+  if (!pageOf(location.hash)) location.hash = "#/overzicht";
   await start();
+}
+
+/**
+ * De pagina uit een adres: "#/klanten", "#klanten" en "#/klant/ord_1" (ook met ?zoekterm) → ["klanten", arg]. Alleen
+ * bekende pagina's; anders null. Zo kan de console van de aanbieder het beheer meteen op de goede plek openen.
+ */
+function pageOf(hash) {
+  const [page = "", arg] = String(hash ?? "").replace(/^#\/?/, "").split("?")[0].split("/");
+  return KNOWN_PAGES.includes(page) ? [page, arg] : null;
 }
 
 $("#logoutBtn").onclick = async () => {
@@ -288,6 +299,7 @@ $("#logoutBtn").onclick = async () => {
   location.hash = "#/overzicht";
   renderLogin();
 };
+const KNOWN_PAGES = ["overzicht", "klanten", "klant", "hulpvragen", "hulpvraag", "berichten", "geld", "kosten", "aanbod", "uitnodigingen", "huisstijl", "medewerkers", "logboek", "account", "lijst", "adressen"];
 
 // ───────── Navigatie ─────────
 
@@ -326,7 +338,9 @@ async function start() {
 window.addEventListener("hashchange", () => { if (me) route(); });
 
 async function route() {
-  const [, page = "overzicht", arg] = location.hash.replace(/^#/, "").split("?")[0].split("/");
+  // "#klanten" (zonder schuine streep) werkt ook: dat maakt de console in de app.
+  if (/^#[a-z]/.test(location.hash)) { history.replaceState(null, "", `#/${location.hash.slice(1)}`); }
+  const [page = "overzicht", arg] = pageOf(location.hash) ?? [];
   const known = { overzicht, klanten, klant, hulpvragen, hulpvraag, berichten, geld, kosten, aanbod, uitnodigingen, huisstijl, medewerkers, logboek, account, lijst, adressen };
   const fn = known[page] ?? overzicht;
   renderNav(page);
@@ -687,7 +701,8 @@ async function aanbod() {
       <label>Prijs per extra gebruiker (€ p/m, leeg = niet te koop)<input name="extra" value="${esc(b.extraUserMonthly?.value ?? "")}" inputmode="decimal"></label>
       <label>Opslag (GB)<input name="storageGb" type="number" min="0" value="${b.includes.storageGb}"></label></div>
     <p class="hint">Servers: ${b.placement.map((p) => `${esc(p.size)} (${esc(p.region)})`).join(", ")}. Geschatte kosten ${b.cost ? euro(b.cost.total) : "onbekend"} per maand; marge ${euro(b.margin)} excl. btw.</p>
-    <div class="row"><button class="btn primary">Opslaan</button>${b.orders ? "" : `<button type="button" class="btn danger" data-del="${esc(b.id)}">Verwijderen</button>`}</div><p class="msg"></p></form>`;
+    <div class="row"><button class="btn primary">Opslaan</button><button type="button" class="btn" data-place="${esc(b.id)}">Servers en opslag wijzigen</button>${b.orders ? "" : `<button type="button" class="btn danger" data-del="${esc(b.id)}">Verwijderen</button>`}</div><p class="msg"></p>
+    <div class="placement" id="pl-${esc(b.id)}" hidden></div></form>`;
   root.innerHTML = `<h1>Aanbod</h1><p class="lead">Je bundels en prijzen. Een nieuwe prijs geldt voor nieuwe bestellingen; bestaande klanten houden hun bedrag tot ze zelf van bundel wisselen of gebruikers bijkopen.</p>
     <div class="fields">${r.bundles.map(bundleForm).join("")}</div>
     <h2>Nieuwe bundel</h2><form class="panel fields" id="nb">
@@ -704,6 +719,15 @@ async function aanbod() {
       try { await api(`/v1/admin/bundles/${f.dataset.id}`, { method: "PUT", body }); toast("Opgeslagen"); rerender(); } catch (err) { setMsg(f.querySelector(".msg"), err.message); }
     });
   });
+  let options = null;
+  $$("[data-place]").forEach((btn) => btn.onclick = () => busy(btn, async () => {
+    const b = r.bundles.find((x) => x.id === btn.dataset.place);
+    const box = $(`#pl-${CSS.escape(b.id)}`);
+    if (!box.hidden) { box.hidden = true; return; }
+    options ??= await api("/v1/admin/placement");
+    placementEditor(box, b, options);
+    box.hidden = false;
+  }));
   $$("[data-del]").forEach((b) => b.onclick = async () => {
     if (!(await confirmDlg("Bundel verwijderen?", "Nieuwe klanten kunnen hem dan niet meer kiezen.", "Verwijderen", true))) return;
     await busy(b, async () => { await api(`/v1/admin/bundles/${b.dataset.del}`, { method: "DELETE" }); rerender(); });
@@ -717,6 +741,65 @@ async function aanbod() {
       try { await api(`/v1/admin/bundles/${encodeURIComponent(v.id)}`, { method: "PUT", body }); toast("Toegevoegd"); rerender(); } catch (err) { setMsg($("#nbm"), err.message); }
     });
   };
+}
+
+/**
+ * Waar de servers en de opslag van een bundel komen: per server de soort (gegevens of witness), de regio en het formaat
+ * met de live prijs bij Scaleway. Geldt voor nieuwe bestellingen; bestaande clouds blijven waar ze staan.
+ */
+function placementEditor(box, b, o) {
+  const FLAG = (cc) => (/^[A-Z]{2}$/.test(cc ?? "") ? String.fromCodePoint(...[...cc].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65)) : "");
+  const rows = b.placement.map((p) => ({ kind: p.kind, region: p.region, size: p.size }));
+  const store = { replica: b.storage.find((x) => x.purpose === "replica")?.region ?? "nl-ams", backup: b.storage.find((x) => x.purpose === "backup")?.region ?? "fr-par" };
+  const sizesOf = (region) => o.regions.find((x) => x.id === region)?.sizes ?? null;
+  const fits = (s, kind) => kind !== "data" || s.ramGb >= o.rules.dataRamGb;
+  const priceOf = (row) => sizesOf(row.region)?.find((s) => s.size === row.size)?.monthly ?? null;
+  const draw = () => {
+    const total = rows.reduce((n, r) => (n === null || priceOf(r) === null ? null : n + priceOf(r)), 0);
+    box.innerHTML = `<h4 style="margin:6px 0 0">Servers en opslag</h4>
+      <p class="hint">${o.error ? `Prijzen ophalen lukte niet (${esc(o.error)}); je kunt de formaten zelf intypen.` : `Formaten en prijzen (per maand, excl. btw) komen live van ${esc(o.name)}.`} Minstens twee servers met gegevens (elk ${o.rules.dataRamGb} GB geheugen of meer) en een witness die meebeslist bij een storing. Een wijziging geldt voor nieuwe bestellingen.</p>
+      <div class="fields">${rows.map((row, i) => {
+        const sizes = sizesOf(row.region);
+        return `<div class="row prow" data-i="${i}">
+          <label>Soort<select data-k="kind"><option value="data" ${row.kind === "data" ? "selected" : ""}>Gegevens</option><option value="witness" ${row.kind === "witness" ? "selected" : ""}>Witness</option></select></label>
+          <label>Regio<select data-k="region">${o.regions.map((g) => `<option value="${esc(g.id)}" ${g.id === row.region ? "selected" : ""}>${FLAG(g.country)} ${esc(g.label)}</option>`).join("")}</select></label>
+          <label>Formaat${sizes ? `<select data-k="size">${sizes.some((s) => s.size === row.size) ? "" : `<option value="${esc(row.size)}" selected>${esc(row.size)} (niet beschikbaar)</option>`}${sizes.filter((s) => fits(s, row.kind) || s.size === row.size).map((s) => `<option value="${esc(s.size)}" ${s.size === row.size ? "selected" : ""}>${esc(s.size)} · ${esc(s.label)}${s.monthly != null ? ` · ${euro(s.monthly.toFixed(2))}` : ""}</option>`).join("")}</select>` : `<input data-k="size" value="${esc(row.size)}" autocapitalize="characters" spellcheck="false">`}</label>
+          <button type="button" class="btn small" data-rm="${i}" ${rows.length <= 3 ? "disabled" : ""} aria-label="Server ${i + 1} weghalen">Weg</button></div>`;
+      }).join("")}</div>
+      <div class="row"><button type="button" class="btn small" data-add="data">Server met gegevens erbij</button><button type="button" class="btn small" data-add="witness">Witness erbij</button></div>
+      <div class="row"><label>Werkkopie<select data-store="replica">${o.storage.map((g) => `<option value="${esc(g.id)}" ${g.id === store.replica ? "selected" : ""}>${FLAG(g.country)} ${esc(g.label)}</option>`).join("")}</select></label>
+        <label>Back-up<select data-store="backup">${o.storage.map((g) => `<option value="${esc(g.id)}" ${g.id === store.backup ? "selected" : ""}>${FLAG(g.country)} ${esc(g.label)}</option>`).join("")}</select></label></div>
+      <p class="hint">${total === null ? "Van een deel is de prijs onbekend." : `Servers samen ongeveer ${euro(total.toFixed(2))} per maand (excl. btw), plus opslag.`}</p>
+      <div class="row"><button type="button" class="btn primary" data-save>Servers en opslag bewaren</button></div><p class="msg" data-msg></p>`;
+    $$(".prow", box).forEach((el) => {
+      const row = rows[Number(el.dataset.i)];
+      $$("[data-k]", el).forEach((inp) => inp.onchange = () => {
+        row[inp.dataset.k] = inp.value;
+        if (inp.dataset.k !== "size") {
+          // Andere regio of soort: het goedkoopste passende formaat daar, als het huidige er niet is of niet past.
+          const sizes = sizesOf(row.region);
+          const cur = sizes?.find((s) => s.size === row.size);
+          if (sizes && (!cur || !fits(cur, row.kind))) row.size = sizes.filter((s) => fits(s, row.kind)).sort((a, z) => (a.monthly ?? 999) - (z.monthly ?? 999))[0]?.size ?? row.size;
+        }
+        draw();
+      });
+    });
+    $$("[data-rm]", box).forEach((x) => x.onclick = () => { rows.splice(Number(x.dataset.rm), 1); draw(); });
+    $$("[data-add]", box).forEach((x) => x.onclick = () => {
+      const kind = x.dataset.add, region = rows.at(-1)?.region ?? o.regions[0].id;
+      const s = (sizesOf(region) ?? []).filter((y) => fits(y, kind)).sort((a, z) => (a.monthly ?? 999) - (z.monthly ?? 999))[0];
+      rows.push({ kind, region, size: s?.size ?? rows.at(-1)?.size ?? "" });
+      draw();
+    });
+    $$("[data-store]", box).forEach((x) => x.onchange = () => { store[x.dataset.store] = x.value; });
+    $("[data-save]", box).onclick = (e) => busy(e.target, async () => {
+      try {
+        await api(`/v1/admin/bundles/${encodeURIComponent(b.id)}`, { method: "PUT", body: { placement: rows, storage: [{ region: store.replica, purpose: "replica" }, { region: store.backup, purpose: "backup" }] } });
+        toast("Servers en opslag bewaard"); rerender();
+      } catch (err) { setMsg($("[data-msg]", box), err.message); }
+    });
+  };
+  draw();
 }
 
 // ───────── Uitnodigingen ─────────

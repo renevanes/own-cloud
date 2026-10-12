@@ -200,7 +200,7 @@ public class AanbiederTest {
                 T.check(Json.str(e, "error").contains("alleen een adres"), "bad url");
                 r = call(200, "POST", "/api/aanbieder/adres", Json.obj());
                 T.eq("https://dienst.vanes.nl", r.get("url"), "default url used");
-                T.eq("{\"host\":\"dienst.vanes.nl\",\"sub\":\"dienst\",\"managed\":true,\"value\":null}", Json.stringify(r.get("dns")), "dns managed by the cloud");
+                T.eq("{\"host\":\"dienst.vanes.nl\",\"sub\":\"dienst\",\"managed\":true,\"value\":null,\"mode\":\"cloud\",\"provider\":\"desec\",\"zone\":\"vanes.nl\"}", Json.stringify(r.get("dns")), "dns managed by the cloud");
                 T.eq("server", r.get("step"), "next step server");
 
                 // 4. Server en back-ups
@@ -265,7 +265,7 @@ public class AanbiederTest {
                 r = call(200, "GET", "/api/aanbieder/status", null);
                 T.eq(true, r.get("reachable"), "reachable");
                 T.eq("1.9.0.4", r.get("version"), "version");
-                T.eq("{\"host\":\"dienst.vanes.nl\",\"want\":\"192.0.2.10\",\"have\":[\"192.0.2.10\"],\"ok\":true}", Json.stringify(r.get("dns")), "dns ok");
+                T.eq("{\"host\":\"dienst.vanes.nl\",\"want\":\"192.0.2.10\",\"have\":[\"192.0.2.10\"],\"ok\":true,\"mode\":\"cloud\",\"error\":null}", Json.stringify(r.get("dns")), "dns ok");
                 T.check(!userData.containsKey("srv-0"), "user-data removed at Scaleway");
 
                 // Instellingen wijzigen zonder nieuwe server (toepassen)

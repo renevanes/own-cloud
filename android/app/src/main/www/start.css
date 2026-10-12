@@ -19,3 +19,5 @@
 .facts dd { margin: 0; overflow-wrap: anywhere; }
 #about #dienstForm { margin: 4px 0 8px; }
 #about #dienstForm .actions { margin: 0; }
+.start .choices { display: grid; gap: 12px; }
+.start .choice b { overflow-wrap: anywhere; }

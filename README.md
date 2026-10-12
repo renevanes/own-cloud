@@ -63,13 +63,20 @@ verhuiscode. Gaat er iets mis vóór je cloud bij de nieuwe plek draait, dan zet
 van je oude aanbieder blijft tot het einde onaangeroerd. Het overstappen gaat na een herstart van de console of de app
 verder waar het was. Een gratis adres dat alleen bij je oude aanbieder hoort (`BROKER_FREE_ZONE`) kan niet mee.
 
-**Zelf aanbieder worden?** Op het overzicht van de console staat **Aanbieder worden**: vul je bedrijfsgegevens in,
-koppel je accounts (Scaleway, Mollie, deSEC, mail) en de console zet je eigen Eigen Cloud Dienst op een server bij
-de aanbieder en in de regio die je kiest (Scaleway, Hetzner, UpCloud, Exoscale of OVHcloud; de back-ups mogen elders),
-op `dienst.<jouw domein>`, met elk uur een versleutelde back-up en automatische updates. Alles daarna doe je ook in de
-app: instellingen wijzigen (bijv. de Mollie-sleutel van test naar live) met **Wijzigingen toepassen**, zonder nieuwe
-server; klanten, geld, kosten, aanbod, huisstijl, medewerkers en *Op de lijst* in het beheer van je Dienst (**Beheer
-openen**). Een terminal is niet nodig. Beheerders van het project kunnen bij het adres van hun Dienst ook de
+**Zelf aanbieder worden?** Kies op het startscherm van de app of de console **Aanbieder worden** (in de console ook
+bovenaan, op elk scherm). Een eigen cloud is daarvoor niet nodig: de console maakt dan een kluis alleen voor je Dienst
+(wachtwoordzin en herstelsleutel, zoals bij een cloud). Vul je bedrijfsgegevens in, koppel je accounts (Scaleway, Mollie,
+deSEC, mail), kies het adres en wie het in de DNS zet (je cloud, een DNS-aanbieder zoals deSEC, Scaleway, Hetzner,
+Exoscale of OVHcloud, waarbij de console het record zelf zet en bijwerkt, of jijzelf), en de console zet je eigen Eigen
+Cloud Dienst op een server bij de aanbieder en in de regio die je kiest (Scaleway, Hetzner, UpCloud, Exoscale of
+OVHcloud; de back-ups mogen elders), met elk uur een versleutelde back-up en automatische updates.
+
+Daarna is er één plek voor alles: **Je dienst** (op het startscherm van de app: *ESAPE beheren*, met de naam van je
+Dienst). Overzicht (status, versie, klanten, omzet), Bedrijf, Accounts en sleutels, Adressendienst, Server en back-ups
+(andere plek, DNS, hersteltest, opnieuw opzetten), Kosten en Updates regel je daar; Aanbod en prijzen (ook waar de
+servers van elke bundel staan), Huisstijl, Medewerkers, Klanten, Hulpvragen, Berichten en *Op de lijst* openen het beheer
+van je Dienst meteen op die pagina. Wat je wijzigt en nog niet op je Dienst staat, zie je bovenaan, met **Wijzigingen
+toepassen** (zonder nieuwe server). Een terminal is niet nodig. Beheerders van het project kunnen ook de
 **gratis-adressendienst** laten meedraaien (zelfde server). Zie
 [BROKER.md](BROKER.md#opzetten-vanuit-de-app-zonder-terminal) en [ADRESSEN.md](ADRESSEN.md).
 

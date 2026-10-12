@@ -244,8 +244,18 @@ en bewaar `BROKER_SECRET` / `geheim.key` en `aanbieder.key` apart. Of laat de Di
 
 ## Opzetten vanuit de app (zonder terminal)
 
-Wie al een Eigen Cloud heeft, kan in de beheerconsole (computer of app, op het overzicht: **Aanbieder worden**) zijn
-eigen Dienst laten opzetten. De console doet dan wat hierboven met de hand staat. Vijf stappen, met Vorige/Volgende:
+In de beheerconsole (computer of app) zet je je eigen Dienst op. De ingang **Aanbieder worden** staat op het startscherm
+van de app, op het eerste scherm van de console en bovenaan elk scherm van de console (route `#aanbieder`, ook als link;
+de app opent de console daar met `openConsoleAt("#aanbieder")`). Zodra je Dienst draait heet hij **<naam> beheren**.
+
+**Zonder eigen cloud.** Heb je nog geen kluis, dan maakt *Aanbieder worden* er een alleen voor de Dienst
+(`POST /api/setup/aanbieder {passphrase}`, vlag `console.alleenDienst`): wachtwoordzin en herstelsleutel (bevestigen
+zoals bij een cloud), geen cloudstappen. De herstelkopie van de kluis gaat dan (versleuteld met de herstelsleutel) naar
+de back-upbucket van de Dienst als `admin-config.enc`; herstellen op een ander toestel met *Ik heb al een Eigen Cloud*,
+je herstelsleutel en de sleutels van die opslag. Later toch een cloud: `POST /api/setup/cloud` (de stap *Jij en je adres*
+zonder nieuwe kluis). *Opnieuw beginnen* in de cloudassistent wist een kluis met een Dienst niet (409).
+
+De console doet wat hierboven met de hand staat. Vijf stappen, met Vorige/Volgende:
 
 1. **Bedrijf**: naam, adres, KvK, btw-nummer (voor de facturen, `BROKER_COMPANY_*`), het e-mailadres van de eigenaar
    (`BROKER_OWNER_EMAIL`; die krijgt de eerste inlogcode voor `/beheer`), het btw-percentage (`BROKER_VAT_PERCENT`,
@@ -256,9 +266,21 @@ eigen Dienst laten opzetten. De console doet dan wat hierboven met de hand staat
    Mollie (`GET /v2/methods`), deSEC (`GET /domains/`), de mailserver (SMTP: inloggen; leeg = de relay van je eigen
    cloud, afzender `noreply@<je domein>`), en optioneel Openprovider (inloggen; houdt niet tegen, want Openprovider kijkt
    ook naar het IP-adres) en de adressendienst (`BROKER_ADRES_URL`).
-3. **Adres**: standaard `https://dienst.<je domein>`. Je cloud zet het A-record zelf in je DNS (instelling `extra_dns`,
-   nu ook met A/AAAA; een lege waarde haalt een record weg). Een adres onder een ander domein kan ook; dan zet je het
-   record zelf. Optioneel (voor de beheerders van het project): **Ook de gratis-adressendienst draaien**, met de gedeelde
+3. **Adres**: standaard `https://dienst.<je domein>` (zonder cloud vul je het zelf in). Daarna: **wie zet het in de
+   DNS?** (`POST /api/aanbieder/dns {provider, zone?, fields?}`):
+   - `cloud`: je cloud zet het A-record (instelling `extra_dns`, ook met A/AAAA; een lege waarde haalt een record weg);
+     alleen als het adres onder het domein van je draaiende cloud valt;
+   - een DNS-aanbieder uit de registry (deSEC, Scaleway, Hetzner, Exoscale, OVHcloud): de console koppelt hem zelf
+     (`dns.connect` van de adapter, live gecontroleerd; bij deSEC wordt de zone aangemaakt als die er nog niet is), met
+     de zone (standaard het adres zonder het eerste deel, `dienst.esape.nl` → `esape.nl`) en inloggegevens (wat je
+     invult, anders die van je cloud, van de server van de Dienst, of bij deSEC/Scaleway de sleutel bij Accounts). Bewaard
+     onder `console.aanbieder.dns` (`{provider, zone, fields, set, nameservers}`); antwoorden bevatten alleen de namen van
+     de velden. De console zet A/AAAA voor het adres (en de adressendienst, als die onder de zone valt) zelf met
+     `setRecords` (TTL 300; deSEC rondt op naar een uur): bij opzetten, bij een ander IP-adres (de statuscontrole
+     vergelijkt met `dns.set` en werkt alleen bij wat anders is; een fout blijft als `dns.error` staan en wordt opnieuw
+     geprobeerd), en weghalen bij verwijderen of een andere keuze. Je cloud houdt zich er dan buiten (`aanbiederDns`
+     geeft alleen nog lege waarden voor namen buiten die zone);
+   - `handmatig`: je zet het record zelf; de console zegt na het opzetten welk. Optioneel (voor de beheerders van het project): **Ook de gratis-adressendienst draaien**, met de gedeelde
    zone, een deSEC-token van dat account (live gecontroleerd) en een eigen adres (standaard `adressen.<domein>`, ook
    door je cloud in de DNS gezet). Zie [ADRESSEN.md](ADRESSEN.md#opzetten-vanuit-de-app-aanbevolen).
 4. **Server en back-ups**: de **server** bij elke aanbieder met servers uit de registry (Scaleway, Hetzner, UpCloud,
@@ -295,8 +317,30 @@ eigen Dienst laten opzetten. De console doet dan wat hierboven met de hand staat
    mail versturen via de mailserver van stap 2 (standaard de relay van je cloud). Geen van beide hangt af van waar de
    server staat.
 
-Daarna (**Je dienst**): status (bereikbaar, versie, laatste back-up, DNS, en de adressendienst als die meedraait),
-**Beheer openen** (in de app: het beheerscherm met vingerafdruk), **Instellingen wijzigen** (de stappen opnieuw),
+Daarna: **Je dienst** (`#aanbieder/<onderdeel>`), één plek voor alles. `GET /api/aanbieder` geeft `hub`: de onderdelen in
+vaste volgorde met `waar` (`console` = in je kluis, `dienst` = in de database van de Dienst, `beide`), een `link` naar
+het beheer op die pagina (`https://dienst.x.nl/beheer#/klanten`) en `pending` (nog niet toegepast):
+
+| Onderdeel | Waar | Wat |
+|---|---|---|
+| Overzicht | console | Status (bereikbaar, versie, back-up, DNS, adressendienst) en kerncijfers uit de Dienst (`GET /v1/status/overzicht` met het beheertoken: klanten, actief, omzet deze maand, open hulpvragen, achterstanden) |
+| Bedrijf | console | Naam, adres, KvK, btw, e-mail van de eigenaar, btw-percentage, bewaker |
+| Accounts en sleutels | console | Mollie (test/live), deSEC, Scaleway, mail (SMTP), Openprovider, adressendienst |
+| Aanbod en prijzen | dienst | Bundels, prijzen, prijs per extra gebruiker, en per bundel waar de servers en opslag staan (zie *Bundels*) |
+| Huisstijl, Medewerkers, Klanten, Hulpvragen, Berichten, Op de lijst | dienst | Het beheer op die pagina |
+| Adressendienst | beide | Aan/uit, zone, token en adres in de kluis; uitgegeven adressen in het beheer |
+| Server en back-ups | console | Andere aanbieder of regio, ander adres, DNS, back-ups met **Hersteltest** (`POST /api/aanbieder/hersteltest`: nieuwste back-up ophalen, ontsleutelen, database controleren; alleen lezen), opnieuw opzetten, verwijderen |
+| Kosten | beide | De server van de Dienst hier; kosten en marge per klant in het beheer |
+| Updates | console | Draaiende versie; bijwerken gaat elke nacht vanzelf (zie hieronder) |
+
+Wat nog niet op de Dienst staat, staat bovenaan (`wijzigingen` en `pending`, per onderdeel; de console onthoudt per
+instelling een hash in `deployed.keys`), met **Wijzigingen toepassen** of, bij een ander adres of een andere plek,
+**Opnieuw opzetten**. Onderdelen in de Dienst openen het beheer meteen op de pagina: op een computer in een nieuw
+tabblad, in de app via `EigenNative.openDienst(url)` (DienstActivity laadt `/beheer/#/<pagina>`; staat het beheer van
+die Dienst al open, dan gaat dat naar voren, met de bestaande inlog). Het beheer zelf (`web-dienst/app.js`) gaat na het
+inloggen naar de pagina uit het adres (`#/klanten`, ook `#klanten`).
+
+Verder: **Beheer openen** (in de app: het beheerscherm met vingerafdruk),
 **Wijzigingen toepassen** (zie hieronder) en **Opnieuw opzetten**: de huidige
 server maakt een laatste back-up en schrijft daarna niets meer, er komt een nieuwe server met de nieuwe instellingen die
 die back-up bij de eerste start terugzet, het A-record gaat naar de nieuwe server en de oude wordt verwijderd. Door de
@@ -320,7 +364,12 @@ Routes van de console (ook in de app, zelfde JSON): `GET /api/aanbieder` (met `w
 adressen, dns, pending}`), `POST /api/aanbieder/toepassen` (→ `{ok, restart, keys}`), `POST /api/aanbieder/server {provider, fields?, region?}` (zonder regio: regio's met
 formaat en prijs; met regio: bewaren), `POST /api/aanbieder/backup {store}` of `{provider, region, endpoint?, accessKey?,
 secretKey?}`, `POST /api/aanbieder/opzetten` (ook voor opnieuw opzetten), `GET /api/aanbieder/status`,
-`POST /api/aanbieder/verwijderen {confirm}`. De toestand staat in de kluis onder `console.aanbieder`; antwoorden bevatten
+`POST /api/aanbieder/verwijderen {confirm}`, `POST /api/aanbieder/dns {provider, zone?, fields?}` (→ `{ok, dns, nameservers,
+synced, detail}`), `POST /api/aanbieder/hersteltest` (→ `{at, ok, backupAt, detail}`), `POST /api/setup/aanbieder
+{passphrase}` en `POST /api/setup/cloud {domain, domainMode?, mailbox, appPassword, alertEmail?}`. `GET /api/aanbieder`
+heeft ook `dns.mode` (`eigen`, `cloud`, `handmatig`), `dnsLink`, `dnsKeuze`, `defaultZone`, `cloudDns`, `alleenDienst`,
+`hersteltest`, `pending` en `hub`; `GET /api/aanbieder/status` ook `dns.mode`, `dns.error` en `overzicht`.
+De toestand staat in de kluis onder `console.aanbieder`; antwoorden bevatten
 nooit sleutels (alleen de laatste 4 tekens). Een kluis van vóór de keuze van aanbieder (alles bij Scaleway) wordt bij
 het lezen bijgewerkt: `hosting` (Scaleway, regio en formaat van de server), `backup.provider` en `server.provider`
 `scaleway`, en `retired` van losse id's naar `{provider, serverId}`.
@@ -390,7 +439,15 @@ zet die naast de prijs van de klant (marge). Niet opgegeven formaten krijgen de 
 per serverformaat en per GB (Kosten → *Prijzen die we aannemen*), worden in de database bewaard en gaan vanaf dan vóór
 `bundles.json`. Een Dienst die vanuit de app is opgezet, heeft geen `bundles.json`: daar doe je dit alleen in het beheer.
 
-Gebruik alleen regio's die de console kent (`nl-ams-1`, `nl-ams-2`, `nl-ams-3`, `fr-par-1`, `pl-waw-1`) en
+**Servers en opslag per bundel in het beheer.** Bij Aanbod kies je per bundel *Servers en opslag wijzigen*: per server
+de soort (gegevens of witness), de regio van Scaleway en het formaat, met de live prijs (`GET /v1/admin/placement`: de
+regio's uit de Scaleway-adapter van de registry en `fetchSizes` met de sleutel van de Dienst, 10 minuten bewaard), plus de
+plek van de werkkopie en de back-up. `PUT /v1/admin/bundles/:id {placement, storage}` controleert: bekende regio's,
+formaten die er te koop zijn, minstens twee servers met gegevens (elk ≥ 2 GB geheugen) en een witness, hooguit 9
+servers, werkkopie en back-up op verschillende plekken. De aantallen in `includes` volgen de servers; ontbrekende
+formaten in de kostentabel krijgen de live prijs. Een wijziging geldt voor nieuwe bestellingen.
+
+In `bundles.json`: gebruik alleen regio's die de console kent (`nl-ams-1`, `nl-ams-2`, `nl-ams-3`, `fr-par-1`, `pl-waw-1`) en
 controleer of het formaat in die zone te koop is. Een prijswijziging geldt voor nieuwe bestellingen;
 lopende Mollie-abonnementen houden hun bedrag (ook als de klant later van bundel wisselt en terug, krijgt hij
 de prijs die op dat moment in `bundles.json` staat).
@@ -647,6 +704,7 @@ als Mollie of Scaleway een fout gaf).
 | `GET /v1/admin/invoices?orderId=` · `GET /v1/admin/invoices/:id` | money | Facturen; één factuur als HTML |
 | `GET /v1/admin/arrears` | money | Bestellingen met een betalingsprobleem, openstaand bedrag en mislukte incasso's |
 | `GET /v1/admin/revenue?months=12` | money | Per maand (NL-tijd, dag van betalen): incl., excl., btw, terugbetaald, netto, aantal |
+| `GET /v1/admin/placement` | offering | Regio's van Scaleway met formaten en live prijzen, plekken voor opslag en de regels (zie *Bundels*) |
 | `GET /v1/admin/bundles` · `PUT /v1/admin/bundles/:id` · `DELETE /v1/admin/bundles/:id` | offering | Aanbod; `PUT` voegt toe of wijzigt (alleen meegegeven velden; servers en opslag blijven staan). Verwijderen kan niet zolang klanten de bundel hebben |
 | `GET /v1/admin/brand` · `PUT /v1/admin/brand` | brand | Huisstijl: `{name, accentColor:"#rrggbb", contact:{email,phone,website}, termsUrl, privacyUrl}`; lege tekst = terug naar de standaard |
 | `PUT /v1/admin/brand/logo` `{dataUrl}` of `{type, data(base64)}` · `DELETE …/logo` | brand | PNG of SVG, hooguit 200 KB; SVG zonder scripts of externe verwijzingen |

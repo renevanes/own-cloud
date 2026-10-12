@@ -186,7 +186,8 @@ export const scaleway: ProviderAdapter = {
     ],
     create: (f) => new ScalewayProvider(f as never),
     async fetchSizes(cfg, region) {
-      const j = await getJson(`${scwApi()}/instance/v1/zones/${region}/products/servers?per_page=100`, { "x-auth-token": cfg.secretKey });
+      // `api`: een ander basisadres (de Eigen Cloud Dienst gebruikt zijn eigen SCW_API_URL).
+      const j = await getJson(`${(cfg.api || scwApi()).replace(/\/+$/, "")}/instance/v1/zones/${region}/products/servers?per_page=100`, { "x-auth-token": cfg.secretKey });
       return Object.entries(j.servers as Record<string, any>)
         .filter(([name, s]) => /^(DEV1|PLAY2|PRO2|GP1|STARDUST|POP2)/i.test(name) && s.arch === "x86_64")
         .map(([name, s]) => ({ size: name, label: `${s.ncpus} vCPU, ${Math.round(s.ram / 1024 ** 3)} GB`, ramGb: Math.round(s.ram / 1024 ** 3), cpus: s.ncpus, monthly: s.monthly_price ?? (s.hourly_price ? Math.round(s.hourly_price * 730 * 100) / 100 : null) }))

@@ -262,6 +262,8 @@ export function fakeUpstream() {
       if (/^\/instance\/v1\/zones\/[^/]+\/products\/servers$/.test(q)) return [200, { servers: {
         "DEV1-S": { ncpus: 2, ram: 2 * 1024 ** 3, arch: "x86_64", monthly_price: 6.42 },
         "STARDUST1-S": { ncpus: 1, ram: 1 * 1024 ** 3, arch: "x86_64", monthly_price: 0.5 },
+        "DEV1-M": { ncpus: 3, ram: 4 * 1024 ** 3, arch: "x86_64", monthly_price: 11.5 },
+        "PLAY2-MICRO": { ncpus: 4, ram: 8 * 1024 ** 3, arch: "x86_64", monthly_price: 39.42 },
       } }];
       if ((m = /^\/instance\/v1\/zones\/([^/]+)\/servers$/.exec(q)) && c.method === "GET") return [200, { servers: st.scw.servers.filter((s) => s.zone === m![1] && (!c.query.get("project") || s.project === c.query.get("project")) && (!c.query.get("tags") || s.tags?.includes(c.query.get("tags")))) }];
       if ((m = /^\/instance\/v1\/zones\/([^/]+)\/servers$/.exec(q)) && c.method === "POST") {

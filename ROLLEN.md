@@ -51,6 +51,16 @@ Open-source project (GitHub: renevanes/own-cloud)
 - Hulpvragen beantwoorden; berichten en storingen aan eigen klanten; automatische meldingen bij ongezonde clouds.
 - Medewerkers uitnodigen met een rol.
 
+### Waar de aanbieder het vindt (gebouwd)
+
+- **Ingang**: *Aanbieder worden* op het startscherm van de app en van de console, en bovenaan elk scherm van de console.
+  Een eigen cloud is niet nodig (kluis alleen voor de Dienst). Daarna heet de ingang *<naam> beheren*.
+- **Eén navigatie, Je dienst**: Overzicht, Bedrijf, Accounts en sleutels, Aanbod en prijzen, Huisstijl, Medewerkers,
+  Klanten, Hulpvragen, Berichten, Adressendienst, Op de lijst, Server en back-ups, Kosten, Updates. Wat in de kluis staat
+  (server, sleutels, plek, DNS) regelt de console; wat in de database van de Dienst staat, opent het beheer meteen op die
+  pagina. Wijzigingen die nog naar de Dienst moeten, staan bovenaan.
+- **DNS**: zonder cloud zet de console het adres van de Dienst zelf bij een DNS-aanbieder naar keuze.
+
 ## Consument: wat hij kan
 
 - Alles wat er nu is: cloud gebruiken, opzetten, abonnement, facturen, bijwerken, opnieuw instellen.

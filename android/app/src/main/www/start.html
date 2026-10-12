@@ -21,7 +21,10 @@
         <div><button class="btn primary big">Verbinden</button></div>
       </form>
       <div class="or"><span>of</span></div>
-      <button class="choice" id="setup"><b>Nieuwe Eigen Cloud opzetten</b><span class="muted">Alles vanaf deze telefoon, in ongeveer een kwartier. De app zet servers, opslag en mail voor je klaar.</span></button>
+      <div class="choices">
+        <button class="choice" id="setup"><b>Nieuwe Eigen Cloud opzetten</b><span class="muted">Alles vanaf deze telefoon, in ongeveer een kwartier. De app zet servers, opslag en mail voor je klaar.</span></button>
+        <button class="choice" id="provider"><b id="providerTitle">Aanbieder worden</b><span class="muted" id="providerText">Draai je eigen Eigen Cloud Dienst, met je eigen naam en prijzen. Mensen nemen dan bij jou een cloud. Een eigen cloud is niet nodig.</span></button>
+      </div>
     </section>
 
     <section id="offline" hidden>
@@ -60,10 +63,10 @@
         </dl>
       </div>
 
-      <div class="block" id="provider">
+      <div class="block" id="providers">
         <h2>Voor aanbieders</h2>
-        <p>Bied je Eigen Cloud aan anderen aan? Open hier het beheer van je dienst.</p>
-        <div class="actions"><button class="btn" id="dienstOpen">Beheer van je dienst openen</button></div>
+        <p id="providerAbout">Bied je Eigen Cloud aan anderen aan? Zet je eigen Dienst op, of open het beheer van een Dienst waar je medewerker bent.</p>
+        <div class="actions"><button class="btn primary" id="dienstOwn">Aanbieder worden</button><button class="btn" id="dienstOpen">Beheer van een dienst openen</button></div>
         <form class="fields" id="dienstForm" hidden>
           <label>Adres van je dienst<input name="address" inputmode="url" autocapitalize="off" autocomplete="url" spellcheck="false" placeholder="dienst.jouwbedrijf.nl" required></label>
           <p class="msg" role="status"></p>

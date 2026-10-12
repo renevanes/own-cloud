@@ -13,6 +13,11 @@ export interface ConsoleState {
   step: string;
   done: boolean;
   keyConfirmed: boolean;
+  /**
+   * Kluis alleen voor een Eigen Cloud Dienst (aanbieder worden zonder eigen cloud): geen domein, opslag of servers van een
+   * cloud. Later kan er een cloud bij (POST /api/setup/cloud); dan gaat deze vlag weg.
+   */
+  alleenDienst?: boolean;
   /** "manual", "dienst" of de id van een DNS-adapter (desec, hetzner, scaleway, exoscale, ovh, …). */
   dnsMode?: string;
   /** Hoe je aan je domein komt: eigen domein, gratis naam.dedyn.io, nieuw via de dienst, of een gratis adres van de dienst (sub). */

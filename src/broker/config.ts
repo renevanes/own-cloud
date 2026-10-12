@@ -21,7 +21,8 @@ export interface Bundle {
   /** Prijs per extra gebruiker per maand (incl. btw); null = geen extra gebruikers te koop. */
   extraUserMonthly: Money | null;
   placement: BundlePlacement[];
-  storage: { region: "nl-ams" | "fr-par"; purpose: "replica" | "backup" }[];
+  /** Plekken van Scaleway Object Storage (nl-ams, fr-par, pl-waw): één werkkopie en één back-up. */
+  storage: { region: string; purpose: "replica" | "backup" }[];
 }
 
 /** Geschatte kosten bij Scaleway per maand (excl. btw), om naast de prijs van de klant te zetten. */

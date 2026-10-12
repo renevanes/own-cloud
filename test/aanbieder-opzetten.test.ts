@@ -184,7 +184,7 @@ test("aanbieder worden: van bedrijfsgegevens tot een draaiende Dienst, vervangen
     r = await c("POST", "/api/aanbieder/adres", {});
     assert.equal(r.status, 200, r.text);
     assert.equal(r.json.url, "https://dienst.vanes.nl");
-    assert.deepEqual(r.json.dns, { host: "dienst.vanes.nl", sub: "dienst", managed: true, value: null });
+    assert.deepEqual(r.json.dns, { host: "dienst.vanes.nl", sub: "dienst", managed: true, value: null, mode: "cloud", provider: "desec", zone: "vanes.nl" });
     assert.equal(r.json.step, "server");
     assert.deepEqual(JSON.parse(consoleSettings(vaultConfig()).extra_dns), [], "nog geen record zonder server");
   });
@@ -339,7 +339,7 @@ test("aanbieder worden: van bedrijfsgegevens tot een draaiende Dienst, vervangen
     assert.match(r.json.version, /-dev$|^\d/);
     assert.equal(r.json.backup, "aan");
     assert.equal(r.json.lastBackupAt, first.b.backup!.lastBackupAt);
-    assert.deepEqual(r.json.dns, { host: "dienst.vanes.nl", want: ip, have: [ip], ok: true });
+    assert.deepEqual(r.json.dns, { host: "dienst.vanes.nl", want: ip, have: [ip], ok: true, mode: "cloud", error: null });
     assert.equal(up.st.scw.userData.size, 0, "user-data met geheimen is weggehaald");
     assert.ok(up.calls.some((x) => x.method === "DELETE" && /user_data\/cloud-init$/.test(x.path)));
     const s = await (await fetch(`http://127.0.0.1:${first.cfg.port}/v1/status`)).json();

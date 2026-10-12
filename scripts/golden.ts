@@ -8,7 +8,8 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { transformSync } from "esbuild";
-import { deriveKey, seal, sealJson } from "../src/cluster/crypto.js";
+import zlib from "node:zlib";
+import { deriveKey, seal, sealJson, encryptBuffer } from "../src/cluster/crypto.js";
 import { sealMsg } from "../src/cluster/transport.js";
 import { keysFor, DEFAULT_POLICY, type ClusterConfig } from "../src/cluster/config.js";
 import { S3Store } from "../src/cluster/stores.js";
@@ -456,8 +457,21 @@ const costsOut = {
   budget: [25, "25", "25,50", " 12.345 ", "0", "-3", "abc", "", null, 1e6].map((input) => ({ input, out: parseBudget(input) })),
 };
 
+// Grote bestanden (encryptBuffer, in blokken van 1 MiB) en een back-up van de Dienst zoals src/broker/backup.ts hem maakt
+// (voor de hersteltest in de app: Aanbieder.hersteltest ontsleutelt hem met de sleutel van BROKER_SECRET).
+const streamKey = deriveKey(Buffer.from(masterKey, "hex"), "stream-golden");
+const bigPlain = Buffer.alloc(1024 * 1024 + 3, 0).map((_, i) => (i * 7 + 3) & 0xff);
+const streams = await Promise.all([Buffer.alloc(0), Buffer.from("Eigen Cloud: blokken"), bigPlain].map(async (p) => ({ plainSha: crypto.createHash("sha256").update(p).digest("hex"), size: p.length, enc: (await encryptBuffer(streamKey, p)).toString("base64") })));
+const dienstSecret = "11".repeat(32);
+const sqlite = Buffer.concat([Buffer.from("SQLite format 3\0"), Buffer.alloc(3000, 1)]);
+const dienstBackup = {
+  secret: dienstSecret, at: 1760000000000, name: "dienst/20251009T085320Z-ab12.enc",
+  enc: (await encryptBuffer(deriveKey(Buffer.from(dienstSecret, "hex"), "dienst-backup"), zlib.gzipSync(Buffer.from(JSON.stringify({ v: 1, at: 1760000000000, files: { "dienst.sqlite": sqlite.toString("base64"), "aanbieder.key": Buffer.from("sleutel").toString("base64") } }))))).toString("base64"),
+};
+
 const out = {
   generated: new RealDate().toISOString(),
+  streamKey: streamKey.toString("hex"), streams, dienstBackup,
   masterKey, derived, derived16, derived64, seals, sealJson: sealJsonOut, rpc, bootstrap,
   json, presign, sign, userData: userDataOut, caddyfile: caddyOut,
   pickSize: pickCases, presets, apiResponses, fetchSizes: fetchSizesOut, dnsFormat, scalewayDns, signatures, secretFields,

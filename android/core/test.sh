@@ -107,6 +107,7 @@ else
 fi
 jrun QuickSetupTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
 jrun AanbiederTest MOTO_URL="http://127.0.0.1:$MOTO_PORT" SMTP_INFO="$BUILD/smtp-info.json"
+jrun AanbiederHubTest MOTO_URL="http://127.0.0.1:$MOTO_PORT" SMTP_INFO="$BUILD/smtp-info.json"
 run golden-verify.ts npx tsx scripts/golden-verify.ts "$BUILD"
 # Na golden-verify: die controleert berichten met een geldigheid van een paar minuten (sinds CryptoGoldenTest).
 if [ "$DIENST_OK" -eq 1 ]; then
