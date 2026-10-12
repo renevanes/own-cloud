@@ -27,6 +27,8 @@ import { registerStaffAuth, ensureOwner } from "./staff.js";
 import { registerAdmin } from "./admin.js";
 import { registerCustomerSupport, checkHealth, useInvite, SupportError, getInvite, inviteState } from "./support.js";
 import { DienstBackup, beheerToken } from "./backup.js";
+import { discoverAdres } from "./adres.js";
+import { saveOverride } from "./instellingen.js";
 import { dnsRelease, dnsBack } from "./overstap.js";
 import { VERSION } from "../version.js";
 
@@ -75,7 +77,7 @@ export interface Broker {
   backup: DienstBackup | null;
 }
 
-export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?: Mailer } = {}): Promise<Broker> {
+export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?: Mailer; restart?: () => void } = {}): Promise<Broker> {
   const db = openDb(cfg.dataDir);
   const pending = new Set<Promise<unknown>>();
   const ctx: Ctx = {
@@ -102,7 +104,7 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
   app.setNotFoundHandler((_req, reply) => httpError(reply, 404, "Niet gevonden"));
 
   // ── Status en overdragen (voor de console van de aanbieder die deze Dienst opzette) ──
-  const backup = cfg.backup ? new DienstBackup(cfg.backup, cfg.secret, db, cfg.dataDir, cfg.backupEveryMs) : null;
+  const backup = cfg.backup ? new DienstBackup(cfg.backup, cfg.secret, db, cfg.dataDir, cfg.backupEveryMs, cfg.adressenDb) : null;
   const startedAt = Date.now();
   /** Na het overdragen (server wordt vervangen of verwijderd) schrijft deze server niets meer. */
   let closing = false;
@@ -116,10 +118,26 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     version: VERSION(), uptime: Math.round((Date.now() - startedAt) / 1000),
     lastBackupAt: backup?.lastBackupAt ?? null, backup: backup ? backup.status() : "uit", closing,
   }));
-  app.post("/v1/status/handover", async (req, reply) => {
+  /** Alleen de console die deze Dienst opzette (kent BROKER_SECRET): "Authorization: Beheer <token>". */
+  const beheerOk = (req: FastifyRequest) => {
     const want = Buffer.from(`Beheer ${beheerToken(cfg.secret)}`);
     const got = Buffer.from(String(req.headers.authorization ?? ""));
-    if (got.length !== want.length || !crypto.timingSafeEqual(got, want)) return httpError(reply, 401, "Geen toegang");
+    return got.length === want.length && crypto.timingSafeEqual(got, want);
+  };
+  /** Nieuwe instellingen (zie instellingen.ts): versleuteld bewaren en opnieuw starten, zodat ze ingaan. */
+  app.post<{ Body: { at?: number; env?: Record<string, unknown> } }>("/v1/status/instellingen", async (req, reply) => {
+    if (!beheerOk(req)) return httpError(reply, 401, "Geen toegang");
+    let keys: string[];
+    try { keys = saveOverride(db, cfg.secret, Number(req.body?.at), req.body?.env ?? {}); }
+    catch (e) { return httpError(reply, 400, (e as Error).message); }
+    // Meteen een back-up, zodat een nieuwe server de instellingen ook krijgt.
+    await backup?.run().catch(() => {});
+    event(db, null, "instellingen", { keys });
+    if (deps.restart) setTimeout(() => deps.restart!(), 300).unref?.();
+    return { ok: true, keys, restart: !!deps.restart };
+  });
+  app.post("/v1/status/handover", async (req, reply) => {
+    if (!beheerOk(req)) return httpError(reply, 401, "Geen toegang");
     closing = true;
     try {
       const r = backup ? await backup.handover() : null;
@@ -541,6 +559,10 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     runLoop: loop,
     async idle() { while (pending.size) await Promise.allSettled([...pending]); },
     startLoops() {
+      // De adressendienst uit de lijst van aanbieders (als BROKER_ADRES_URL niet is gezet): nu en daarna elk uur.
+      const lijst = () => void discoverAdres(ctx).catch(() => {});
+      lijst();
+      timers.push(setInterval(lijst, 3_600_000));
       timers.push(setInterval(() => ctx.track(loop()), cfg.loopMs));
       timers.push(setInterval(() => ctx.track(runGuard(ctx)), cfg.guardMs));
       ctx.track(loop());

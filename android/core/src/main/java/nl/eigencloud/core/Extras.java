@@ -139,10 +139,11 @@ public final class Extras {
 
     // ───────── Eigen Cloud Dienst ─────────
 
-    /** Bij welke aanbieder (dienst) hoort deze kluis: de gekozen aanbieder, anders de standaard van deze versie. */
+    /** Bij welke aanbieder (dienst) hoort deze kluis: de gekozen aanbieder, anders de standaard (zie defaultBase). */
     public static String baseOf(Map<String, Object> c, String defaultBase) {
         String url = Json.str(c, "console", "dienst", "url");
-        String b = url != null && !url.isEmpty() ? url : defaultBase == null ? "" : defaultBase;
+        String def = defaultBase(defaultBase);
+        String b = url != null && !url.isEmpty() ? url : def == null ? "" : def;
         return b.replaceFirst("/$", "");
     }
 
@@ -563,10 +564,59 @@ public final class Extras {
     private static String aanbiedersFrom;
     private static long aanbiedersAt;
     private static List<Object> aanbiedersCache;
+    /** Hoe lang onthouden wordt of een Dienst antwoordt (zoals BEREIK_* in extras.ts). */
+    public static final long BEREIK_OK_MS = 3_600_000L, BEREIK_NEE_MS = 120_000L;
+    public static final int BEREIK_TIMEOUT_MS = 4000;
+    private static final Map<String, long[]> BEREIK = new java.util.HashMap<>(); // url → {at, ok(0/1)}
+    /** De standaardaanbieder uit de lijst, zolang hij bereikbaar is (bijgewerkt bij elke aanbieders()). */
+    private static volatile String standaardUrl = "";
+    /** De lijst zoals hij in de app zit (aanbieders.json uit de repository; de app zet hem uit zijn assets). */
+    public static volatile String bundledAanbieders = "[]";
+
+    /** Alleen voor tests: alles opnieuw ophalen. */
+    public static void resetAanbiedersCache() {
+        synchronized (AANBIEDERS_LOCK) {
+            aanbiedersCache = null;
+            aanbiedersFrom = null;
+            BEREIK.clear();
+        }
+        standaardUrl = "";
+    }
+
+    /** De standaard-Dienst: die van deze versie (dienstUrl, gaat voor), anders de bereikbare standaard uit de lijst. */
+    public static String defaultBase(String dienstUrl) {
+        return dienstUrl != null && !dienstUrl.isEmpty() ? dienstUrl : standaardUrl;
+    }
+
+    /** Antwoordt de Dienst op GET /v1/info (binnen 4 seconden, met een JSON-object)? Onthouden zoals hierboven. */
+    public static boolean dienstBereikbaar(String url) {
+        synchronized (AANBIEDERS_LOCK) {
+            long[] hit = BEREIK.get(url);
+            if (hit != null && System.currentTimeMillis() - hit[0] < (hit[1] == 1 ? BEREIK_OK_MS : BEREIK_NEE_MS)) return hit[1] == 1;
+        }
+        boolean ok = false;
+        try {
+            Http.Response r = Http.request("GET", url + "/v1/info", Http.headers("accept", "application/json"), null, BEREIK_TIMEOUT_MS);
+            Object j = null;
+            try { j = Json.parse(r.text()); } catch (RuntimeException e) { j = null; }
+            ok = r.ok() && j instanceof Map && !Json.truthy(Json.path(j, "error"));
+        } catch (IOException | RuntimeException e) {
+            ok = false;
+        }
+        synchronized (AANBIEDERS_LOCK) { BEREIK.put(url, new long[] {System.currentTimeMillis(), ok ? 1 : 0}); }
+        return ok;
+    }
+
+    private static List<Object> validEntries(Object parsed) {
+        List<Object> list = new ArrayList<>();
+        for (Object a : Json.asList(parsed)) if (Json.truthy(Json.path(a, "naam")) && Json.truthy(Json.path(a, "url"))) list.add(a);
+        return list;
+    }
 
     /**
-     * De openbare lijst van aanbieders (aanbieders.json in de repository): ongeldige regels overgeslagen, de
-     * standaardaanbieder van deze versie vooraan als hij er niet in staat. Zonder internet: alleen de standaard.
+     * De openbare lijst van aanbieders (aanbieders.json in de repository, anders de meegeleverde): ongeldige regels
+     * overgeslagen; vooraan de standaard van deze versie, dan de regel met standaard: true (alleen de eerste telt), dan
+     * de rest. Elke regel krijgt "bereikbaar" (zoals aanbieders() in extras.ts).
      */
     public static List<Object> aanbieders(String defaultBase) {
         List<Object> list = null;
@@ -578,25 +628,27 @@ public final class Extras {
             list = new ArrayList<>();
             try {
                 Http.Response r = Http.request("GET", from, Http.headers("accept", "application/json"), null, 10_000);
-                if (r.ok()) {
-                    for (Object a : Json.asList(Json.parse(r.text()))) {
-                        if (Json.truthy(Json.path(a, "naam")) && Json.truthy(Json.path(a, "url"))) list.add(a);
-                    }
-                    synchronized (AANBIEDERS_LOCK) {
-                        aanbiedersCache = list;
-                        aanbiedersFrom = from;
-                        aanbiedersAt = System.currentTimeMillis();
-                    }
-                }
+                if (r.ok()) list = validEntries(Json.parse(r.text()));
             } catch (IOException | RuntimeException e) {
-                // geen internet of geen geldige lijst: alleen de standaard
+                // geen internet of geen geldige lijst: de meegeleverde
+            }
+            if (list.isEmpty()) {
+                try { list = validEntries(Json.parse(bundledAanbieders)); } catch (RuntimeException e) { list = new ArrayList<>(); }
+            }
+            synchronized (AANBIEDERS_LOCK) {
+                aanbiedersCache = list;
+                aanbiedersFrom = from;
+                aanbiedersAt = System.currentTimeMillis();
             }
         }
-        List<Object> out = new ArrayList<>();
+        List<Map<String, Object>> out = new ArrayList<>();
+        boolean seenStandaard = false;
         for (Object a : list) {
             try {
                 Map<String, Object> m = Json.copy(Json.asMap(a));
                 m.put("url", cleanDienstUrl(Json.jsString(m.get("url"))));
+                if (Boolean.TRUE.equals(m.get("standaard")) && !seenStandaard) seenStandaard = true;
+                else m.remove("standaard");
                 out.add(m);
             } catch (RuntimeException e) {
                 // ongeldige regel overslaan
@@ -605,10 +657,38 @@ public final class Extras {
         String def = defaultBase == null ? "" : defaultBase.replaceFirst("/$", "");
         if (!def.isEmpty()) {
             boolean listed = false;
-            for (Object a : out) listed |= def.equals(Json.str(a, "url"));
+            for (Map<String, Object> a : out) listed |= def.equals(Json.str(a, "url"));
             if (!listed) out.add(0, Json.obj("naam", "Eigen Cloud Dienst", "url", def));
         }
-        return out;
+        List<Object> sorted = new ArrayList<>();
+        for (int rank = 0; rank < 3; rank++) {
+            for (Map<String, Object> a : out) {
+                int r = !def.isEmpty() && def.equals(Json.str(a, "url")) ? 0 : Boolean.TRUE.equals(a.get("standaard")) ? 1 : 2;
+                if (r == rank) sorted.add(a);
+            }
+        }
+        // Tegelijk nagaan (elk hooguit 4 seconden).
+        List<Thread> threads = new ArrayList<>();
+        for (Object a : sorted) {
+            Thread t = new Thread(() -> {
+                boolean ok = dienstBereikbaar(Json.str(a, "url"));
+                synchronized (a) { Json.asMap(a).put("bereikbaar", ok); }
+            }, "eigen-bereikbaar");
+            t.setDaemon(true);
+            t.start();
+            threads.add(t);
+        }
+        for (Thread t : threads) {
+            try { t.join(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
+        String std = "";
+        for (Object a : sorted) {
+            synchronized (a) {
+                if (Boolean.TRUE.equals(Json.path(a, "standaard")) && Boolean.TRUE.equals(Json.path(a, "bereikbaar"))) { std = Json.str(a, "url"); break; }
+            }
+        }
+        standaardUrl = std;
+        return sorted;
     }
 
     private static final Pattern LOGO_TYPE = Pattern.compile("^image/(png|svg\\+xml|jpeg|webp)");

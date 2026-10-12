@@ -134,7 +134,7 @@ final class DienstTemplates {
             + "REQ=\"$ROOT/data/update-request.json\"; RES=\"$ROOT/data/update-result.json\"; COMPOSE=\"$ROOT/docker-compose.yml\"\n"
             + "APP_REF=$(sed -n 1p \"$ROOT/update-refs\" 2>/dev/null); CADDY_REF=$(sed -n 2p \"$ROOT/update-refs\" 2>/dev/null)\n"
             + "[ -n \"$APP_REF\" ] || exit 0\n"
-            + "CUR_IMAGE=$(sed -nE 's|^    image: (.*)  # eigen-app$|\\1|p' \"$COMPOSE\")\n"
+            + "CUR_IMAGE=$(sed -nE 's|^    image: (.*)  # eigen-app$|\\1|p' \"$COMPOSE\" | head -n1)\n"
             + "[ -n \"$CUR_IMAGE\" ] || exit 0\n"
             + "NOW=$(curl -fsS --max-time 5 \"$HEALTH_URL\" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get(\"version\") or \"\")') || exit 0\n"
             + "REL=$(docker run --rm --network host --entrypoint node \"$CUR_IMAGE\" --input-type=module -e 'const { resolveImage } = await import(\"/app/dist/cluster/updates.js\"); const app = await resolveImage(process.argv[1]); const caddy = process.argv[2] ? await resolveImage(process.argv[2]) : null; console.log(JSON.stringify({ version: app.version, app: app.pinned, caddy: caddy ? caddy.pinned : null }));' \"$APP_REF\" \"$CADDY_REF\" 2>/dev/null | tail -n1) || exit 0\n"

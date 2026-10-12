@@ -94,6 +94,8 @@ const nextOf = (id) => STEPS[STEPS.findIndex((s) => s.id === id) + 1]?.id ?? "st
 const prevOf = (id) => STEPS[STEPS.findIndex((s) => s.id === id) - 1]?.id ?? null;
 
 async function boot() {
+  // Eerst (hooguit anderhalve seconde) de lijst van aanbieders: dan weet de eerste stap of er een aanbieder antwoordt.
+  await Promise.race([api("/api/aanbieders").catch(() => null), new Promise((r) => setTimeout(r, 1500))]);
   state = await api("/api/state");
   render();
 }
@@ -479,9 +481,12 @@ async function stepRegelen() {
     NATIVE.clearInvite?.();
   }
   const { aanbieders: list } = await api("/api/aanbieders").catch(() => ({ aanbieders: [] }));
-  if (list.length > 1 && !config.dienst?.url && !aanbiederKeuze) return chooseAanbieder(list);
+  // Een aanbieder die (nog) niet antwoordt, tonen we wel maar kiezen we nooit vanzelf.
+  const usable = list.filter((a) => a.bereikbaar !== false);
+  const waiting = list.filter((a) => a.bereikbaar === false);
+  if (list.length > 1 && usable.length && !config.dienst?.url && !aanbiederKeuze) return chooseAanbieder(list);
   aanbiederKeuze = false;
-  const chosen = config.dienst?.url || list[0]?.url || null;
+  const chosen = config.dienst?.url || usable[0]?.url || null;
   dienstInfoCache = chosen ? await api(`/api/aanbieder/brand?url=${encodeURIComponent(chosen)}`).catch(() => null) : null;
   applyBrand(dienstInfoCache);
   const info = dienstInfoCache;
@@ -489,12 +494,13 @@ async function stepRegelen() {
   const dienstHtml = info ? `<section class="dienst">
       <h2>${q ? esc(info.name) : `${esc(info.name)} regelt alles`}</h2>
       ${brandLine(info)}
-      ${list.length > 1 && !config.dienst?.orderId ? `<p style="margin:0 0 10px"><button class="link" id="otherAanbieder">Andere aanbieder kiezen</button></p>` : ""}
+      ${list.length > 1 && usable.length && !config.dienst?.orderId ? `<p style="margin:0 0 10px"><button class="link" id="otherAanbieder">Andere aanbieder kiezen</button></p>` : ""}
       <p class="muted" style="margin:0 0 12px">Geen account en geen sleutels: servers en opslag in Amsterdam en Parijs, ${info.freeZone ? `een gratis adres (naam.${esc(info.freeZone)}) of je eigen domein` : "je domein"}, DNS en mail. Eén bedrag per maand, betalen met iDEAL, maandelijks opzegbaar. Je kunt later alles meenemen naar je eigen accounts.</p>
       <div class="presets">${info.bundles.map((b) => `<button class="preset" data-bundle="${esc(b.id)}">
         <b>${esc(b.title)}</b><span class="price">${eurStr(b.monthly)} per maand</span><p>${esc(b.description)}</p>
         <p><small>${b.includes.dataServers} dataservers en ${b.includes.witnesses} witness · ${b.includes.storageGb} GB opslag${b.includes.domain ? " · domein" : ""}${b.includes.mail ? " · mail-relay" : ""}</small></p></button>`).join("")}</div>
-    </section>` : state.dienst ? `<p class="note warn">De Eigen Cloud Dienst is nu niet bereikbaar. Je kunt het ook zelf regelen.</p>` : "";
+    </section>` : !usable.length && waiting.length ? `<p class="note">${esc(waiting.map((a) => a.naam).join(", "))} ${waiting.length === 1 ? "is" : "zijn"} nog niet beschikbaar. Regel het voorlopig zelf hieronder; overstappen naar een aanbieder kan later altijd.</p>`
+    : state.dienst ? `<p class="note warn">De Eigen Cloud Dienst is nu niet bereikbaar. Je kunt het ook zelf regelen.</p>` : "";
   const quickHtml = `<section class="quick" id="quick">
       <h2>${q ? "✓ Alles staat klaar bij Scaleway" : info ? "Of zelf, met één sleutel bij Scaleway" : "Eén sleutel, de app regelt de rest"}</h2>
       ${q ? `<p class="muted">Opslag in Amsterdam en Parijs, servers in Amsterdam${config.mailRelay ? " en mail via Scaleway" : ""}. Je betaalt Scaleway rechtstreeks.</p>
@@ -521,24 +527,35 @@ async function stepRegelen() {
   } else wireQuick();
 }
 
+/** Eén aanbieder in een keuzelijst; een aanbieder die nog niet antwoordt, is te zien maar niet te kiezen. */
+function aanbiederChoice(a, i, p) {
+  const off = a.bereikbaar === false;
+  return `<button class="choice aanbieder" data-i="${i}"${off ? " disabled aria-disabled=\"true\"" : ""}><span class="alogo" id="${p}logo${i}"></span><span><b>${esc(a.naam)}</b><span class="muted">${esc([a.land, a.omschrijving].filter(Boolean).join(" · "))}</span><span class="muted aprice" id="${p}price${i}">${off ? "Nog niet beschikbaar" : ""}</span></span></button>`;
+}
+/** Logo en "vanaf"-prijs ophalen voor de aanbieders die antwoorden. */
+function aanbiederBrands(list, p) {
+  list.forEach(async (a, i) => {
+    if (a.bereikbaar === false) return;
+    try {
+      const b = await api(`/api/aanbieder/brand?url=${encodeURIComponent(a.url)}`);
+      if (b.logo && $(`#${p}logo${i}`)) $(`#${p}logo${i}`).innerHTML = `<img src="${esc(b.logo)}" alt="">`;
+      const from = (b.bundles ?? []).map((x) => Number(x.monthly?.value)).filter((n) => n > 0).sort((x, y) => x - y)[0];
+      if (from && $(`#${p}price${i}`)) $(`#${p}price${i}`).textContent = `vanaf ${eurStr({ currency: "EUR", value: from.toFixed(2) })} per maand`;
+    } catch { if ($(`#${p}price${i}`)) $(`#${p}price${i}`).textContent = "nu niet bereikbaar"; }
+  });
+}
+
 /** Kiezen uit de aanbieders op de openbare lijst, of met een uitnodigingscode. */
 function chooseAanbieder(list) {
   root.innerHTML = wizardShell("regelen", `
     <h1>Kies een aanbieder</h1>
     <p class="lead">Een aanbieder regelt je servers, opslag, adres en mail, voor een vast bedrag per maand. Je gegevens blijven versleuteld met jouw sleutel; ook de aanbieder kan ze niet lezen. Je kunt later overstappen.</p>
-    <div class="choices" id="alist">${list.map((a, i) => `<button class="choice aanbieder" data-i="${i}"><span class="alogo" id="alogo${i}"></span><span><b>${esc(a.naam)}</b><span class="muted">${esc([a.land, a.omschrijving].filter(Boolean).join(" · "))}</span><span class="muted aprice" id="aprice${i}"></span></span></button>`).join("")}</div>
+    <div class="choices" id="alist">${list.map((a, i) => aanbiederChoice(a, i, "a")).join("")}</div>
     <form class="fields" id="cf" style="margin-top:22px"><label>Heb je een uitnodigingscode?<div class="paste"><input name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="bijv. ABCD-1234"><button class="btn">Gebruiken</button></div></label><p class="msg"></p></form>
     <p class="advanced"><button class="link" id="zelfKiezen">Zelf regelen, zonder aanbieder</button></p>`);
-  list.forEach(async (a, i) => {
-    try {
-      const b = await api(`/api/aanbieder/brand?url=${encodeURIComponent(a.url)}`);
-      if (b.logo && $(`#alogo${i}`)) $(`#alogo${i}`).innerHTML = `<img src="${esc(b.logo)}" alt="">`;
-      const from = (b.bundles ?? []).map((x) => Number(x.monthly?.value)).filter((n) => n > 0).sort((x, y) => x - y)[0];
-      if (from && $(`#aprice${i}`)) $(`#aprice${i}`).textContent = `vanaf ${eurStr({ currency: "EUR", value: from.toFixed(2) })} per maand`;
-    } catch { if ($(`#aprice${i}`)) $(`#aprice${i}`).textContent = "nu niet bereikbaar"; }
-  });
+  aanbiederBrands(list, "a");
   $("#alist").onclick = async (e) => {
-    const i = e.target.closest?.("[data-i]")?.dataset.i;
+    const i = e.target.closest?.("[data-i]:not([disabled])")?.dataset.i;
     if (i === undefined) return;
     try { await api("/api/dienst/select", { method: "POST", body: { url: list[Number(i)].url } }); config = await api("/api/config"); stepRegelen(); }
     catch (err) { formMsg($("#cf"), err.message); }
@@ -546,7 +563,7 @@ function chooseAanbieder(list) {
   $("#cf").onsubmit = async (e) => {
     e.preventDefault();
     const code = e.target.code.value.trim();
-    for (const a of list) {
+    for (const a of list.filter((x) => x.bereikbaar !== false)) {
       const r = await api(`/api/aanbieder/invite?url=${encodeURIComponent(a.url)}&code=${encodeURIComponent(code)}`).catch(() => null);
       if (r?.valid) {
         try { await api("/api/dienst/select", { method: "POST", body: { url: a.url, invite: code } }); config = await api("/api/config"); return stepRegelen(); }
@@ -1251,21 +1268,14 @@ async function overstapKiezen(box) {
   const list = all.filter((a) => a.url !== cur && a.url !== config.dienst?.url);
   box.innerHTML = `<h2>Overstappen</h2><div class="panel">
     <p style="margin:0">Je cloud verhuist met al je mail, agenda's en foto's. Hij gaat daarvoor even slapen, je gegevens gaan versleuteld naar de nieuwe plek en daar wordt hij weer wakker. Je huidige abonnement wordt daarna opgezegd.</p>
-    <div class="choices" id="olist">${list.map((a, i) => `<button class="choice aanbieder" data-i="${i}"><span class="alogo" id="ologo${i}"></span><span><b>${esc(a.naam)}</b><span class="muted">${esc([a.land, a.omschrijving].filter(Boolean).join(" · "))}</span><span class="muted aprice" id="oprice${i}"></span></span></button>`).join("")}
+    <div class="choices" id="olist">${list.map((a, i) => aanbiederChoice(a, i, "o")).join("")}
       <button class="choice" data-zelf="1"><span><b>Zelf beheren</b><span class="muted">Met je eigen account bij Scaleway (één sleutel) en je eigen DNS bij deSEC. Je betaalt Scaleway rechtstreeks.</span></span></button></div>
     <p class="msg" id="omsg"></p>
     <div><button class="link" id="oback">Terug naar je abonnement</button></div></div>`;
-  list.forEach(async (a, i) => {
-    try {
-      const b = await api(`/api/aanbieder/brand?url=${encodeURIComponent(a.url)}`);
-      if (b.logo && $(`#ologo${i}`)) $(`#ologo${i}`).innerHTML = `<img src="${esc(b.logo)}" alt="">`;
-      const from = (b.bundles ?? []).map((x) => Number(x.monthly?.value)).filter((n) => n > 0).sort((x, y) => x - y)[0];
-      if (from && $(`#oprice${i}`)) $(`#oprice${i}`).textContent = `vanaf ${eurStr({ currency: "EUR", value: from.toFixed(2) })} per maand`;
-    } catch { if ($(`#oprice${i}`)) $(`#oprice${i}`).textContent = "nu niet bereikbaar"; }
-  });
+  aanbiederBrands(list, "o");
   $("#oback").onclick = () => renderAbo();
   $("#olist").onclick = async (e) => {
-    const el = e.target.closest?.("[data-i],[data-zelf]");
+    const el = e.target.closest?.("[data-i]:not([disabled]),[data-zelf]");
     if (!el) return;
     const naar = el.dataset.zelf ? "zelf" : list[Number(el.dataset.i)].url;
     try {
@@ -1448,7 +1458,8 @@ const A_HELP = {
   desec: `Voor de DNS van je klanten. Maak bij deSEC een token dat domeinen mag aanmaken. <a href="https://desec.io/tokens" target="_blank" rel="noopener">Tokens bij deSEC</a>`,
   smtp: `Voor inlogcodes, facturen en meldingen. Leeg laten = via de mail van je eigen cloud.`,
   openprovider: `Alleen nodig als klanten via jou een domein kopen. Zet bij Openprovider het IP-adres van je server op de lijst. <a href="https://cp.openprovider.eu" target="_blank" rel="noopener">Openprovider</a>`,
-  adres: `Gratis adressen (naam.eigencloud.nl) voor je klanten, via de centrale adressendienst. Zie ADRESSEN.md.`,
+  adres: `Gratis adressen (naam.eigencloud.nl) voor je klanten, via de centrale adressendienst. Leeg laten = vanzelf: staat je Dienst op de lijst van aanbieders, dan gebruikt hij de adressendienst van het project.`,
+  adressen: `Alleen voor de beheerders van het open-sourceproject. De gratis-adressendienst geeft klanten van <b>alle</b> aanbieders een gratis adres (bijvoorbeeld vanes.eigencloud.nl) dat ze houden als ze van aanbieder wisselen. Hij draait mee op de server van je Dienst. Je hebt nodig: een eigen domein voor die adressen, bij deSEC (de "gedeelde zone", bijvoorbeeld eigencloud.nl), en een deSEC-token van dat account dat tokens mag beheren. Vraag deSEC om een hogere zonelimiet: elk gratis adres is een zone. <a href="https://desec.io/tokens" target="_blank" rel="noopener">Tokens bij deSEC</a>`,
 };
 
 function openBeheer(url) {
@@ -1492,12 +1503,14 @@ async function renderAanbieder(msg) {
       <label>Adres<textarea name="address" rows="2" placeholder="Blaak 10&#10;3011 TA Rotterdam">${esc((co.address ?? []).join("\n"))}</textarea></label>
       <div class="row"><label>KvK-nummer<input name="kvk" inputmode="numeric" value="${esc(co.kvk ?? "")}"></label><label>Btw-nummer<input name="vat" placeholder="NL001234567B01" value="${esc(co.vat ?? "")}"></label></div>
       <label>E-mailadres van de eigenaar<input type="email" name="email" required value="${esc(co.email ?? a.defaultEmail ?? "")}"></label>
+      <div class="row"><label>Btw-percentage op je facturen<input name="vatPercent" inputmode="decimal" value="${esc(co.vatPercent ?? "21")}"><small>Je prijzen zijn inclusief deze btw.</small></label></div>
+      <label class="check"><input type="checkbox" name="enforce" ${co.enforce ? "checked" : ""}> Extra servers van klanten echt uitzetten<small>De Dienst kijkt elk uur of een klant meer servers draait dan zijn bundel toestaat. Uit: je krijgt alleen een melding.</small></label>
       <p class="msg"></p>${nav()}</form>`;
     wire();
     $("#af").onsubmit = async (e) => {
       e.preventDefault();
       const f = e.target;
-      try { await busy($("button.primary", f), () => api("/api/aanbieder/bedrijf", { method: "POST", body: { name: f.elements.name.value, address: f.address.value, kvk: f.kvk.value, vat: f.vat.value, email: f.email.value } })); await aStep("accounts"); }
+      try { await busy($("button.primary", f), () => api("/api/aanbieder/bedrijf", { method: "POST", body: { name: f.elements.name.value, address: f.address.value, kvk: f.kvk.value, vat: f.vat.value, email: f.email.value, vatPercent: f.vatPercent.value, enforce: f.enforce.checked } })); await aStep("accounts"); }
       catch (err) { formMsg(f, err.message); }
     };
     return;
@@ -1546,13 +1559,31 @@ async function renderAanbieder(msg) {
     box.innerHTML = `${head}<form class="fields panel" id="af"><p class="muted" style="margin:0">Op dit adres vinden je klanten en de app je Dienst, en log je in op het beheer. ${a.defaultUrl ? `Je cloud zet het adres onder ${esc(config.domain)} zelf in je DNS.` : ""}</p>
       <label>Adres van je Dienst<input name="url" value="${esc(a.url ?? a.defaultUrl ?? "")}" autocapitalize="off" spellcheck="false" required><small>Een adres onder een ander domein kan ook; dan zet je het record zelf.</small></label>
       ${a.server ? `<p class="note warn" style="margin:0">Een nieuw adres gaat pas in na <b>Opnieuw opzetten</b>.${d.host ? "" : ""}</p>` : ""}
+      <details ${a.adressen ? "open" : ""}><summary>Ook de gratis-adressendienst draaien</summary><div class="fields" style="margin-top:10px">
+        <small class="muted">${A_HELP.adressen}</small>
+        <label class="check"><input type="checkbox" name="adrAan" ${a.adressen ? "checked" : ""}> Ja, draai de gratis-adressendienst op de server van mijn Dienst</label>
+        <div class="row"><label>Gedeelde zone<input name="adrZone" value="${esc(a.adressen?.zone ?? "")}" placeholder="eigencloud.nl" autocapitalize="off" spellcheck="false"></label>
+          <label>deSEC-token voor die zone<input name="adrToken" value="${esc(a.adressen?.desecToken ?? "")}" autocomplete="off" autocapitalize="off" spellcheck="false"></label></div>
+        <label>Adres van de adressendienst<input name="adrHost" value="${esc(a.adressen?.host ?? a.defaultAdressenHost ?? "")}" autocapitalize="off" spellcheck="false"><small>Je cloud zet dit adres zelf in je DNS als het onder ${esc(config.domain ?? "je domein")} valt. Andere Diensten vinden het via de lijst van aanbieders ("adressen" op de standaardregel).</small></label>
+        ${a.server ? `<p class="note warn" style="margin:0">Aan- of uitzetten gaat in na <b>Opnieuw opzetten</b>.</p>` : ""}
+        <ul class="results" id="adrChecks"></ul>
+      </div></details>
       <p class="msg"></p>${nav()}</form>`;
     wire();
     $("#af").onsubmit = async (e) => {
       e.preventDefault();
       const f = e.target;
-      try { await busy($("button.primary", f), () => api("/api/aanbieder/adres", { method: "POST", body: { url: f.url.value } })); await aStep("opzetten"); }
-      catch (err) { formMsg(f, err.message); }
+      try {
+        await busy($("button.primary", f), async () => {
+          await api("/api/aanbieder/adres", { method: "POST", body: { url: f.url.value } });
+          if (f.adrAan.checked) {
+            const r = await api("/api/aanbieder/adressen", { method: "POST", body: { zone: f.adrZone.value, desecToken: f.adrToken.value, host: f.adrHost.value } });
+            $("#adrChecks").innerHTML = resultItems(r.checks);
+            if (!r.ok) throw new Error("De adressendienst kan zo nog niet: pas aan wat rood is.");
+          } else if (a.adressen) await api("/api/aanbieder/adressen", { method: "POST", body: { aan: false } });
+        });
+        await aStep("opzetten");
+      } catch (err) { formMsg(f, err.message); }
     };
     return;
   }
@@ -1565,9 +1596,17 @@ async function renderAanbieder(msg) {
     <p style="margin:0">${a.server ? `Je Dienst krijgt een <b>nieuwe server</b>${moved ? ` bij ${esc(h.name)} in ${esc(h.city)}` : ""} met de nieuwe instellingen. De huidige server maakt eerst een laatste back-up; de nieuwe zet die terug. Een paar minuten is de Dienst niet bereikbaar.` : `De console zet een server op bij <b>${esc(h.name ?? "")}</b> in ${esc(h.city ?? "")} (${esc(h.size ?? "")}${h.monthly != null ? `, ${eur(h.monthly)} per maand` : ""}) en bewaart de back-ups bij <b>${esc(bk.name ?? "")}</b> (${esc(bk.regionLabel ?? "")}).${h.provider === "scaleway" || bk.auto ? " Bij Scaleway komt dat in een eigen project <b>eigen-cloud-dienst</b>." : ""} De Dienst staat daarna op <b>${esc(a.url ?? "")}</b>.`}</p>
     <p class="muted" style="margin:0"><small>Elk uur een versleutelde back-up, 30 dagen niet te wissen. De server werkt zichzelf 's nachts bij naar de nieuwste versie en zet de vorige terug als dat misgaat.</small></p>
     ${missing.length ? `<p class="note warn" style="margin:0">Nog niet klaar: ${esc(missing.join(", "))}.</p>` : ""}
+    ${a.server && a.wijzigingen !== "opnieuw" && !missing.length ? `<p class="note" style="margin:0">Alleen bedrijfsgegevens, sleutels of mail gewijzigd? Dan is een nieuwe server niet nodig: <button type="button" class="link" id="aApply2">wijzigingen toepassen</button> (de Dienst start even opnieuw).</p>` : ""}
     <ul class="results" id="aSteps"></ul>
     <p class="msg"></p>${nav(!missing.length, a.server ? "Opnieuw opzetten" : "Dienst opzetten")}</form>`;
   wire();
+  $("#aApply2")?.addEventListener("click", async (e) => {
+    try {
+      const r = await busy(e.target, () => api("/api/aanbieder/toepassen", { method: "POST" }));
+      await api("/api/aanbieder/stap", { method: "POST", body: { step: "klaar" } });
+      renderAanbieder({ ok: true, text: r.restart ? "Toegepast. Je Dienst start nu opnieuw met de nieuwe instellingen." : "Toegepast." });
+    } catch (err) { formMsg($("#af"), err.message); }
+  });
   $("#af").onsubmit = async (e) => {
     e.preventDefault();
     const f = e.target;
@@ -1668,14 +1707,19 @@ function aanbiederKlaar(box, a, msg) {
       <li class="${s?.reachable ? "" : "meh"}">${esc(a.url)} ${esc(dot)}${s?.version ? `<small>Versie ${esc(s.version)}${s.uptime != null ? ` · draait ${s.uptime < 3600 ? Math.max(1, Math.round(s.uptime / 60)) + " minuten" : Math.round(s.uptime / 3600) + " uur"}` : ""}</small>` : s?.error ? `<small>${esc(s.error)}${a.server?.createdAt && Date.now() - a.server.createdAt < 15 * 60_000 ? " — de server start nog op" : ""}</small>` : ""}</li>
       <li class="${s?.lastBackupAt ? (s.backup === "fout" ? "bad" : "") : "meh"}">Back-up${s?.lastBackupAt ? `: ${time(s.lastBackupAt)}` : ": nog geen"}${s?.backup === "fout" ? "<small>De laatste poging mislukte</small>" : ""}</li>
       ${s?.dns ? `<li class="${s.dns.ok ? "" : "meh"}">${esc(s.dns.host)} wijst ${s.dns.ok ? "naar je server" : s.dns.have?.length ? `naar ${esc(s.dns.have.join(", "))}` : "nog nergens heen"}${s.dns.ok ? "" : `<small>${a.dns?.managed ? "Je cloud zet dit record zelf; DNS-wijzigingen kunnen tot een uur duren." : `Zet bij je DNS een A-record: ${esc(s.dns.host)} → ${esc(s.dns.want ?? "")}`}</small>`}</li>` : ""}
+      ${s?.adressen ? `<li class="${s.adressen.ok ? "" : "meh"}">Gratis-adressendienst ${esc(s.adressen.url.replace(/^https:\/\//, ""))} ${s.adressen.reachable ? (s.adressen.ok ? "werkt" : `geeft zone ${esc(s.adressen.zone ?? "")}`) : "niet bereikbaar"}${s.adressen.error ? `<small>${esc(s.adressen.error)}</small>` : ""}</li>` : ""}
     </ul>`;
   };
+  const changes = a.wijzigingen === "toepassen" ? `<p class="note" style="margin:0">Je hebt instellingen gewijzigd. Pas ze toe; de Dienst start daarvoor even opnieuw (een halve minuut), zonder nieuwe server.</p>`
+    : a.wijzigingen === "opnieuw" ? `<p class="note warn" style="margin:0">Je hebt het adres, de plek van de server of de adressendienst gewijzigd. Dat gaat in met <b>Opnieuw opzetten</b>.</p>` : "";
   box.innerHTML = `<h2>Je dienst</h2><div class="panel">
     <div><b>${esc(a.company?.name ?? "")}</b><br><span class="muted">${esc(a.url ?? "")} · server ${esc(a.server?.ipv4 ?? "")} bij ${esc(a.server ? placeName(a.server) : "")}${a.backup?.bucket ? ` · back-ups in ${esc(a.backup.bucket)} bij ${esc(a.backup.name)}` : ""}</span></div>
     <div id="aStatus"><p class="muted" style="margin:0">Status ophalen…</p></div>
+    ${changes}
     <div class="actions" style="margin:0">
       <button class="btn primary" id="aOpen">Beheer openen</button>
       <button class="btn" id="aEdit">Instellingen wijzigen</button>
+      ${a.wijzigingen !== "geen" && a.wijzigingen !== "opnieuw" ? `<button class="btn${a.wijzigingen === "toepassen" ? " primary" : ""}" id="aApply">Wijzigingen toepassen</button>` : ""}
       <button class="btn" id="aAgain">Opnieuw opzetten</button>
       <button class="btn danger" id="aDel">Dienst verwijderen</button>
     </div>
@@ -1689,6 +1733,12 @@ function aanbiederKlaar(box, a, msg) {
   const m = $("#amsg2");
   $("#aOpen").onclick = () => openBeheer(a.beheerUrl);
   $("#aEdit").onclick = () => aStep("bedrijf").catch((e) => { m.textContent = e.message; m.className = "msg err"; });
+  $("#aApply")?.addEventListener("click", async (e) => {
+    try {
+      const r = await busy(e.target, () => api("/api/aanbieder/toepassen", { method: "POST" }));
+      renderAanbieder({ ok: true, text: r.restart ? "Toegepast. Je Dienst start nu opnieuw met de nieuwe instellingen." : "Toegepast. De nieuwe instellingen gaan in bij de volgende herstart van je Dienst." });
+    } catch (err) { m.textContent = err.message; m.className = "msg err"; }
+  });
   $("#aAgain").onclick = async (e) => {
     if (!confirm("Je Dienst opnieuw opzetten op een nieuwe server?\n\nDe huidige server maakt eerst een laatste back-up; de nieuwe zet die terug. Een paar minuten is de Dienst niet bereikbaar.")) return;
     try {

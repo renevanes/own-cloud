@@ -498,14 +498,18 @@ public final class Admin {
         String host = "";
         try { host = Json.truthy(a.get("url")) ? new java.net.URI(Json.jsString(a.get("url"))).getHost() : ""; } catch (java.net.URISyntaxException | RuntimeException e) { host = ""; }
         if (host == null) host = "";
-        String sub = !host.isEmpty() && host.endsWith("." + d) ? host.substring(0, host.length() - d.length() - 1) : null;
         boolean removed = Json.truthy(a.get("removed"));
         Object ipv4 = Json.path(a, "server", "ipv4"), ipv6 = Json.path(a, "server", "ipv6");
-        if (sub != null && (removed || Json.truthy(ipv4))) {
-            final String s = sub;
-            out.removeIf(x -> s.equals(Json.str(x, "sub")));
-            out.add(Json.obj("sub", sub, "type", "A", "value", removed || ipv4 == null ? "" : ipv4));
-            out.add(Json.obj("sub", sub, "type", "AAAA", "value", removed || ipv6 == null ? "" : ipv6));
+        // De Dienst en (als hij er draait) de adressendienst op dezelfde server.
+        String adHost = Json.str(a, "adressen", "host");
+        for (String h : new String[] {host, adHost == null ? "" : adHost}) {
+            String sub = !h.isEmpty() && h.endsWith("." + d) ? h.substring(0, h.length() - d.length() - 1) : null;
+            if (sub != null && (removed || Json.truthy(ipv4))) {
+                final String s = sub;
+                out.removeIf(x -> s.equals(Json.str(x, "sub")));
+                out.add(Json.obj("sub", sub, "type", "A", "value", removed || ipv4 == null ? "" : ipv4));
+                out.add(Json.obj("sub", sub, "type", "AAAA", "value", removed || ipv6 == null ? "" : ipv6));
+            }
         }
         return out;
     }

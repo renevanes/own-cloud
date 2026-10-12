@@ -20,15 +20,29 @@ de app werkt zichzelf bij en clouds en diensten volgen met de rollende updates.
 
 ## Op de lijst van aanbieders
 
-Draai je een Eigen Cloud Dienst, dan kun je in de app op de lijst komen:
+Draai je een Eigen Cloud Dienst (opgezet in de app met **Aanbieder worden**), dan zet je jezelf zo op de lijst:
 
-1. Open in het beheer van je dienst **Op de lijst**. Daar staat je regel voor `aanbieders.json`, met de sleutel van je dienst.
-2. Voeg die regel toe aan `aanbieders.json` via GitHub (*Propose changes*).
+1. Open in de app je Dienst (**Beheer openen**) en kies **Op de lijst**. Vul land en omschrijving aan; naam en contact
+   komen uit je huisstijl, de sleutel van je Dienst staat er al in.
+2. Tik **Hele lijst kopiëren** (de huidige lijst met jouw regel erin, of bijgewerkt) en **aanbieders.json openen op
+   GitHub**. Kies het potlood, selecteer alles, plak, en kies *Propose changes*. Je hebt alleen een gratis GitHub-account
+   nodig; installeren hoeft niet.
 3. De beheerders kijken of de dienst bereikbaar is, of je contactgegevens, voorwaarden en privacyverklaring kloppen,
-   en voegen het voorstel samen.
+   en voegen het voorstel samen. De app leest de lijst rechtstreeks van GitHub: zonder nieuwe versie sta je erin.
 
 Velden: `naam`, `url` (het https-adres van je dienst), `land`, `contact`, `omschrijving`, `sleutel` (publieke
-Ed25519-sleutel van je dienst, voor de gedeelde adressendienst).
+Ed25519-sleutel van je dienst, voor de gedeelde adressendienst). Daarnaast twee velden die **alleen de beheerders** zetten:
+
+| Veld | Wat |
+|---|---|
+| `standaard` | `true` op **hooguit één** regel: die aanbieder biedt de app nieuwe gebruikers als eerste aan ("Wij regelen alles"). Staan er meer, dan telt alleen de eerste. |
+| `adressen` | Op de standaardregel: het https-adres van de gratis-adressendienst (zie [ADRESSEN.md](ADRESSEN.md)). Elke Dienst die met zijn eigen sleutel op de lijst staat, gebruikt die dan vanzelf. |
+
+De app (en de console) kijkt bij elke aanbieder of hij antwoordt (`GET /v1/info`, 4 seconden; onthouden: een uur als hij
+antwoordt, 2 minuten als niet). Een aanbieder die niet antwoordt, staat er als *Nog niet beschikbaar* bij, is niet te
+kiezen en wordt nooit vanzelf gekozen; gebruikers kunnen het dan zelf regelen. Zodra hij antwoordt, wordt de
+standaardaanbieder vanzelf weer de eerste keuze. Het bestand `DIENST_URL` (of `EIGEN_DIENST_URL`) blijft werken als vaste
+standaard voor een eigen bouw van de app en gaat dan voor.
 
 ## Een cloudaanbieder toevoegen
 

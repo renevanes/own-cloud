@@ -1,1 +1,11 @@
-[]
+[
+  {
+    "naam": "ESAPE",
+    "url": "https://dienst.esape.nl",
+    "land": "NL",
+    "contact": "support@esape.nl",
+    "omschrijving": "Wij regelen je Eigen Cloud: servers, opslag, adres en mail in Europa. Vanuit Rotterdam.",
+    "standaard": true,
+    "adressen": "https://adressen.esape.nl"
+  }
+]

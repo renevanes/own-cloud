@@ -64,8 +64,24 @@ public class FormatsGoldenTest {
                 d.appRef = Json.str(in, "appRef");
                 d.caddyRef = Json.str(in, "caddyRef");
                 for (Object kv : Json.listAt(in, "env")) d.env.add(new String[] {Json.str(kv, 0), Json.str(kv, 1)});
-                T.eq(Json.str(o, "out"), CloudInit.dienstUserData(d), "dienstUserData " + d.host);
+                if (Json.map(in, "adressen") != null) {
+                    d.adressenHost = Json.str(in, "adressen", "host");
+                    for (Object kv : Json.listAt(in, "adressen", "env")) d.adressenEnv.add(new String[] {Json.str(kv, 0), Json.str(kv, 1)});
+                }
+                T.eq(Json.str(o, "out"), CloudInit.dienstUserData(d), "dienstUserData " + d.host + (d.adressenHost != null ? " met adressendienst" : ""));
             }
+            int nb = 0;
+            for (Object o : Json.listAt(g, "bedrijf")) {
+                Map<String, Object> cfg = Json.obj("console", Json.obj());
+                Map<String, Object> b = Json.copy(Json.map(o, "b"));
+                nb++;
+                if (Json.str(o, "error") != null) T.throwsWith(Json.str(o, "error"), () -> Aanbieder.saveBedrijf(cfg, b), "bedrijf " + nb);
+                else {
+                    Aanbieder.saveBedrijf(cfg, b);
+                    T.eq(Json.stringify(Json.path(o, "company")), Json.stringify(Json.path(cfg, "console", "aanbieder", "company")), "bedrijf " + nb);
+                }
+            }
+            T.check(nb >= 7, "bedrijf-gevallen");
             int n = 0;
             Aanbieder.Offers offers;
             try (java.io.FileInputStream in = new java.io.FileInputStream(System.getProperty("catalog.file"))) { offers = Aanbieder.offers(Catalog.load(in)); }
@@ -79,7 +95,7 @@ public class FormatsGoldenTest {
                 String ud = a != null && a.get("server") != null ? Aanbieder.serverUserData(cfg, a) : null;
                 T.eq(Json.str(o, "userData"), ud, "aanbieder user-data " + n);
             }
-            T.check(n >= 12, "aanbieder-gevallen");
+            T.check(n >= 16, "aanbieder-gevallen");
             // Kosten en budget (Costs ↔ src/cluster/costs.ts + src/console/costs.ts)
             Catalog costCat;
             try (java.io.FileInputStream in = new java.io.FileInputStream(System.getProperty("catalog.file"))) { costCat = Catalog.load(in); }

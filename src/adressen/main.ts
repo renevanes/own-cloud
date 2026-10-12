@@ -1,4 +1,5 @@
 /** Start de centrale adressendienst: npm run adressen (of node dist/adressen/main.js). Zie ADRESSEN.md. */
+import fs from "node:fs";
 import { loadAdresConfig, missingAdresSettings } from "./config.js";
 import { createAdressen } from "./app.js";
 
@@ -7,6 +8,14 @@ const missing = missingAdresSettings(cfg);
 if (missing.length) {
   console.error(`[adressen] Nog niet ingesteld: ${missing.join(", ")}. Zie ADRESSEN.md.`);
   process.exit(1);
+}
+// Op de server van een Dienst: eerst wachten tot de Dienst zijn back-up (ook adressen.sqlite) heeft teruggezet.
+if (cfg.waitFor) {
+  let said = false;
+  while (!fs.existsSync(cfg.waitFor)) {
+    if (!said) { console.log(`[adressen] wachten op ${cfg.waitFor} (de Dienst zet eerst de back-up terug)…`); said = true; }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
 }
 const svc = await createAdressen(cfg);
 await svc.app.listen({ port: cfg.port, host: cfg.host });

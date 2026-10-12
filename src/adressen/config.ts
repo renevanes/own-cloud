@@ -17,6 +17,13 @@ export interface AdresConfig {
   trustProxy: string;
   /** Na vrijgeven is een naam zo lang niet opnieuw uit te geven. */
   quarantineMs: number;
+  /**
+   * De Dienst op dezelfde server (ADRES_LOKAAL_DIENST + ADRES_LOKAAL_SLEUTEL, gezet door de console): die vertrouwt
+   * de adressendienst ook als hij (nog) niet op de lijst staat, en alleen die mag het beheer (/v1/beheer/…) gebruiken.
+   */
+  lokaal: { dienst: string; keyFile: string } | null;
+  /** Wachten tot dit bestand bestaat voor het starten (de Dienst zet eerst de back-up terug, ook die van ons). */
+  waitFor: string | null;
 }
 
 export const DEFAULT_LIST_URL = "https://raw.githubusercontent.com/renevanes/own-cloud/main/aanbieders.json";
@@ -37,6 +44,8 @@ export function loadAdresConfig(env: NodeJS.ProcessEnv = process.env): AdresConf
     publicUrl: trim(env.ADRES_PUBLIC_URL || `http://localhost:${port}`),
     trustProxy: env.ADRES_TRUST_PROXY || "loopback,uniquelocal",
     quarantineMs: 30 * 86400_000,
+    lokaal: env.ADRES_LOKAAL_DIENST && env.ADRES_LOKAAL_SLEUTEL ? { dienst: trim(env.ADRES_LOKAAL_DIENST.trim()), keyFile: env.ADRES_LOKAAL_SLEUTEL } : null,
+    waitFor: env.ADRES_WACHT_OP || null,
   };
 }
 

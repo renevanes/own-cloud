@@ -185,6 +185,11 @@ export interface DienstInit {
   caddyImage: string;
   appRef: string;
   caddyRef: string;
+  /**
+   * Ook de gratis-adressendienst (node dist/adressen/main.js, zelfde image) op deze server: eigen hostnaam bij Caddy,
+   * /srv/dienst/adressen.env (ADRES_*) en zijn database in /srv/dienst/adressen (de Dienst neemt hem mee in zijn back-up).
+   */
+  adressen?: { host: string; env: [string, string][] };
 }
 
 /** Eén waarde in dienst.env: letterlijk (de Dienst leest het bestand zelf), dus zonder regelovergangen. */
@@ -204,6 +209,8 @@ export function dienstEnvFile(env: [string, string][]) {
  */
 export function dienstUserData(o: DienstInit) {
   if (!/^[a-z0-9.-]+$/.test(o.host) || !/^[^\s@'"]+@[^\s@'"]+$/.test(o.email)) throw new Error("Ongeldig adres of e-mailadres");
+  const ad = o.adressen;
+  if (ad && !/^[a-z0-9.-]+$/.test(ad.host)) throw new Error("Ongeldige hostnaam voor de adressendienst");
   const prefix = updatePrefix(o.appRef);
   return `#!/bin/bash
 # Eigen Cloud Dienst — ${o.host}
@@ -215,12 +222,16 @@ command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
 ufw allow 22/tcp; ufw allow 80/tcp; ufw allow 443/tcp
 ufw --force enable
 umask 077
-mkdir -p /srv/dienst/data /srv/dienst/caddy
+mkdir -p /srv/dienst/data /srv/dienst/caddy${ad ? " /srv/dienst/adressen" : ""}
 cat > /srv/dienst/dienst.env <<'EOF'
 ${dienstEnvFile(o.env)}
 EOF
 chmod 600 /srv/dienst/dienst.env
-printf '%s\\n' '${o.appRef}' '${o.caddyRef}' > /srv/dienst/update-refs
+${ad ? `cat > /srv/dienst/adressen.env <<'EOF'
+${dienstEnvFile(ad.env)}
+EOF
+chmod 600 /srv/dienst/adressen.env
+` : ""}printf '%s\\n' '${o.appRef}' '${o.caddyRef}' > /srv/dienst/update-refs
 cat > /srv/dienst/Caddyfile <<'EOF'
 {
 \temail ${o.email}
@@ -229,7 +240,11 @@ ${o.host} {
 \tencode zstd gzip
 \treverse_proxy 127.0.0.1:4100
 }
-EOF
+${ad ? `${ad.host} {
+\tencode zstd gzip
+\treverse_proxy 127.0.0.1:4200
+}
+` : ""}EOF
 cat > /srv/dienst/docker-compose.yml <<'EOF'
 services:
   app:
@@ -247,7 +262,24 @@ services:
     volumes:
       - /srv/dienst/data:/data
       - /srv/dienst/dienst.env:/etc/dienst/dienst.env:ro
-  caddy:
+${ad ? `      - /srv/dienst/adressen:/adressen
+  adressen:
+    image: ${o.appImage}  # eigen-app
+    restart: unless-stopped
+    network_mode: host
+    command: ["node", "dist/adressen/main.js"]
+    env_file: /srv/dienst/adressen.env
+    environment:
+      - ADRES_DATA_DIR=/data
+      - ADRES_HOST=127.0.0.1
+      - ADRES_PORT=4200
+      - ADRES_TRUST_PROXY=loopback
+      - ADRES_LOKAAL_SLEUTEL=/dienst/aanbieder.key
+      - ADRES_WACHT_OP=/dienst/dienst.sqlite
+    volumes:
+      - /srv/dienst/adressen:/data
+      - /srv/dienst/data:/dienst:ro
+` : ""}  caddy:
     image: ${o.caddyImage}  # eigen-caddy
     restart: unless-stopped
     network_mode: host
@@ -325,7 +357,7 @@ ROOT="\${EIGEN_ROOT:-/srv/dienst}"; HEALTH_URL="\${HEALTH_URL:-http://127.0.0.1:
 REQ="$ROOT/data/update-request.json"; RES="$ROOT/data/update-result.json"; COMPOSE="$ROOT/docker-compose.yml"
 APP_REF=$(sed -n 1p "$ROOT/update-refs" 2>/dev/null); CADDY_REF=$(sed -n 2p "$ROOT/update-refs" 2>/dev/null)
 [ -n "$APP_REF" ] || exit 0
-CUR_IMAGE=$(sed -nE 's|^    image: (.*)  # eigen-app$|\\1|p' "$COMPOSE")
+CUR_IMAGE=$(sed -nE 's|^    image: (.*)  # eigen-app$|\\1|p' "$COMPOSE" | head -n1)
 [ -n "$CUR_IMAGE" ] || exit 0
 NOW=$(curl -fsS --max-time 5 "$HEALTH_URL" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version") or "")') || exit 0
 REL=$(docker run --rm --network host --entrypoint node "$CUR_IMAGE" --input-type=module -e 'const { resolveImage } = await import("/app/dist/cluster/updates.js"); const app = await resolveImage(process.argv[1]); const caddy = process.argv[2] ? await resolveImage(process.argv[2]) : null; console.log(JSON.stringify({ version: app.version, app: app.pinned, caddy: caddy ? caddy.pinned : null }));' "$APP_REF" "$CADDY_REF" 2>/dev/null | tail -n1) || exit 0

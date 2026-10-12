@@ -67,6 +67,11 @@ het risico op wanbetaling, de btw en je eigen tijd.
 
 ## Opzetten
 
+**Gewoon: vanuit de app**, zonder terminal: *Aanbieder worden* in de console of de app (zie
+[Opzetten vanuit de app](#opzetten-vanuit-de-app-zonder-terminal)). Daarna doe je alles in de app: instellingen wijzigen
+met **Wijzigingen toepassen**, de rest in het beheer van je Dienst (`/beheer`, in de app: **Beheer openen**). De stappen
+en variabelen hieronder zijn voor wie de Dienst zelf met Docker draait; ze laten ook zien wat de app voor je regelt.
+
 ### 1. Accounts
 
 | Wat | Waar | Nodig |
@@ -88,7 +93,10 @@ het risico op wanbetaling, de btw en je eigen tijd.
 | `BROKER_SECRET` | — | 64 hex-tekens; anders wordt `geheim.key` gemaakt. **Bewaar een kopie veilig**: zonder deze sleutel zijn de pakketten niet meer te lezen |
 | `BROKER_TERMS_URL`, `BROKER_PRIVACY_URL` | — | Links naar je voorwaarden en privacyverklaring (standaard; in het beheer onder Huisstijl te overschrijven) |
 | `BROKER_FREE_ZONE` | uit | Domein van de dienst voor gratis adressen, bijv. `eigencloud.nl`: klanten kiezen dan alleen een naam (`vanes.eigencloud.nl`), zonder domein te kopen. Zie hieronder. Wordt genegeerd als `BROKER_ADRES_URL` is ingesteld |
-| `BROKER_ADRES_URL` | uit | Adres van de centrale **adressendienst**, bijv. `https://adressen.eigencloud.nl`. Gratis adressen komen dan uit de gedeelde zone van die dienst, zodat klanten hun adres houden als ze van aanbieder wisselen. Zie hieronder en [ADRESSEN.md](ADRESSEN.md) |
+| `BROKER_ADRES_URL` | uit (dan: uit de lijst) | Adres van de centrale **adressendienst**, bijv. `https://adressen.eigencloud.nl`. Gratis adressen komen dan uit de gedeelde zone van die dienst, zodat klanten hun adres houden als ze van aanbieder wisselen. Niet gezet: staat deze Dienst met zijn sleutel op de lijst, dan gebruikt hij vanzelf de adressendienst van de standaardregel (`adressen`). Zie hieronder en [ADRESSEN.md](ADRESSEN.md) |
+| `BROKER_LIST_URL` | `https://raw.githubusercontent.com/renevanes/own-cloud/main/aanbieders.json` | De lijst van aanbieders, voor de adressendienst hierboven en *Op de lijst*. `uit` = niet kijken |
+| `BROKER_ADRES_PUBLIEK`, `BROKER_BACKUP_ADRESSEN` | uit | Alleen als de adressendienst op dezelfde server draait (de app zet ze): zijn openbare adres (voor *Op de lijst* en het beheer) en zijn database (gaat mee in de back-up van de Dienst) |
+| `BROKER_ENV_AT` | — | Wanneer de console dit bestand schreef (ms). Instellingen die later met *Wijzigingen toepassen* zijn gestuurd, gelden alleen als ze nieuwer zijn. Zie *Instellingen wijzigen zonder nieuwe server* |
 | `MOLLIE_API_KEY` | — | `test_…` of `live_…` |
 | `MOLLIE_API_URL` | `https://api.mollie.com/v2` | |
 | `OPENPROVIDER_USERNAME`, `OPENPROVIDER_PASSWORD` | — | |
@@ -109,7 +117,7 @@ het risico op wanbetaling, de btw en je eigen tijd.
 | `BROKER_COMPANY_KVK` | — | KvK-nummer |
 | `BROKER_COMPANY_VAT` | — | Btw-identificatienummer, bijv. `NL001234567B01` |
 | `BROKER_VAT_PERCENT` | `21` | Btw-percentage op de facturen (de prijzen van de bundels zijn inclusief btw) |
-| `BROKER_OWNER_EMAIL` | — | Eerste **eigenaar** van het beheer (`/beheer`). Wordt bij het starten als medewerker aangemaakt (of krijgt de rol eigenaar). Kan ook met `dienst:cli -- eigenaar <e-mail>` |
+| `BROKER_OWNER_EMAIL` | — | Eerste **eigenaar** van het beheer (`/beheer`). Wordt bij het starten als medewerker aangemaakt (of krijgt de rol eigenaar). De app zet hier het e-mailadres uit de stap *Bedrijf*; meer eigenaren nodig je uit in het beheer (*Medewerkers*) |
 | `BROKER_BRAND_NAME` | `Eigen Cloud Dienst` | Standaardnaam van je dienst in de app en in mails aan medewerkers; in het beheer (Huisstijl) te overschrijven |
 | `BROKER_HEALTH_UNHEALTHY_MS` | `900000` (15 min) | Zo lang mag een cloud ongezond melden voordat de klant automatisch een bericht krijgt |
 | `BROKER_HEALTH_SILENT_MS` | `21600000` (6 uur) | Zo lang mag een klare cloud (die zich al eens gemeld heeft) stil blijven voordat er automatisch een bericht komt |
@@ -156,14 +164,14 @@ aanbieders** en worden uitgegeven door één centrale adressendienst (draait bij
 Een klant houdt zijn adres als hij naar een andere aanbieder overstapt.
 
 1. **Sleutel van je Dienst.** Bij de eerste start maakt de Dienst `aanbieder.key` in de datamap (Ed25519,
-   alleen leesbaar voor de eigenaar). De publieke sleutel staat bij het starten in het logboek, en met
-   `npm run dienst:cli -- sleutel` (of `docker exec dienst node dist/broker/cli.js sleutel`) krijg je hem
-   samen met een kant-en-klare regel voor `aanbieders.json`. **Bewaar `aanbieder.key` in je back-up**: een
-   nieuwe sleutel betekent een nieuwe pull request op de lijst.
-2. **Op de lijst.** Zet je regel met `"sleutel"` in `aanbieders.json` (pull request, zie *De lijst van
-   aanbieders* hieronder). De `url` moet **precies** je `BROKER_PUBLIC_URL` zijn: zo herkent de
+   alleen leesbaar voor de eigenaar). Je ziet hem in het beheer onder **Op de lijst**, in een kant-en-klare regel voor
+   `aanbieders.json` (of met `dienst:cli -- sleutel`). De back-up van de Dienst neemt `aanbieder.key` mee; een nieuwe
+   sleutel betekent een nieuw voorstel voor de lijst.
+2. **Op de lijst.** In het beheer: **Op de lijst** → *Hele lijst kopiëren* → *aanbieders.json openen op GitHub* →
+   plakken → *Propose changes* (zie CONTRIBUTING.md). De `url` moet **precies** je `BROKER_PUBLIC_URL` zijn: zo herkent de
    adressendienst je verzoeken.
-3. Zet `BROKER_ADRES_URL=https://adressen.eigencloud.nl` en start de Dienst opnieuw.
+3. Niets meer: zodra de beheerders je regel hebben samengevoegd, vindt je Dienst de adressendienst zelf in de lijst
+   (veld `adressen` op de standaardregel; hij kijkt bij het starten en elk uur). `BROKER_ADRES_URL` gaat altijd voor.
 
 Wat er dan anders is:
 
@@ -183,8 +191,8 @@ Wat er dan anders is:
   aanbieder in, geeft de nieuwe een eigen token en een **nieuwe** code (de oude werkt dan niet meer). De
   records in de zone blijven staan; de cloud verhuist daarna met de gewone verhuisfunctie.
 - **Opzeggen en opruimen** laat het adres bewust staan bij de adressendienst (op jouw naam): de klant kan
-  het nog meenemen. Is dat niet meer nodig, dan geef je het terug met
-  `npm run dienst:cli -- adres-vrijgeven <id> --zeker` (alleen bij een opgezegde bestelling). De zone met alle
+  het nog meenemen. Is dat niet meer nodig, dan geef je het terug in het beheer: bij de klant **Gratis adres
+  teruggeven…** (of `dienst:cli -- adres-vrijgeven <id> --zeker`; alleen bij een opgezegde bestelling). De zone met alle
   records gaat dan weg; na 30 dagen kan iemand anders de naam krijgen. Is de klant al overgestapt, dan meldt
   dit dat het adres bij een andere aanbieder hoort en gebeurt er niets.
 - Bestellingen die vóór het instellen van `BROKER_ADRES_URL` met `BROKER_FREE_ZONE` zijn gedaan, blijven
@@ -213,11 +221,22 @@ gratis adressen mag aanvragen). Een aanbieder voegt zich toe met een pull reques
 | `naam` | ja | Naam zoals de app hem toont |
 | `url` | ja | Adres van de Dienst, precies `BROKER_PUBLIC_URL` (https) |
 | `land`, `contact`, `omschrijving` | nee | Voor de app |
-| `sleutel` | voor gratis adressen | Publieke Ed25519-sleutel van de Dienst (base64 SPKI), uit `dienst:cli -- sleutel`. Zonder sleutel kan de aanbieder geen gratis adressen aanvragen |
+| `sleutel` | voor gratis adressen | Publieke Ed25519-sleutel van de Dienst (base64 SPKI), uit het beheer (*Op de lijst*). Zonder sleutel kan de aanbieder geen gratis adressen aanvragen |
+| `standaard` | alleen beheerders | `true` op hooguit één regel: de standaardaanbieder van de app (zie hieronder) |
+| `adressen` | alleen beheerders | Op de standaardregel: het adres van de centrale adressendienst |
+
+De app kijkt bij elke aanbieder of hij antwoordt (`GET /v1/info`); wie niet antwoordt, staat er als *Nog niet
+beschikbaar* bij en wordt nooit vanzelf gekozen (zie CONTRIBUTING.md).
 
 ### 5. De app laten weten waar de dienst staat
 
-Zet het adres (bijv. `https://dienst.eigencloud.nl`) in het bestand `DIENST_URL` in de repository, of als GitHub-variabele `EIGEN_DIENST_URL`. Vanaf de volgende versie bieden de app en de console de dienst aan nieuwe gebruikers aan als eerste keuze ("Wij regelen alles"); zonder adres zien ze alleen de route met hun eigen Scaleway-sleutel.
+De regel met `"standaard": true` in `aanbieders.json` (door de beheerders gezet; nu ESAPE, `https://dienst.esape.nl`) is
+de eerste keuze in de app en de console ("Wij regelen alles"), **zodra die Dienst antwoordt**. Daarvoor is geen nieuwe
+versie van de app nodig: de app leest de lijst van GitHub (met de lijst uit de app als reserve). Antwoordt hij niet, dan
+zien nieuwe gebruikers de andere aanbieders en de routes om het zelf te regelen.
+
+Een vaste standaard in een eigen bouw van de app kan nog: het bestand `DIENST_URL` in de repository of de
+GitHub-variabele `EIGEN_DIENST_URL`. Die gaat voor de lijst.
 
 Maak dagelijks een back-up van de datamap (de database `dienst.sqlite` met `sqlite3 dienst.sqlite ".backup …"`)
 en bewaar `BROKER_SECRET` / `geheim.key` en `aanbieder.key` apart. Of laat de Dienst het zelf doen met `BROKER_BACKUP_*`
@@ -228,8 +247,9 @@ en bewaar `BROKER_SECRET` / `geheim.key` en `aanbieder.key` apart. Of laat de Di
 Wie al een Eigen Cloud heeft, kan in de beheerconsole (computer of app, op het overzicht: **Aanbieder worden**) zijn
 eigen Dienst laten opzetten. De console doet dan wat hierboven met de hand staat. Vijf stappen, met Vorige/Volgende:
 
-1. **Bedrijf**: naam, adres, KvK, btw-nummer (voor de facturen, `BROKER_COMPANY_*`) en het e-mailadres van de eigenaar
-   (`BROKER_OWNER_EMAIL`; die krijgt de eerste inlogcode voor `/beheer`).
+1. **Bedrijf**: naam, adres, KvK, btw-nummer (voor de facturen, `BROKER_COMPANY_*`), het e-mailadres van de eigenaar
+   (`BROKER_OWNER_EMAIL`; die krijgt de eerste inlogcode voor `/beheer`), het btw-percentage (`BROKER_VAT_PERCENT`,
+   standaard 21) en of de bewaker extra servers echt uitzet (`BROKER_ENFORCE`).
 2. **Accounts**, elk meteen gecontroleerd: Scaleway (geheime sleutel + organisatie-ID; `GET /account/v3/projects`;
    daarmee zet de Dienst de clouds van klanten op, `SCW_*` in `src/broker/provision.ts`; de server van de Dienst zelf
    hoeft niet bij Scaleway),
@@ -238,7 +258,9 @@ eigen Dienst laten opzetten. De console doet dan wat hierboven met de hand staat
    ook naar het IP-adres) en de adressendienst (`BROKER_ADRES_URL`).
 3. **Adres**: standaard `https://dienst.<je domein>`. Je cloud zet het A-record zelf in je DNS (instelling `extra_dns`,
    nu ook met A/AAAA; een lege waarde haalt een record weg). Een adres onder een ander domein kan ook; dan zet je het
-   record zelf.
+   record zelf. Optioneel (voor de beheerders van het project): **Ook de gratis-adressendienst draaien**, met de gedeelde
+   zone, een deSEC-token van dat account (live gecontroleerd) en een eigen adres (standaard `adressen.<domein>`, ook
+   door je cloud in de DNS gezet). Zie [ADRESSEN.md](ADRESSEN.md#opzetten-vanuit-de-app-aanbevolen).
 4. **Server en back-ups**: de **server** bij elke aanbieder met servers uit de registry (Scaleway, Hetzner, UpCloud,
    Exoscale, OVHcloud; `src/cluster/adapters`). Na *Regio's en prijzen ophalen* (alleen lezen: inloggen met
    `Provider.list`, formaten met `fetchSizes`) zie je per regio het kleinste geschikte formaat (minstens 2 GB, zoals bij
@@ -259,7 +281,9 @@ eigen Dienst laten opzetten. De console doet dan wat hierboven met de hand staat
      cloud-init (`dienstUserData` in `src/cluster/cloudinit.ts`): Docker, het
      image van je cloud met `node dist/broker/main.js`, `/srv/dienst/dienst.env` (0600) met alle instellingen
      (`BROKER_*`, `MOLLIE_API_KEY`, `DESEC_TOKEN`, `SCW_*`, `OPENPROVIDER_*`, `BROKER_BACKUP_*`, `BROKER_SECRET`),
-     de datamap `/srv/dienst/data`, en Caddy (het `eigen-caddy`-image) met HTTPS via HTTP-01.
+     de datamap `/srv/dienst/data`, en Caddy (het `eigen-caddy`-image) met HTTPS via HTTP-01. Met de adressendienst ook
+     `/srv/dienst/adressen.env`, een tweede container met hetzelfde image (`node dist/adressen/main.js`, die de updater
+     meeneemt) en een tweede hostnaam bij Caddy; zie ADRESSEN.md. Het script blijft ruim onder de 32 KiB (Hetzner).
 
    De console maakt `BROKER_SECRET` (64 hex) zelf en bewaart hem in je kluis (en dus versleuteld in de herstelkopie in je
    opslag). Let op: anders dan bij een cloud staan de geheimen hier wél in de user-data. De server is alleen van jou,
@@ -271,8 +295,9 @@ eigen Dienst laten opzetten. De console doet dan wat hierboven met de hand staat
    mail versturen via de mailserver van stap 2 (standaard de relay van je cloud). Geen van beide hangt af van waar de
    server staat.
 
-Daarna (**Je dienst**): status (bereikbaar, versie, laatste back-up, DNS), **Beheer openen** (in de app: het
-beheerscherm met vingerafdruk), **Instellingen wijzigen** (de stappen opnieuw) en **Opnieuw opzetten**: de huidige
+Daarna (**Je dienst**): status (bereikbaar, versie, laatste back-up, DNS, en de adressendienst als die meedraait),
+**Beheer openen** (in de app: het beheerscherm met vingerafdruk), **Instellingen wijzigen** (de stappen opnieuw),
+**Wijzigingen toepassen** (zie hieronder) en **Opnieuw opzetten**: de huidige
 server maakt een laatste back-up en schrijft daarna niets meer, er komt een nieuwe server met de nieuwe instellingen die
 die back-up bij de eerste start terugzet, het A-record gaat naar de nieuwe server en de oude wordt verwijderd. Door de
 DNS (deSEC: minstens een uur) kan een deel van de bezoekers de Dienst daarna even niet bereiken. Zo verhuis je de
@@ -288,9 +313,11 @@ uit het draaiende image (`resolveImage` uit `updates.ts`) welke versie `ghcr.io/
 die nieuwer, dan volgt een update naar die vaste versie (`image@sha256:…`). Een versie die al eens mislukte, wordt niet
 opnieuw geprobeerd.
 
-Routes van de console (ook in de app, zelfde JSON): `GET /api/aanbieder`, `POST /api/aanbieder/stap {step}`
-(`uit` = stoppen zolang er geen Dienst is), `POST /api/aanbieder/bedrijf`, `POST /api/aanbieder/accounts`,
-`POST /api/aanbieder/adres`, `POST /api/aanbieder/server {provider, fields?, region?}` (zonder regio: regio's met
+Routes van de console (ook in de app, zelfde JSON): `GET /api/aanbieder` (met `wijzigingen`: `geen`, `toepassen`,
+`opnieuw` of `null`, `adressen` en `defaultAdressenHost`), `POST /api/aanbieder/stap {step}`
+(`uit` = stoppen zolang er geen Dienst is), `POST /api/aanbieder/bedrijf {…, vatPercent?, enforce?}`, `POST /api/aanbieder/accounts`,
+`POST /api/aanbieder/adres`, `POST /api/aanbieder/adressen {zone, desecToken, host?}` of `{aan: false}` (→ `{ok, checks,
+adressen, dns, pending}`), `POST /api/aanbieder/toepassen` (→ `{ok, restart, keys}`), `POST /api/aanbieder/server {provider, fields?, region?}` (zonder regio: regio's met
 formaat en prijs; met regio: bewaren), `POST /api/aanbieder/backup {store}` of `{provider, region, endpoint?, accessKey?,
 secretKey?}`, `POST /api/aanbieder/opzetten` (ook voor opnieuw opzetten), `GET /api/aanbieder/status`,
 `POST /api/aanbieder/verwijderen {confirm}`. De toestand staat in de kluis onder `console.aanbieder`; antwoorden bevatten
@@ -298,10 +325,23 @@ nooit sleutels (alleen de laatste 4 tekens). Een kluis van vóór de keuze van a
 het lezen bijgewerkt: `hosting` (Scaleway, regio en formaat van de server), `backup.provider` en `server.provider`
 `scaleway`, en `retired` van losse id's naar `{provider, serverId}`.
 
+### Instellingen wijzigen zonder nieuwe server
+
+Bedrijfsgegevens, btw, bewaker, sleutels (Mollie test → live, deSEC, Scaleway, Openprovider), mail en het adres van de
+adressendienst kun je wijzigen zonder nieuwe server: **Instellingen wijzigen**, dan **Wijzigingen toepassen**. De console
+stuurt dan alleen die instellingen (`INSTELBAAR` in `src/broker/instellingen.ts`) naar
+`POST /v1/status/instellingen {at, env}` (met hetzelfde beheertoken als bij overdragen). De Dienst bewaart ze versleuteld
+(sleutel afgeleid van `BROKER_SECRET`) in zijn database, maakt meteen een back-up en start opnieuw (Docker start hem
+weer); bij het starten gaan ze vóór `dienst.env` als ze nieuwer zijn dan `BROKER_ENV_AT`. Zo krijgt ook een server die
+de back-up terugzet ze, en wint bij **Opnieuw opzetten** de nieuwe `dienst.env` (die heeft dezelfde instellingen, en een
+nieuwere `BROKER_ENV_AT`). Een ander adres, een andere plek of de adressendienst aan of uit vraagt wel een nieuwe server;
+de console zegt dat (`wijzigingen: "opnieuw"`). Het adres, `BROKER_SECRET` en de back-upplek wijzigen zo nooit.
+
 ## Back-up van de Dienst (`BROKER_BACKUP_*`)
 
 - Elk uur (en bij het starten en stoppen) een kopie via de online back-up van SQLite (`db.backup`), samen met
-  `aanbieder.key` en `bundles.json`, gzip, versleuteld (AES-256-GCM in blokken, zoals de back-ups van een cloud) met een
+  `aanbieder.key`, `bundles.json` en (als de adressendienst op dezelfde server draait, `BROKER_BACKUP_ADRESSEN`) ook
+  diens `adressen.sqlite`, gzip, versleuteld (AES-256-GCM in blokken, zoals de back-ups van een cloud) met een
   sleutel afgeleid van `BROKER_SECRET` (HKDF, doel `dienst-backup`). Naam: `dienst/<JJJJMMDDTHHMMSSZ>-<x>.enc`.
 - Bewaard: alles van de laatste 48 uur, daarna de nieuwste per dag tot 30 dagen; ouder gaat weg (de bucket heeft zelf
   ook 30 dagen object-lock).
@@ -346,8 +386,9 @@ In plaats van een lijst mag het bestand ook een object zijn: `{ "bundles": [ …
 zet die naast de prijs van de klant (marge). Niet opgegeven formaten krijgen de plaatshouders uit `DEFAULT_COSTS` in
 `src/broker/config.ts`. **Controleer ze met je eigen Scaleway-factuur.**
 
-**Aanbod in het beheer.** Bundels die je in het beheer (Aanbod) wijzigt of toevoegt, worden in de database bewaard en gaan
-vanaf dan vóór `bundles.json`. Wil je terug naar het bestand, verwijder dan de instelling `bundles` uit de tabel `settings`.
+**Aanbod en kosten in het beheer.** Bundels die je in het beheer (Aanbod) wijzigt of toevoegt, en de geschatte kosten
+per serverformaat en per GB (Kosten → *Prijzen die we aannemen*), worden in de database bewaard en gaan vanaf dan vóór
+`bundles.json`. Een Dienst die vanuit de app is opgezet, heeft geen `bundles.json`: daar doe je dit alleen in het beheer.
 
 Gebruik alleen regio's die de console kent (`nl-ams-1`, `nl-ams-2`, `nl-ams-3`, `fr-par-1`, `pl-waw-1`) en
 controleer of het formaat in die zone te koop is. Een prijswijziging geldt voor nieuwe bestellingen;
@@ -369,7 +410,7 @@ de prijs die op dat moment in `bundles.json` staat).
 Elke stap kijkt eerst of het onderdeel al bestaat; opnieuw proberen maakt dus niets dubbel. Tijdelijke
 fouten (netwerk, 5xx, 401, 429) worden steeds later opnieuw geprobeerd; na 10 keer krijg je een mail.
 Een blijvende fout (andere 4xx) zet de bestelling op *mislukt*, met een leesbare melding, en je krijgt
-een mail. Na oplossen: `npm run dienst:cli -- opnieuw <id>`.
+een mail. Na oplossen: in het beheer bij de klant **Opnieuw proberen** (of `dienst:cli -- opnieuw <id>`).
 
 Een gemiste Mollie-webhook wordt opgevangen: open eerste betalingen worden tot 48 uur lang elke 5 minuten
 zelf nagekeken.
@@ -455,7 +496,10 @@ EC-2026-0001") en bekijkt of print de factuur in de app.
 
 ## Beheer vanaf de opdrachtregel
 
-Dezelfde omgevingsvariabelen en datamap als de dienst:
+Alles hieronder kan ook in het beheer (`/beheer`, in de app **Beheer openen**): klanten en bestellingen (Klanten; ook
+opnieuw proberen, opschorten, hervatten, opruimen en het gratis adres teruggeven), de bewaker (Kosten → *Nu
+controleren*), facturen (Geld), eigenaren en medewerkers met *Tweede stap wissen* (Medewerkers) en de sleutel (Op de
+lijst). De opdrachtregel is voor wie de Dienst zelf met Docker draait. Dezelfde omgevingsvariabelen en datamap als de dienst:
 
 ```bash
 npm run dienst:cli -- klanten              # alle klanten en hun bestellingen
@@ -484,10 +528,12 @@ bestelling op *betalingsprobleem*. De cloud blijft werken. De dienst probeert ee
 opnieuw (en Mollie doet dat bij een abonnement ook niet vanzelf — controleer dit). De klant ziet het
 openstaande bedrag in de app (onder Abonnement) en kan het daar in één keer betalen (iDEAL e.d.); daarna staat
 de bestelling weer op *klaar* en krijgt hij een factuur. Gebeurt dat niet, neem dan contact op en schort na
-een afgesproken termijn (bijv. 14 dagen) op met `opschorten`. Lukt de volgende maandelijkse incasso wel, dan
+een afgesproken termijn (bijv. 14 dagen) op (in het beheer bij de klant: *Opschorten*). Lukt de volgende maandelijkse incasso wel, dan
 gaat de bestelling ook vanzelf terug naar *klaar*, maar de eerder mislukte incasso blijft dan als openstaand
 staan (hij is immers nooit betaald) en telt mee bij een volgend betalingsprobleem. Heb je een achterstand
-buiten de dienst om geregeld, dan moet je dat nu nog met de hand in de database afboeken (`settled_by`).
+buiten de dienst om geregeld (bijv. een overschrijving), boek hem dan af in het beheer: bij de klant onder Betalingen
+**Al betaald? Afboeken…** (rol Financiën of Eigenaar, met een notitie). De mislukte incasso's krijgen `settled_by =
+"hand:<e-mail>"`, de bestelling staat weer op *klaar*; een factuur komt er niet (die maak je zelf).
 
 **Opzeggen.** De klant zegt op in de app; het Mollie-abonnement stopt meteen en alles blijft werken tot
 het einde van de betaalde maand (`endsAt`). Tot die datum kan de klant de opzegging in de app terugdraaien:
@@ -509,8 +555,9 @@ worden door de dienst zelf geserveerd, met een strenge Content-Security-Policy. 
 
 ### Eerste eigenaar
 
-Zet `BROKER_OWNER_EMAIL=jij@jouwbedrijf.nl` en start de dienst, of voer één keer `npm run dienst:cli -- eigenaar jij@jouwbedrijf.nl`
-uit (Docker: `docker exec dienst node dist/broker/cli.js eigenaar jij@jouwbedrijf.nl`). Open daarna `/beheer`, vraag een code
+Vanuit de app opgezet: dat is het e-mailadres uit de stap *Bedrijf*. Met Docker: zet `BROKER_OWNER_EMAIL=jij@jouwbedrijf.nl`
+en start de dienst, of voer één keer `npm run dienst:cli -- eigenaar jij@jouwbedrijf.nl` uit
+(Docker: `docker exec dienst node dist/broker/cli.js eigenaar jij@jouwbedrijf.nl`). Open daarna `/beheer`, vraag een code
 aan en stel je tweede stap in. Daarna nodig je zelf medewerkers uit (Medewerkers). De laatste eigenaar kan nooit worden
 verwijderd of een andere rol krijgen.
 
@@ -518,13 +565,13 @@ verwijderd of een andere rol krijgen.
 
 | Rol | Mag |
 |---|---|
-| **Eigenaar** | Alles: ook medewerkers, huisstijl en het logboek |
+| **Eigenaar** | Alles: ook medewerkers, huisstijl, het logboek en (als hij op deze server draait) de adressendienst |
 | **Beheer** | Klanten en clouds inzien en opschorten/hervatten/opzeggen/opnieuw/opruimen, kosten, aanbod (bundels en prijzen), uitnodigingscodes, berichten, hulpvragen |
 | **Support** | Klanten en clouds inzien (zonder abonnement en kosten), hulpvragen beantwoorden, berichten lezen |
 | **Financiën** | Klanten inzien, betalingen, facturen, achterstanden, terugbetalen, omzet, kosten |
 
 Rechten (in `src/broker/staff.ts`, `PERMISSIONS`): `customers.read`, `customers.act`, `costs`, `money`, `refund`, `offering`,
-`invites`, `announcements.read`, `announcements`, `tickets`, `health`, `staff`, `brand`, `audit`. `GET /v1/admin/me` geeft de
+`invites`, `announcements.read`, `announcements`, `tickets`, `health`, `staff`, `brand`, `audit`, `adressen`. `GET /v1/admin/me` geeft de
 rechten van de ingelogde medewerker; de pagina's tonen alleen wat mag, de API controleert het altijd zelf (anders 403).
 
 ### Inloggen: altijd twee stappen
@@ -579,7 +626,7 @@ als Mollie of Scaleway een fout gaf).
 
 | Methode en pad | Recht | Wat |
 |---|---|---|
-| `GET /v1/admin/me` | ingelogd | Medewerker, rechten, huisstijl |
+| `GET /v1/admin/me` | ingelogd | Medewerker, rechten, huisstijl, `adressendienst` (draait die op deze server) |
 | `POST /v1/admin/auth/logout` | ingelogd | Sessie beëindigen |
 | `POST /v1/admin/me/name` `{name}` | ingelogd | Eigen naam (klanten zien die bij antwoorden) |
 | `POST /v1/admin/me/totp`, `…/totp/confirm {code}`, `DELETE /v1/admin/me/totp` | ingelogd | Authenticator-app toevoegen/weghalen |
@@ -589,8 +636,12 @@ als Mollie of Scaleway een fout gaf).
 | `GET /v1/admin/orders/:id` | customers.read | Details: stappen, gebeurtenissen, techniek (zonder geheimen), gezondheid, abonnement (beheer/financiën), kosten, hulpvragen, mogelijke acties |
 | `POST /v1/admin/orders/:id/suspend` · `resume` · `cancel` · `retry` | customers.act | Zelfde als de opdrachtregel |
 | `POST /v1/admin/orders/:id/cleanup` `{sure?}` | customers.act | Zonder `sure`: alleen het plan |
+| `POST /v1/admin/orders/:id/adres-vrijgeven` `{sure?}` | customers.act | Gratis adres (adressendienst) van een opgezegde bestelling teruggeven; zonder `sure` alleen het plan (`actions.adres`) |
+| `POST /v1/admin/orders/:id/afboeken` `{note?}` | money | Achterstand buiten de dienst om betaald: mislukte incasso's afboeken, weer *klaar* (`actions.afboeken`; 409 als niets open staat) |
+| `POST /v1/admin/bewaker` | customers.act | Bewaker nu draaien → `{findings, enforce}` |
 | `GET /v1/admin/orders/:id/servers` | costs | Servers in het Scaleway-project (alle zones), toegestaan aantal, geschatte kosten, prijs en marge |
 | `GET /v1/admin/costs` | costs | Per actieve bestelling prijs excl. btw, geschatte kosten, marge en totalen |
+| `PUT /v1/admin/costs` `{servers: {formaat: "4.50" \| null}, storageGbMonthly?}` | offering | Geschatte kosten wijzigen (leeg of `null` = formaat weg); gaat voor `bundles.json` |
 | `GET /v1/admin/payments?status=&orderId=` | money | Betalingen (zonder de € 0,01), met factuur, terugbetaald en nog terug te betalen |
 | `POST /v1/admin/payments/:id/refund` `{amount?, description?}` | refund | Terugbetalen via Mollie (`POST /payments/{id}/refunds`); zonder bedrag: alles wat nog kan |
 | `GET /v1/admin/invoices?orderId=` · `GET /v1/admin/invoices/:id` | money | Facturen; één factuur als HTML |
@@ -607,6 +658,8 @@ als Mollie of Scaleway een fout gaf).
 | `GET /v1/admin/health` | health | Alle actieve clouds met hun laatste melding |
 | `GET /v1/admin/staff` · `POST /v1/admin/staff {email, role, name?}` · `PATCH /v1/admin/staff/:id {role}` · `DELETE /v1/admin/staff/:id` · `POST /v1/admin/staff/:id/reset` | staff | Medewerkers; een nieuwe medewerker krijgt een mail |
 | `GET /v1/admin/audit?limit=&before=&staff=&action=` | audit | Logboek, nieuwste eerst; `before` = id voor de volgende bladzijde |
+| `GET /v1/admin/lijst` | brand | Regel voor `aanbieders.json` (`entry`, met land/omschrijving/`standaard` uit de huidige lijst en `adressen` als de adressendienst hier draait), `opLijst`, `actueel`, `sleutelKlopt`, `nieuweLijst` (de hele lijst met deze regel, om te plakken) en `editUrl` |
+| `GET /v1/admin/adressendienst` · `GET …/logboek?naam=` · `POST …/namen/:naam/vrijgeven {sure: true}` | adressen | Beheer van de adressendienst op deze server (404 als die er niet draait); zie ADRESSEN.md |
 
 ### Extra gebruikers
 
@@ -667,7 +720,7 @@ Controleer met echte (test)accounts vóór je live gaat:
 - **Mollie achterstand**: een betaling met `sequenceType: "oneoff"` en `customerId`.
 - **Mollie terugbetalen vanuit het beheer**: `POST /payments/{id}/refunds` met een deelbedrag; de status van de
   terugbetaling (`pending` → `refunded`) wordt nu niet opgevolgd. Controleer in het Mollie-dashboard.
-- **Kosten per serverformaat**: de prijzen in `DEFAULT_COSTS` zijn plaatshouders; zet je echte prijzen in `bundles.json`.
+- **Kosten per serverformaat**: de prijzen in `DEFAULT_COSTS` zijn plaatshouders; zet je echte prijzen in het beheer (Kosten).
 - **Openprovider verhuiscode**: `GET /domains/{id}/authcode` → `data.auth_code`, en als dat niets geeft één keer
   `POST /domains/{id}/authcode/reset`. Gebouwd volgens de documentatie, nog niet met een echt account getest.
   Controleer ook per extensie of de code direct terugkomt (bij sommige registries gaat hij per mail naar de houder).
@@ -705,6 +758,7 @@ JSON; fouten als `{ "error": "…" }`. Inloggen met `Authorization: Bearer <toke
 | Methode en pad | Wat |
 |---|---|
 | `GET /v1/status` | `{version, uptime, lastBackupAt, backup, closing}`; zie *Back-up van de Dienst* |
+| `POST /v1/status/instellingen` | `{at, env}` met `Authorization: Beheer …`; zie *Instellingen wijzigen zonder nieuwe server* |
 | `GET /v1/info` | Naam, bundels (met `includes.users` en `extraUserMonthly`), links naar voorwaarden en privacy, `brand`, `freeZone` (zone voor gratis adressen: van de adressendienst of `BROKER_FREE_ZONE`; `null` = uit) |
 | `GET /v1/brand` · `GET /v1/brand/logo` | Huisstijl van de aanbieder: `{name, accentColor, contact:{email,phone,website}, termsUrl, privacyUrl, logoUrl}`; het logo als PNG/SVG |
 | `GET /v1/invite/:code` | `{valid, code?, reason?, brand, bundle?}` (hoofdletters en streepjes maken niet uit) |

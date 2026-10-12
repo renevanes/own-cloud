@@ -314,6 +314,20 @@ public final class ConsoleApi {
         return "";
     }
 
+    private final java.util.concurrent.atomic.AtomicBoolean warmed = new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** De lijst van aanbieders (met wie er antwoordt) eenmalig op de achtergrond ophalen (zoals buildConsole in TS). */
+    private void warmAanbieders() {
+        if (!warmed.compareAndSet(false, true)) return;
+        Thread t = new Thread(() -> {
+            int reachable = 0;
+            for (Object a : Extras.aanbieders(dienstUrl)) if (Boolean.TRUE.equals(Json.path(a, "bereikbaar"))) reachable++;
+            knownAanbieders = reachable;
+        }, "eigen-aanbieders");
+        t.setDaemon(true);
+        t.start();
+    }
+
     /** Aanbieder van de huidige kluis (ontgrendeld), anders de standaard van deze versie. */
     private String currentBase() { return Extras.baseOf(vault.isUnlocked() ? cfg() : null, dienstUrl); }
 
@@ -336,12 +350,13 @@ public final class ConsoleApi {
         // Zonder ontgrendelen
         switch (key) {
             case "GET /api/state": {
+                warmAanbieders();
                 Map<String, Object> con = vault.isUnlocked() ? Json.map(cfg(), "console") : null;
                 return ok(Json.obj("vault", vault.exists(), "unlocked", unlocked(), "step", con == null ? null : con.get("step"),
                         "done", con != null && Json.truthy(con.get("done")), "domain", vault.isUnlocked() ? cfg().get("domain") : null,
                         "offers", Json.obj("stores", catalog.storeOffers(), "servers", catalog.serverOffers(), "dns", catalog.dnsOffers()),
                         "phone", true, "biometric", biometric,
-                        "dienst", (dienstUrl != null && !dienstUrl.isEmpty()) || Json.truthy(Json.path(con, "dienst", "url")) || knownAanbieders > 0,
+                        "dienst", !Extras.defaultBase(dienstUrl).isEmpty() || Json.truthy(Json.path(con, "dienst", "url")) || knownAanbieders > 0,
                         "aanbieder", Json.path(con, "dienst", "url"),
                         "domainMode", con == null ? null : con.get("domainMode"),
                         "scaleway", Json.obj("signup", Extras.SCW_SIGNUP_URL, "keys", Extras.SCW_KEYS_URL)));
@@ -357,7 +372,9 @@ public final class ConsoleApi {
             // Aanbieders: de openbare lijst, hun huisstijl en uitnodigingscodes.
             case "GET /api/aanbieders": {
                 List<Object> list = Extras.aanbieders(dienstUrl);
-                knownAanbieders = list.size();
+                int reachable = 0;
+                for (Object a : list) if (Boolean.TRUE.equals(Json.path(a, "bereikbaar"))) reachable++;
+                knownAanbieders = reachable;
                 return ok(Json.obj("aanbieders", list, "gekozen", vault.isUnlocked() ? Json.path(cfg(), "console", "dienst", "url") : null));
             }
             case "GET /api/aanbieder/brand":
@@ -385,7 +402,7 @@ public final class ConsoleApi {
             }
             case "POST /api/recover/dienst/login": {
                 String url = Json.str(b, "url");
-                String base = url != null && !url.isEmpty() ? Extras.cleanDienstUrl(url) : dienstUrl;
+                String base = url != null && !url.isEmpty() ? Extras.cleanDienstUrl(url) : Extras.defaultBase(dienstUrl);
                 recoverEmail = Extras.dienstStartLogin(base, Json.str(b, "email"));
                 recoverBase = base;
                 recoverToken = null;
@@ -750,6 +767,13 @@ public final class ConsoleApi {
                 save();
                 return ok(r);
             }
+            case "POST /api/aanbieder/adressen": {
+                Map<String, Object> r = Aanbieder.saveAdressen(c, b);
+                save();
+                return ok(r);
+            }
+            case "POST /api/aanbieder/toepassen":
+                return ok(Aanbieder.toepassen(c, aanbiederDeps()));
             case "POST /api/aanbieder/server": {
                 Map<String, Object> r = Aanbieder.saveServer(c, b, aanbiederDeps());
                 save();

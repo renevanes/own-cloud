@@ -133,6 +133,17 @@ public class AanbiederTest {
                     closing[0] = true;
                     return new FakeApi.Reply(200, "{\"ok\":true,\"lastBackupAt\":1760000005000,\"backup\":true}", "application/json");
                 });
+                // Instellingen toepassen zonder nieuwe server, en de gratis-adressendienst (deSEC-account van de gedeelde zone).
+                final Object[] instellingen = {null};
+                f.on("^POST /dienst/v1/status/instellingen$", c -> {
+                    if (!("Beheer " + Aanbieder.beheerToken(dienstSecret[0])).equals(c.headers.get("authorization"))) return new FakeApi.Reply(401, "{\"error\":\"Geen toegang\"}", "application/json");
+                    instellingen[0] = c.json;
+                    return new FakeApi.Reply(200, Json.stringify(Json.obj("ok", true, "keys", new ArrayList<>(Json.asMap(Json.path(c.json, "env")).keySet()), "restart", true)), "application/json");
+                });
+                f.on("^GET /desec/domains/eigencloud\\.nl/$", c -> "Token desec-centraal".equals(c.headers.get("authorization")) || "Token zonder-recht".equals(c.headers.get("authorization"))
+                        ? new FakeApi.Reply(200, "{\"name\":\"eigencloud.nl\"}", "application/json") : new FakeApi.Reply(404, "{\"detail\":\"Not found.\"}", "application/json"));
+                f.on("^GET /desec/auth/tokens/$", c -> "Token desec-centraal".equals(c.headers.get("authorization")) ? new FakeApi.Reply(200, "[]", "application/json")
+                        : new FakeApi.Reply(403, "{\"detail\":\"You do not have permission to perform this action.\"}", "application/json"));
                 f.on("^GET /doh\\?name=dienst\\.vanes\\.nl&type=A$", c -> new FakeApi.Reply(200, Json.stringify(Json.obj("Status", 0, "Answer", servers.isEmpty() ? Json.list() : Json.list(Json.obj("type", 1, "data", "192.0.2." + (10 + servers.size() - 1))))), "application/json"));
                 Endpoints.SCALEWAY = f.base() + "/scw";
                 Endpoints.HETZNER = f.base() + "/hz";
@@ -257,6 +268,35 @@ public class AanbiederTest {
                 T.eq("{\"host\":\"dienst.vanes.nl\",\"want\":\"192.0.2.10\",\"have\":[\"192.0.2.10\"],\"ok\":true}", Json.stringify(r.get("dns")), "dns ok");
                 T.check(!userData.containsKey("srv-0"), "user-data removed at Scaleway");
 
+                // Instellingen wijzigen zonder nieuwe server (toepassen)
+                v = call(200, "GET", "/api/aanbieder", null);
+                T.eq("geen", v.get("wijzigingen"), "alles toegepast na opzetten");
+                call(200, "POST", "/api/aanbieder/bedrijf", Json.obj("name", "Rene's Diensten", "address", "Blaak 10\n3011 TA Rotterdam", "kvk", "12345678", "vat", "NL001234567B01", "email", "rene@elders.example", "vatPercent", "9", "enforce", true));
+                v = call(200, "GET", "/api/aanbieder", null);
+                T.eq("toepassen", v.get("wijzigingen"), "btw gewijzigd: toepassen");
+                r = call(200, "POST", "/api/aanbieder/toepassen", null);
+                T.eq(true, r.get("restart"), "dienst start opnieuw");
+                T.eq("9", Json.str(instellingen[0], "env", "BROKER_VAT_PERCENT"), "btw meegestuurd");
+                T.eq("1", Json.str(instellingen[0], "env", "BROKER_ENFORCE"), "bewaker meegestuurd");
+                T.eq(null, Json.path(instellingen[0], "env", "BROKER_SECRET"), "geen BROKER_SECRET");
+                T.eq(null, Json.path(instellingen[0], "env", "BROKER_PUBLIC_URL"), "adres hoort bij de server");
+                T.check(Json.num(instellingen[0], "at").longValue() > Json.num(api.vault.config(), "console", "aanbieder", "envAt").longValue(), "nieuwer dan dienst.env");
+                T.eq("geen", call(200, "GET", "/api/aanbieder", null).get("wijzigingen"), "toegepast");
+
+                // Gratis-adressendienst op dezelfde server
+                v = call(200, "GET", "/api/aanbieder", null);
+                T.eq("adressen.vanes.nl", v.get("defaultAdressenHost"), "standaardhost");
+                T.check(Json.str(call(400, "POST", "/api/aanbieder/adressen", Json.obj("zone", "geen zone")), "error").contains("gedeelde zone"), "zone nodig");
+                r = call(200, "POST", "/api/aanbieder/adressen", Json.obj("zone", "EigenCloud.nl.", "desecToken", "zonder-recht"));
+                T.eq(false, r.get("ok"), "token zonder tokenbeheer");
+                T.check(Json.str(r, "checks", 1, "detail").contains("geen tokens beheren"), "uitleg perm_manage_tokens");
+                T.eq(null, r.get("adressen"), "niet bewaard");
+                r = call(200, "POST", "/api/aanbieder/adressen", Json.obj("zone", "eigencloud.nl", "desecToken", "desec-centraal"));
+                T.eq(true, r.get("ok"), "adressendienst gecontroleerd: " + Json.stringify(r.get("checks")));
+                T.eq("{\"zone\":\"eigencloud.nl\",\"desecToken\":\"••••••••raal\",\"host\":\"adressen.vanes.nl\",\"url\":\"https://adressen.vanes.nl\"}", Json.stringify(r.get("adressen")), "adressendienst bewaard");
+                T.eq("opnieuw", call(200, "GET", "/api/aanbieder", null).get("wijzigingen"), "adressendienst vraagt een nieuwe server");
+                T.check(Json.str(call(400, "POST", "/api/aanbieder/toepassen", null), "error").contains("nieuwe server"), "toepassen weigert");
+
                 // Opnieuw opzetten bij Hetzner: laatste back-up, nieuwe server, oude weg bij Scaleway
                 r = call(200, "POST", "/api/aanbieder/server", Json.obj("provider", "hetzner", "region", "fsn1"));
                 T.eq(true, r.get("pending"), "pending until redeploy");
@@ -275,6 +315,14 @@ public class AanbiederTest {
                 T.eq("fsn1 cx23 eigen-cloud-dienst", Json.str(hz.get(0), "location") + " " + Json.str(hz.get(0), "server_type") + " " + Json.str(hz.get(0), "labels", "cluster"), "Hetzner server");
                 T.eq(KEY, envOf(Json.str(hz.get(0), "user_data"), "SCW_SECRET_KEY"), "Scaleway key stays for customer clouds");
                 T.eq(Json.str(v, "backup", "bucket"), envOf(Json.str(hz.get(0), "user_data"), "BROKER_BACKUP_BUCKET"), "same backups (still at Scaleway)");
+                String hud = Json.str(hz.get(0), "user_data");
+                T.eq(Aanbieder.ADRESSEN_LOCAL, envOf(hud, "BROKER_ADRES_URL"), "Dienst gebruikt de adressendienst op dezelfde server");
+                T.eq("https://adressen.vanes.nl", envOf(hud, "BROKER_ADRES_PUBLIEK"), "openbaar adres van de adressendienst");
+                T.check(hud.contains("\nadressen.vanes.nl {\n\tencode zstd gzip\n\treverse_proxy 127.0.0.1:4200\n}\n"), "Caddy voor de adressendienst");
+                T.check(hud.contains("\nADRES_ZONE=eigencloud.nl\nADRES_DESEC_TOKEN=desec-centraal\n"), "adressen.env");
+                T.check(hud.contains("    command: [\"node\", \"dist/adressen/main.js\"]\n"), "adressendienst in docker-compose");
+                T.check(hud.length() < 32 * 1024, "user-data past bij Hetzner (32 KiB): " + hud.length());
+                T.eq("9", envOf(hud, "BROKER_VAT_PERCENT"), "btw in dienst.env");
                 v = call(200, "GET", "/api/aanbieder", null);
                 T.eq("hetzner 198.51.100.1 2001:db8:101::1", Json.str(v, "server", "provider") + " " + Json.str(v, "server", "ipv4") + " " + Json.str(v, "server", "ipv6"), "new address");
 
@@ -287,8 +335,8 @@ public class AanbiederTest {
                 T.eq(0, hz.size(), "server removed at Hetzner");
                 v = call(200, "GET", "/api/aanbieder", null);
                 T.eq(true, v.get("removed"), "removed");
-                T.eq("[{\"sub\":\"dienst\",\"type\":\"A\",\"value\":\"\"},{\"sub\":\"dienst\",\"type\":\"AAAA\",\"value\":\"\"}]",
-                        Json.str(Admin.consoleSettings(api.vault.config(), ""), "extra_dns"), "record removed");
+                T.eq("[{\"sub\":\"dienst\",\"type\":\"A\",\"value\":\"\"},{\"sub\":\"dienst\",\"type\":\"AAAA\",\"value\":\"\"},{\"sub\":\"adressen\",\"type\":\"A\",\"value\":\"\"},{\"sub\":\"adressen\",\"type\":\"AAAA\",\"value\":\"\"}]",
+                        Json.str(Admin.consoleSettings(api.vault.config(), ""), "extra_dns"), "records removed (Dienst en adressendienst)");
                 T.eq("{\"reachable\":false,\"server\":false,\"removed\":true}", Json.stringify(call(200, "GET", "/api/aanbieder/status", null)), "status after removal");
 
                 // Een oude kluis (alleen Scaleway): bijgewerkt bij het lezen, oude server weg via de Provider van Scaleway.

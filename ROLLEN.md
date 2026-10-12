@@ -64,8 +64,8 @@ Open-source project (GitHub: renevanes/own-cloud)
 
 - **Dienst** (src/broker): medewerkers met rollen en tweede inlogstap (toestelsleutel, TOTP); beheer-API met rechtencontrole; huisstijl; uitnodigingscodes; hulpvragen en berichten; prijs per extra gebruiker; technische status van clouds (ondertekend, zonder inhoud); verhuizen naar een andere Dienst.
 - **Dienst opzetten vanuit de app**: zelfde aanpak als een cloud (server bij Scaleway, image van ghcr.io, rollende updates, back-up van de database naar eigen opslag).
-- **Lijst van aanbieders**: `aanbieders.json` in de repository (naam, adres van de Dienst, land, contact, sleutel); de app leest hem uit de releases.
-- **Gratis-adressendienst**: kleine centrale dienst (draait bij Rene) die namen in de gedeelde zone uitgeeft aan aanbieders op de lijst, met hun sleutel ondertekend.
+- **Lijst van aanbieders**: `aanbieders.json` in de repository (naam, adres van de Dienst, land, contact, sleutel); de app leest hem van GitHub (met de lijst uit de app als reserve). De beheerders zetten `"standaard": true` op hooguit één regel (nu ESAPE, de Dienst van Rene): de eerste keuze in de app, zolang die Dienst antwoordt.
+- **Gratis-adressendienst**: kleine centrale dienst (draait bij Rene, op de server van zijn Dienst, opgezet en beheerd vanuit de app) die namen in de gedeelde zone uitgeeft aan aanbieders op de lijst, met hun sleutel ondertekend. Diensten vinden hem via `adressen` op de standaardregel van de lijst.
 - **App**: gedeelte *Aanbieder*; kiezen van een aanbieder; huisstijl; hulp, berichten, overstappen.
 - **Cloud** (src/): meerdere gebruikers (nu is er één mailbox en één wachtwoord): eigen mailbox, agenda en foto's per gebruiker, beheerd door de eerste gebruiker; limiet uit de bundel. Dit is het grootste onderdeel.
 

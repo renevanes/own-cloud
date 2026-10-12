@@ -102,7 +102,7 @@ export function changeDomain(c: AdminConfig, domain: string, mode: "own" | "free
 // ───────── Eigen Cloud Dienst ─────────
 
 /** Bij welke aanbieder (dienst) hoort deze kluis: de gekozen aanbieder, anders de standaard van deze versie. */
-export const baseOf = (c?: AdminConfig | null) => (c?.console.dienst?.url || DIENST_URL()).replace(/\/$/, "");
+export const baseOf = (c?: AdminConfig | null) => (c?.console.dienst?.url || defaultDienst()).replace(/\/$/, "");
 
 /** Verzoek aan een Dienst (aanbieder); fouten als Nederlandse melding. Ook voor overstappen (andere basis en sessie). */
 export async function dienstCall(path: string, opts: { method?: string; body?: unknown; token?: string; base?: string } = {}) {
@@ -110,7 +110,7 @@ export async function dienstCall(path: string, opts: { method?: string; body?: u
 }
 
 async function dienst(path: string, opts: { method?: string; body?: unknown; token?: string; base?: string } = {}) {
-  const base = (opts.base || DIENST_URL()).replace(/\/$/, "");
+  const base = (opts.base || defaultDienst()).replace(/\/$/, "");
   if (!base) throw new Error("Kies eerst een aanbieder");
   const r = await fetch(base + path, {
     method: opts.method ?? (opts.body ? "POST" : "GET"),
@@ -383,11 +383,48 @@ export async function scwRevokeMail(c: AdminConfig) {
 
 // ───────── Aanbieders: kiezen, uitnodigingen, huisstijl ─────────
 
-export interface Aanbieder { naam: string; url: string; land?: string; contact?: string; omschrijving?: string }
+export interface Aanbieder {
+  naam: string; url: string; land?: string; contact?: string; omschrijving?: string; sleutel?: string;
+  /** Alleen door de beheerders van de repository gezet, op hooguit één regel: de standaardaanbieder van de app. */
+  standaard?: boolean;
+  /** Op de standaardregel: adres van de centrale adressendienst (zie ADRESSEN.md). */
+  adressen?: string;
+  /** Door de console ingevuld: antwoordt de Dienst nu op GET /v1/info? */
+  bereikbaar?: boolean;
+}
 
 /** De openbare lijst van aanbieders (aanbieders.json in de repository; nieuwe aanbieders komen erbij via GitHub). */
 export const AANBIEDERS_URL = () => process.env.EIGEN_AANBIEDERS_URL || "https://raw.githubusercontent.com/renevanes/own-cloud/main/aanbieders.json";
-let aanbiedersCache: { at: number; list: Aanbieder[] } | null = null;
+let aanbiedersCache: { at: number; from: string; list: Aanbieder[] } | null = null;
+
+/** Hoe lang de console onthoudt of een Dienst antwoordt: bereikbaar een uur (net als de lijst), onbereikbaar 2 minuten. */
+export const BEREIK_OK_MS = 3_600_000, BEREIK_NEE_MS = 120_000, BEREIK_TIMEOUT_MS = 4000;
+const bereikCache = new Map<string, { at: number; ok: boolean }>();
+/** De standaardaanbieder uit de lijst, zolang hij bereikbaar is (bijgewerkt bij elke aanbieders()). */
+let standaardUrl = "";
+
+/** Alleen voor tests: alles opnieuw ophalen. */
+export function resetAanbiedersCache() { aanbiedersCache = null; bereikCache.clear(); standaardUrl = ""; }
+
+/** Antwoordt de Dienst op GET /v1/info (binnen 4 seconden, met een JSON-object)? Onthouden zoals hierboven. */
+export async function dienstBereikbaar(url: string): Promise<boolean> {
+  const hit = bereikCache.get(url);
+  if (hit && Date.now() - hit.at < (hit.ok ? BEREIK_OK_MS : BEREIK_NEE_MS)) return hit.ok;
+  let ok = false;
+  try {
+    const r = await fetch(`${url}/v1/info`, { signal: AbortSignal.timeout(BEREIK_TIMEOUT_MS), headers: { accept: "application/json" } });
+    const j = await json(r);
+    ok = r.ok && !!j && typeof j === "object" && !Array.isArray(j) && !(j as { error?: unknown }).error;
+  } catch { ok = false; }
+  bereikCache.set(url, { at: Date.now(), ok });
+  return ok;
+}
+
+/**
+ * De standaard-Dienst van deze versie: EIGEN_DIENST_URL of het bestand DIENST_URL (gaat voor), anders de regel met
+ * `standaard: true` uit de lijst, maar alleen zolang die bereikbaar is. Leeg = geen standaard.
+ */
+export const defaultDienst = () => DIENST_URL() || standaardUrl;
 
 export function cleanDienstUrl(raw: string) {
   let v = String(raw ?? "").trim();
@@ -400,24 +437,42 @@ export function cleanDienstUrl(raw: string) {
   return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}`;
 }
 
+/**
+ * De lijst voor de app: ongeldige regels overgeslagen; vooraan de standaard van deze versie (DIENST_URL), dan de regel
+ * met `standaard: true` (alleen de eerste telt), dan de rest in volgorde. Elke regel krijgt `bereikbaar`: een Dienst die
+ * (nog) niet antwoordt, toont de app als "Nog niet beschikbaar" en wordt nooit vanzelf gekozen.
+ */
 export async function aanbieders(): Promise<Aanbieder[]> {
   let list: Aanbieder[] = [];
-  if (aanbiedersCache && Date.now() - aanbiedersCache.at < 3600_000) list = aanbiedersCache.list;
+  const from = AANBIEDERS_URL();
+  if (aanbiedersCache && aanbiedersCache.from === from && Date.now() - aanbiedersCache.at < 3600_000) list = aanbiedersCache.list;
   else {
     try {
-      const r = await fetch(AANBIEDERS_URL(), { signal: AbortSignal.timeout(10_000) });
+      const r = await fetch(from, { signal: AbortSignal.timeout(10_000) });
       if (r.ok) list = ((await r.json()) as Aanbieder[]).filter((a) => a && a.naam && a.url);
     } catch { /* geen internet: de meegeleverde lijst */ }
     if (!list.length) {
-      try { list = JSON.parse(readFileSync(new URL("../../aanbieders.json", import.meta.url), "utf8")) as Aanbieder[]; } catch { list = []; }
+      try { list = (JSON.parse(readFileSync(new URL("../../aanbieders.json", import.meta.url), "utf8")) as Aanbieder[]).filter((a) => a && a.naam && a.url); } catch { list = []; }
     }
-    aanbiedersCache = { at: Date.now(), list };
+    aanbiedersCache = { at: Date.now(), from, list };
   }
   const out: Aanbieder[] = [];
-  for (const a of list) { try { out.push({ ...a, url: cleanDienstUrl(a.url) }); } catch { /* ongeldige regel overslaan */ } }
+  let seenStandaard = false;
+  for (const a of list) {
+    try {
+      const x: Aanbieder = { ...a, url: cleanDienstUrl(a.url) };
+      if (x.standaard === true && !seenStandaard) seenStandaard = true;
+      else delete x.standaard;
+      out.push(x);
+    } catch { /* ongeldige regel overslaan */ }
+  }
   const def = DIENST_URL();
   if (def && !out.some((a) => a.url === def)) out.unshift({ naam: "Eigen Cloud Dienst", url: def });
-  return out;
+  const rank = (a: Aanbieder) => (def && a.url === def ? 0 : a.standaard ? 1 : 2);
+  const sorted = out.map((a, i) => ({ a, i })).sort((x, y) => rank(x.a) - rank(y.a) || x.i - y.i).map((x) => x.a);
+  await Promise.all(sorted.map(async (a) => { a.bereikbaar = await dienstBereikbaar(a.url); }));
+  standaardUrl = sorted.find((a) => a.standaard && a.bereikbaar)?.url ?? "";
+  return sorted;
 }
 
 /** Huisstijl van een aanbieder, met het logo als data-URL (zodat de app het zonder extra verzoeken toont). */

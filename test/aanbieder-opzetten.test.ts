@@ -349,11 +349,34 @@ test("aanbieder worden: van bedrijfsgegevens tot een draaiende Dienst, vervangen
     assert.equal(bad.status, 401);
   });
 
+  await t.test("instellingen wijzigen zonder nieuwe server: toepassen", async () => {
+    let v = (await c("GET", "/api/aanbieder")).json;
+    assert.equal(v.wijzigingen, "geen", "net opgezet: alles staat op de server");
+    r = await c("POST", "/api/aanbieder/bedrijf", { ...v.company, vatPercent: "9", enforce: true });
+    assert.equal(r.status, 200, r.text);
+    v = (await c("GET", "/api/aanbieder")).json;
+    assert.equal(v.wijzigingen, "toepassen");
+    assert.deepEqual([v.company.vatPercent, v.company.enforce], ["9", true]);
+    r = await c("POST", "/api/aanbieder/toepassen");
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.restart, false, "deze test-Dienst start zichzelf niet opnieuw");
+    assert.ok(r.json.keys.includes("BROKER_VAT_PERCENT") && r.json.keys.includes("BROKER_ENFORCE") && !r.json.keys.includes("BROKER_SECRET"), r.json.keys.join(","));
+    noSecrets(JSON.stringify(r.json), "toepassen-antwoord");
+    assert.equal((await c("GET", "/api/aanbieder")).json.wijzigingen, "geen");
+    // Bij de volgende start van deze server gelden ze (nieuwer dan zijn dienst.env).
+    const { applyOverride } = await import("../src/broker/instellingen.js");
+    const e: Record<string, string | undefined> = { ...env, BROKER_DATA_DIR: first.cfg.dataDir };
+    assert.ok(applyOverride(e));
+    assert.deepEqual([e.BROKER_VAT_PERCENT, e.BROKER_ENFORCE, e.MOLLIE_API_KEY], ["9", "1", "test_mollie"]);
+  });
+
   await t.test("opnieuw opzetten bij Hetzner: laatste back-up, nieuwe server zet hem terug, oude weg bij Scaleway", async () => {
     const before = (await c("GET", "/api/aanbieder")).json.server;
     r = await c("POST", "/api/aanbieder/server", { provider: "hetzner", region: "fsn1" });
     assert.equal(r.status, 200, r.text);
     assert.equal(r.json.pending, true, "gaat pas in bij opnieuw opzetten");
+    assert.equal((await c("GET", "/api/aanbieder")).json.wijzigingen, "opnieuw", "een andere plek vraagt een nieuwe server");
+    assert.match((await c("POST", "/api/aanbieder/toepassen")).json.error, /nieuwe server/);
     assert.deepEqual(r.json.hosting, { provider: "hetzner", name: "Hetzner Cloud", region: "fsn1", regionLabel: "Falkenstein", city: "Falkenstein", country: "DE", size: "cx23", monthly: 4.51 });
     const owner = first.b.ctx.db.prepare("SELECT email, role FROM staff").all();
     assert.deepEqual(owner, [{ email: "rene@elders.example", role: "eigenaar" }]);
@@ -383,6 +406,8 @@ test("aanbieder worden: van bedrijfsgegevens tot een draaiende Dienst, vervangen
     // Nieuwe server met lege datamap: zet de laatste back-up terug (nog steeds bij Scaleway), met dezelfde sleutel van de aanbieder.
     env = envFromUserData(srv.user_data);
     assert.equal(env.SCW_SECRET_KEY, SCW_KEY, "de Scaleway-sleutel blijft voor de clouds van klanten");
+    assert.equal(env.BROKER_VAT_PERCENT, "9", "toegepaste instellingen staan ook in de nieuwe dienst.env");
+    assert.ok(Number(env.BROKER_ENV_AT) > 0, "dienst.env weet wanneer hij geschreven is");
     const second = await startDienst(path.join(base, "dienst-2"));
     assert.ok(second.restored, "back-up teruggezet");
     assert.equal(second.cfg.providerPublicKey, first.cfg.providerPublicKey, "zelfde sleutel (aanbieders.json blijft kloppen)");

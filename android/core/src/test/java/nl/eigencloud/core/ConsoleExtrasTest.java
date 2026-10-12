@@ -187,6 +187,38 @@ public class ConsoleExtrasTest {
                 T.eq(Json.list(dienst, "https://ander.example"), urls, "invalid entries skipped, default not doubled");
                 T.eq("NL", Json.str(al, "aanbieders", 0, "land"), "extra fields kept");
                 T.eq(null, al.get("gekozen"), "nothing chosen yet");
+                // Standaardaanbieder uit de lijst (zonder vaste standaard in de app): alleen als hij antwoordt.
+                String keepUrl = api.dienstUrl;
+                try {
+                    api.dienstUrl = "";
+                    Extras.resetAanbiedersCache();
+                    Endpoints.AANBIEDERS = control + "/aanbieders-standaard.json";
+                    List<Object> std = Json.listAt(call(200, "GET", "/api/aanbieders", null), "aanbieders");
+                    T.eq(Json.stringify(Json.list(
+                            Json.obj("naam", "Dienst Test", "url", dienst, "land", "NL", "standaard", true, "adressen", "https://adressen.example", "bereikbaar", true),
+                            Json.obj("naam", "Ander", "url", "http://127.0.0.1:1", "bereikbaar", false),
+                            Json.obj("naam", "Ook standaard", "url", "http://127.0.0.1:2", "bereikbaar", false))), Json.stringify(std), "standaard vooraan, alleen de eerste, met bereikbaar");
+                    T.eq(dienst, Extras.defaultBase(""), "bereikbare standaard wordt de standaard");
+                    T.eq(dienst, Extras.baseOf(null, ""), "baseOf valt terug op de standaard uit de lijst");
+                    Extras.resetAanbiedersCache();
+                    Endpoints.AANBIEDERS = control + "/aanbieders-nog-niet.json";
+                    List<Object> nn = Json.listAt(call(200, "GET", "/api/aanbieders", null), "aanbieders");
+                    T.eq(Json.stringify(Json.list(Json.obj("naam", "Nog niet", "url", "http://127.0.0.1:3", "standaard", true, "bereikbaar", false))), Json.stringify(nn), "standaard die niet antwoordt");
+                    T.eq("", Extras.defaultBase(""), "geen standaard zolang hij niet antwoordt");
+                    // Zonder lijst op internet: de meegeleverde (aanbieders.json uit de app)
+                    Extras.resetAanbiedersCache();
+                    Endpoints.AANBIEDERS = "http://127.0.0.1:1/aanbieders.json";
+                    String keepBundled = Extras.bundledAanbieders;
+                    Extras.bundledAanbieders = "[{\"naam\":\"Meegeleverd\",\"url\":\"http://127.0.0.1:4\",\"standaard\":true}]";
+                    try {
+                        T.eq("Meegeleverd", Json.str(call(200, "GET", "/api/aanbieders", null), "aanbieders", 0, "naam"), "meegeleverde lijst");
+                    } finally {
+                        Extras.bundledAanbieders = keepBundled;
+                    }
+                } finally {
+                    api.dienstUrl = keepUrl;
+                    Extras.resetAanbiedersCache();
+                }
             } finally {
                 Endpoints.reset();
             }

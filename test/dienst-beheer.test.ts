@@ -379,7 +379,7 @@ test("Eigen Cloud Dienst: beheer door de aanbieder", { timeout: 90_000 }, async 
     assert.equal(d.technical.kitUsers, 2);
     assert.equal(d.health, null);
     assert.equal(d.billing.bundle.id, "compleet");
-    assert.deepEqual(d.actions, { suspend: true, resume: false, cancel: true, retry: false, cleanup: false });
+    assert.deepEqual(d.actions, { suspend: true, resume: false, cancel: true, retry: false, cleanup: false, adres: false, afboeken: false });
     // Support ziet geen acties en geen abonnement, wel de technische status.
     const ds = await ok("GET", `/v1/admin/orders/${orderA}`, undefined, { staff: support });
     assert.equal(ds.actions, null);
@@ -458,6 +458,18 @@ test("Eigen Cloud Dienst: beheer door de aanbieder", { timeout: 90_000 }, async 
     const ar = await ok("GET", "/v1/admin/arrears", undefined, { staff: fin });
     assert.deepEqual(ar.orders.map((x: any) => [x.id, x.outstanding, x.failedPayments.length]), [[orderB, "24.95", 1]]);
     assert.equal((await ok("GET", "/v1/admin/overview", undefined, { staff: owner })).arrears, 1);
+    // Buiten de app om betaald (overschrijving): afboeken in het beheer, zonder database.
+    assert.equal((await ok("GET", `/v1/admin/orders/${orderB}`, undefined, { staff: beheer })).actions.afboeken, true);
+    assert.equal((await api("POST", `/v1/admin/orders/${orderB}/afboeken`, { note: "x" }, { staff: support })).status, 403);
+    const afb = await ok("POST", `/v1/admin/orders/${orderB}/afboeken`, { note: "Overschrijving 12 okt" }, { staff: fin });
+    assert.equal(afb.settled, 1);
+    assert.equal(afb.order.status, "ready");
+    assert.equal((db.prepare("SELECT settled_by FROM payments WHERE id = 'tr_fail1'").get() as any).settled_by, `hand:${FIN}`);
+    assert.deepEqual((await ok("GET", "/v1/admin/arrears", undefined, { staff: fin })).orders, []);
+    assert.equal((await api("POST", `/v1/admin/orders/${orderB}/afboeken`, {}, { staff: fin })).status, 409, "niets meer open");
+    assert.ok(db.prepare("SELECT 1 FROM audit WHERE action = 'order-afboeken' AND target = ?").get(orderB));
+    // Gratis adres teruggeven kan alleen bij een gratis adres van de adressendienst.
+    assert.equal((await api("POST", `/v1/admin/orders/${orderB}/adres-vrijgeven`, {}, { staff: beheer })).status, 409);
     // Weer in orde (volgende incasso gelukt) voor de rest van de test.
     up.st.mollie.payments.set("tr_ok1", { id: "tr_ok1", status: "paid", sequenceType: "recurring", subscriptionId: o.mollie_subscription_id, customerId: cust.mollie_customer_id, amount: { currency: "EUR", value: "24.95" }, createdAt: new Date().toISOString(), paidAt: new Date().toISOString() });
     await webhook("tr_ok1");
@@ -483,6 +495,20 @@ test("Eigen Cloud Dienst: beheer door de aanbieder", { timeout: 90_000 }, async 
     const all = await ok("GET", "/v1/admin/costs", undefined, { staff: beheer });
     assert.equal(all.orders.length, 2);
     assert.deepEqual(all.totals, { priceExcl: "41.24", cost: "43.00", margin: "-1.76" });
+    // Kosten aanpassen in het beheer (in plaats van bundles.json).
+    assert.equal((await api("PUT", "/v1/admin/costs", { servers: { "DEV1-M": "9" } }, { staff: fin })).status, 403, "financiën mag het aanbod niet wijzigen");
+    assert.match((await api("PUT", "/v1/admin/costs", { servers: { "DEV1-M": "veel" } }, { staff: beheer })).json.error, /bedrag/);
+    let cr = await ok("PUT", "/v1/admin/costs", { servers: { "DEV1-M": "9,00", "GP1-XS": "", "PRO2-XXS": "12.50" }, storageGbMonthly: "0.02" }, { staff: beheer });
+    assert.equal(cr.costs.servers["DEV1-M"], "9.00");
+    assert.equal(cr.costs.servers["GP1-XS"], undefined, "leeg = weg");
+    assert.equal(cr.costs.servers["PRO2-XXS"], "12.50");
+    assert.equal((await ok("GET", "/v1/admin/costs", undefined, { staff: beheer })).totals.cost, "46.00", "marge rekent met de nieuwe kosten");
+    assert.ok(db.prepare("SELECT 1 FROM settings WHERE key = 'costs'").get(), "opgeslagen in de database");
+    cr = await ok("PUT", "/v1/admin/costs", { servers: { "DEV1-M": "8.50", "GP1-XS": "55.00", "PRO2-XXS": null }, storageGbMonthly: "0.015" }, { staff: beheer });
+    assert.equal(cr.costs.servers["PRO2-XXS"], undefined);
+    // De bewaker nu laten kijken: 2 draaiende servers, 4 toegestaan.
+    assert.equal((await api("POST", "/v1/admin/bewaker", {}, { staff: support })).status, 403);
+    assert.deepEqual((await ok("POST", "/v1/admin/bewaker", {}, { staff: beheer })).findings, []);
   });
 
   await t.test("aanbod: prijzen en gebruikers aanpassen; bestaande klanten houden hun prijs; extra gebruikers kopen", async () => {

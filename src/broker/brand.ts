@@ -2,7 +2,7 @@
  * Huisstijl en aanbod van de aanbieder, bewaard in de database (met de omgevingsvariabelen en bundles.json
  * als standaard). Bundels uit het beheer vervangen cfg.bundles, zodat de rest van de dienst niets merkt.
  */
-import { type Bundle, normalizeBundle } from "./config.js";
+import { type Bundle, type CostTable, normalizeBundle } from "./config.js";
 import { type Db, getSetting, setSetting } from "./db.js";
 import type { Ctx } from "./context.js";
 
@@ -98,6 +98,9 @@ export function getLogo(db: Db) {
 
 /** Bij het starten: bundels uit het beheer (als die er zijn) gaan voor bundles.json. */
 export function loadOfferingFromDb(ctx: Ctx) {
+  // Kosten uit het beheer (Kosten → Prijzen die we aannemen) gaan voor bundles.json.
+  const costs = getSetting<unknown>(ctx.db, "costs");
+  if (costs) { try { ctx.cfg.costs = normalizeCosts(costs, ctx.cfg.costs); } catch (e) { console.error(`[dienst] kosten in de database kloppen niet: ${(e as Error).message}`); } }
   const list = getSetting<any[]>(ctx.db, "bundles");
   if (!Array.isArray(list) || !list.length) return;
   try { ctx.cfg.bundles = list.map((b) => normalizeBundle(b, "aanbod in de database")); }
@@ -132,3 +135,31 @@ export function deleteBundle(ctx: Ctx, id: string) {
 export const publicBundle = (b: Bundle) => ({
   id: b.id, title: b.title, description: b.description, monthly: b.monthly, includes: b.includes, extraUserMonthly: b.extraUserMonthly, placement: b.placement,
 });
+
+/**
+ * Geschatte kosten (excl. btw, per maand) per serverformaat en per GB opslag, uit het beheer. Een formaat met een lege
+ * prijs gaat weg (dan geldt de standaard of niets). Bedragen als "4.50" (een komma mag ook).
+ */
+export function normalizeCosts(raw: any, base: CostTable): CostTable {
+  if (!raw || typeof raw !== "object") throw new Error("Geen kosten opgegeven");
+  const money = (v: unknown, what: string) => {
+    const t = String(v ?? "").trim().replace(",", ".");
+    if (!/^\d{1,5}(\.\d{1,4})?$/.test(t)) throw new Error(`${what}: vul een bedrag in zoals 4.50`);
+    return t;
+  };
+  const servers: Record<string, string> = { ...base.servers };
+  for (const [k, v] of Object.entries((raw.servers ?? {}) as Record<string, unknown>)) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$/.test(k)) throw new Error(`Ongeldig serverformaat: ${k}`);
+    if (v === null || String(v).trim() === "") { delete servers[k]; continue; }
+    servers[k] = money(v, k);
+  }
+  const gb = raw.storageGbMonthly === undefined ? base.storageGbMonthly : money(raw.storageGbMonthly, "Opslag per GB");
+  return { servers, storageGbMonthly: gb };
+}
+
+export function saveCosts(ctx: Ctx, raw: unknown) {
+  const c = normalizeCosts(raw, ctx.cfg.costs);
+  setSetting(ctx.db, "costs", c);
+  ctx.cfg.costs = c;
+  return c;
+}

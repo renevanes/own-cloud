@@ -392,6 +392,9 @@ export async function buildConsole() {
   await app.register(fastifyStatic, { root: path.resolve(here, "../../web/fonts"), prefix: "/fonts/", decorateReply: false });
   app.setErrorHandler((err, _req, reply) => reply.code((err as { statusCode?: number }).statusCode ?? 500).send({ error: (err as Error).message }));
 
+  // De lijst van aanbieders (met wie er antwoordt) alvast ophalen, zodat de eerste stap weet of er een aanbieder is.
+  void extras.aanbieders().then((list) => { knownAanbieders = list.filter((a) => a.bereikbaar).length; }).catch(() => {});
+
   app.get("/api/state", async (req) => ({
     vault: vault.exists(),
     unlocked: hasSession(req),
@@ -399,7 +402,7 @@ export async function buildConsole() {
     done: vault.config?.console.done ?? false,
     domain: vault.config?.domain ?? null,
     offers: { stores: storeOffers(), servers: serverOffers(), dns: dnsOffers() },
-    dienst: !!(extras.DIENST_URL() || vault.config?.console.dienst?.url || knownAanbieders > 0),
+    dienst: !!(extras.defaultDienst() || vault.config?.console.dienst?.url || knownAanbieders > 0),
     aanbieder: vault.config?.console.dienst?.url ?? null,
     domainMode: vault.config?.console.domainMode ?? null,
     scaleway: { signup: extras.SCW_SIGNUP_URL, keys: extras.SCW_KEYS_URL },
@@ -417,7 +420,7 @@ export async function buildConsole() {
   // Aanbieders: de openbare lijst, hun huisstijl en uitnodigingscodes.
   app.get("/api/aanbieders", async () => {
     const list = await extras.aanbieders();
-    knownAanbieders = list.length;
+    knownAanbieders = list.filter((a) => a.bereikbaar).length;
     return { aanbieders: list, gekozen: vault.config?.console.dienst?.url ?? null };
   });
   app.get<{ Querystring: { url?: string } }>("/api/aanbieder/brand", async (req, reply) => {
@@ -471,7 +474,7 @@ export async function buildConsole() {
   // Herstellen via de Eigen Cloud Dienst: inloggen met een code; opslag en sleutels komen uit je pakket.
   app.post<{ Body: { email: string; url?: string } }>("/api/recover/dienst/login", async (req, reply) => {
     try {
-      const base = req.body?.url ? extras.cleanDienstUrl(req.body.url) : extras.DIENST_URL();
+      const base = req.body?.url ? extras.cleanDienstUrl(req.body.url) : extras.defaultDienst();
       recoverDienst = { email: await extras.dienstStartLogin(req.body?.email, base), base };
       return { ok: true };
     } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
@@ -823,6 +826,12 @@ export async function buildConsole() {
     });
     s.post<{ Body: { url?: string } }>("/api/aanbieder/adres", async (req, reply) => {
       try { const r = aanbieder.saveAdres(cfg(), req.body ?? {}); save(); return r; } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: { aan?: boolean; zone?: string; desecToken?: string; host?: string } }>("/api/aanbieder/adressen", async (req, reply) => {
+      try { const r = await aanbieder.saveAdressen(cfg(), req.body ?? {}); save(); return r; } catch (e) { return aFail(reply, e); }
+    });
+    s.post("/api/aanbieder/toepassen", async (_req, reply) => {
+      try { return await aanbieder.toepassen(cfg(), aDeps()); } catch (e) { return aFail(reply, e); }
     });
     s.post<{ Body: { provider?: string; region?: string; fields?: Record<string, unknown> } }>("/api/aanbieder/server", async (req, reply) => {
       try { const r = await aanbieder.saveServer(cfg(), req.body ?? {}, aDeps()); save(); return r; } catch (e) { return aFail(reply, e); }

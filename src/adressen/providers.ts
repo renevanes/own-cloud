@@ -1,5 +1,6 @@
 /** De lijst van aanbieders (aanbieders.json): wie mag namen aanvragen, met welke publieke sleutel. */
 import type crypto from "node:crypto";
+import nodeCrypto from "node:crypto";
 import fs from "node:fs";
 import { normDienstUrl, parsePublicKey } from "./sign.js";
 
@@ -9,7 +10,27 @@ export interface KnownProvider { naam: string; url: string; key: crypto.KeyObjec
 export class ProviderList {
   private cache: { at: number; map: Map<string, KnownProvider> } | null = null;
   private loading: Promise<Map<string, KnownProvider>> | null = null;
-  constructor(private source: string, private cacheMs: number) {}
+  /** De Dienst op dezelfde server (zie AdresConfig.lokaal); null = geen. */
+  private local: { url: string; keyFile: string; key: crypto.KeyObject | null } | null;
+  constructor(private source: string, private cacheMs: number, local?: { dienst: string; keyFile: string } | null) {
+    this.local = local ? { url: normDienstUrl(local.dienst), keyFile: local.keyFile, key: null } : null;
+  }
+
+  /**
+   * De Dienst op dezelfde server, met de publieke sleutel uit zijn eigen aanbieder.key (die maakt hij bij de eerste
+   * start; tot dan null). Zo kan hij gratis adressen aanvragen voordat zijn regel op de lijst staat.
+   */
+  localProvider(): KnownProvider | null {
+    const l = this.local;
+    if (!l) return null;
+    if (!l.key) {
+      try { l.key = nodeCrypto.createPublicKey(nodeCrypto.createPrivateKey(fs.readFileSync(l.keyFile, "utf8"))); }
+      catch { return null; }
+    }
+    return { naam: "Deze server", url: l.url, key: l.key };
+  }
+
+  isLocal(url: string) { return !!this.local && normDienstUrl(url) === this.local.url; }
 
   private async fetchRaw(): Promise<Aanbieder[]> {
     let raw: unknown;
@@ -51,6 +72,7 @@ export class ProviderList {
   /** Aanbieder met dit adres; staat hij er niet in, dan wordt de lijst (hooguit eens per minuut) opnieuw opgehaald. */
   async lookup(url: string): Promise<KnownProvider | null> {
     const k = normDienstUrl(url);
+    if (this.isLocal(k)) { const p = this.localProvider(); if (p) return p; }
     const hit = (await this.all()).get(k);
     if (hit) return hit;
     if (this.cache && Date.now() - this.cache.at > 60_000) return (await this.refresh()).get(k) ?? null;

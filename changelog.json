@@ -1,5 +1,14 @@
 [
   {
+    "version": "1.13",
+    "date": "2026-10-12",
+    "changes": [
+      "ESAPE staat standaard in de app als aanbieder, zodra zijn dienst bereikbaar is; aanbieders die nog niet bereikbaar zijn zie je als 'Nog niet beschikbaar'",
+      "Aanbieders: de gratis-adressendienst draait desgewenst mee op de server van je Dienst, in te stellen vanuit de app",
+      "Aanbieders: wijzigingen (sleutels, bedrijfsgegevens, btw) toepassen zonder nieuwe server, en meer beheer in de app: afboeken, kosten, adressen"
+    ]
+  },
+  {
     "version": "1.12",
     "date": "2026-10-12",
     "changes": [

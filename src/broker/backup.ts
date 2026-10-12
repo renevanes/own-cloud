@@ -42,9 +42,13 @@ export function backupTime(key: string) {
   return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : NaN;
 }
 
-/** Eén back-up maken en wegschrijven. */
-export async function makeBackup(db: Database.Database, dataDir: string, store: ObjectStore, key: Buffer, now = Date.now()) {
+/**
+ * Eén back-up maken en wegschrijven. `adressenDb`: de database van de adressendienst op dezelfde server
+ * (BROKER_BACKUP_ADRESSEN); die gaat als "adressen.sqlite" mee, ook via de online back-up van SQLite.
+ */
+export async function makeBackup(db: Database.Database, dataDir: string, store: ObjectStore, key: Buffer, now = Date.now(), adressenDb: string | null = null) {
   const tmp = path.join(dataDir, `.backup-${crypto.randomBytes(4).toString("hex")}.sqlite`);
+  const tmpA = `${tmp}.adressen`;
   try {
     await db.backup(tmp);
     const files: Record<string, string> = { "dienst.sqlite": fs.readFileSync(tmp).toString("base64") };
@@ -52,12 +56,19 @@ export async function makeBackup(db: Database.Database, dataDir: string, store: 
       const p = path.join(dataDir, f);
       if (fs.existsSync(p)) files[f] = fs.readFileSync(p).toString("base64");
     }
+    if (adressenDb && fs.existsSync(adressenDb)) {
+      const { default: Sqlite } = await import("better-sqlite3");
+      const adb = new Sqlite(adressenDb, { fileMustExist: true });
+      try { await adb.backup(tmpA); } finally { adb.close(); }
+      files["adressen.sqlite"] = fs.readFileSync(tmpA).toString("base64");
+    }
     const packed = zlib.gzipSync(Buffer.from(JSON.stringify({ v: 1, at: now, files })));
     const name = `${PREFIX}${stamp(now)}-${crypto.randomBytes(2).toString("hex")}.enc`;
     await store.put(name, await encryptBuffer(key, packed));
     return { name, at: now };
   } finally {
     fs.rmSync(tmp, { force: true });
+    fs.rmSync(tmpA, { force: true });
   }
 }
 
@@ -67,19 +78,26 @@ export async function latestBackup(store: ObjectStore): Promise<{ key: string; a
   return list.at(-1) ?? null;
 }
 
-/** De nieuwste back-up in een (lege) datamap zetten. */
-export async function restoreLatest(store: ObjectStore, key: Buffer, dataDir: string) {
+/**
+ * De nieuwste back-up in een (lege) datamap zetten; "adressen.sqlite" naar `adressenDb` (als die er is). dienst.sqlite
+ * komt als laatste: de adressendienst op dezelfde server wacht daarop (ADRES_WACHT_OP) voordat hij start.
+ */
+export async function restoreLatest(store: ObjectStore, key: Buffer, dataDir: string, adressenDb: string | null = null) {
   const last = await latestBackup(store);
   if (!last) return null;
   const buf = await store.getBuffer(last.key);
   if (!buf) return null;
   const pack = JSON.parse(zlib.gunzipSync(await decryptBuffer(key, buf)).toString("utf8")) as { v: number; at: number; files: Record<string, string> };
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  for (const [name, b64] of Object.entries(pack.files)) {
-    if (name !== "dienst.sqlite" && !EXTRA_FILES.includes(name)) continue;
-    const tmp = path.join(dataDir, `${name}.herstel`);
-    fs.writeFileSync(tmp, Buffer.from(b64, "base64"), { mode: 0o600 });
-    fs.renameSync(tmp, path.join(dataDir, name));
+  const target = (name: string) => (name === "dienst.sqlite" || EXTRA_FILES.includes(name) ? path.join(dataDir, name) : name === "adressen.sqlite" && adressenDb ? adressenDb : null);
+  const names = Object.keys(pack.files).sort((a, b) => Number(a === "dienst.sqlite") - Number(b === "dienst.sqlite"));
+  for (const name of names) {
+    const to = target(name);
+    if (!to) continue;
+    fs.mkdirSync(path.dirname(to), { recursive: true, mode: 0o700 });
+    const tmp = `${to}.herstel`;
+    fs.writeFileSync(tmp, Buffer.from(pack.files[name], "base64"), { mode: 0o600 });
+    fs.renameSync(tmp, to);
   }
   return { name: last.key, at: pack.at };
 }
@@ -107,7 +125,7 @@ export async function restoreIfEmpty(env: NodeJS.ProcessEnv) {
   if (fs.existsSync(path.join(dataDir, "dienst.sqlite"))) return null;
   const secret = secretOf(env);
   if (!secret) throw new Error("Back-up terugzetten kan alleen met BROKER_SECRET");
-  return restoreLatest(backupStore(target), backupKey(secret), dataDir);
+  return restoreLatest(backupStore(target), backupKey(secret), dataDir, env.BROKER_BACKUP_ADRESSEN || null);
 }
 
 export function secretOf(env: NodeJS.ProcessEnv): Buffer | null {
@@ -127,7 +145,7 @@ export class DienstBackup {
   private readonly store: ObjectStore;
   private readonly key: Buffer;
 
-  constructor(target: BackupTarget, secret: Buffer, private db: Database.Database, private dataDir: string, private everyMs: number) {
+  constructor(target: BackupTarget, secret: Buffer, private db: Database.Database, private dataDir: string, private everyMs: number, private adressenDb: string | null = null) {
     this.store = backupStore(target);
     this.key = backupKey(secret);
   }
@@ -151,7 +169,7 @@ export class DienstBackup {
     if (this.running) await this.running.catch(() => {});
     const p = (async () => {
       try {
-        const r = await makeBackup(this.db, this.dataDir, this.store, this.key);
+        const r = await makeBackup(this.db, this.dataDir, this.store, this.key, Date.now(), this.adressenDb);
         this.lastBackupAt = r.at;
         this.failing = false;
         const old = toPrune((await this.store.list(PREFIX)).map((o) => o.key));

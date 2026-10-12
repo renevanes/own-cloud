@@ -49,6 +49,8 @@ const AUDIT = {
   "invite-create": "Uitnodiging gemaakt", "invite-revoke": "Uitnodiging ingetrokken",
   "ticket-reply": "Hulpvraag beantwoord", "ticket-close": "Hulpvraag gesloten", "ticket-reopen": "Hulpvraag heropend",
   "announcement-create": "Bericht geplaatst", "announcement-end": "Bericht beëindigd",
+  "order-adres": "Gratis adres teruggegeven", "order-afboeken": "Achterstand afgeboekt", bewaker: "Bewaker gedraaid", "costs-change": "Kosten gewijzigd",
+  "adres-vrijgeven": "Gratis adres vrijgegeven (adressendienst)",
 };
 
 // ───────── Sessie en API ─────────
@@ -302,11 +304,12 @@ const PAGES = [
   { id: "medewerkers", label: "Medewerkers", perm: "staff" },
   { id: "logboek", label: "Logboek", perm: "audit" },
   { id: "lijst", label: "Op de lijst", perm: "brand" },
+  { id: "adressen", label: "Adressendienst", perm: "adressen", when: () => !!me?.adressendienst },
 ];
 let counts = {};
 function renderNav(current) {
   const parent = { klant: "klanten", hulpvraag: "hulpvragen" }[current] ?? current;
-  $("#nav").innerHTML = PAGES.filter((p) => can(p.perm)).map((p) =>
+  $("#nav").innerHTML = PAGES.filter((p) => can(p.perm) && (!p.when || p.when())).map((p) =>
     `<a href="#/${p.id}"${p.id === parent ? ' aria-current="page"' : ""}>${esc(p.label)}${p.count && counts[p.count] ? `<span class="count">${counts[p.count]}</span>` : ""}</a>`).join("");
 }
 
@@ -324,7 +327,7 @@ window.addEventListener("hashchange", () => { if (me) route(); });
 
 async function route() {
   const [, page = "overzicht", arg] = location.hash.replace(/^#/, "").split("?")[0].split("/");
-  const known = { overzicht, klanten, klant, hulpvragen, hulpvraag, berichten, geld, kosten, aanbod, uitnodigingen, huisstijl, medewerkers, logboek, account, lijst };
+  const known = { overzicht, klanten, klant, hulpvragen, hulpvraag, berichten, geld, kosten, aanbod, uitnodigingen, huisstijl, medewerkers, logboek, account, lijst, adressen };
   const fn = known[page] ?? overzicht;
   renderNav(page);
   loading();
@@ -400,6 +403,7 @@ async function klant(id) {
       a.retry && `<button class="btn primary" data-act="retry">Opnieuw proberen</button>`,
       a.cancel && `<button class="btn danger" data-act="cancel">Opzeggen</button>`,
       a.cleanup && `<button class="btn danger" data-act="cleanup">Opruimen…</button>`,
+      a.adres && `<button class="btn danger" data-act="adres">Gratis adres teruggeven…</button>`,
     ].filter(Boolean);
     if (btns.length) html += `<div class="actions">${btns.join("")}</div>`;
   }
@@ -437,7 +441,7 @@ async function klant(id) {
 
   if (d.billing && !d.billing.error) {
     const b = d.billing;
-    html += `<h2>Betalingen</h2>${b.outstanding ? `<div class="note warn">Openstaand: ${euro(b.outstanding)}</div>` : ""}
+    html += `<h2>Betalingen</h2>${b.outstanding ? `<div class="note warn">Openstaand: ${euro(b.outstanding)}${can("money") ? ` <button class="btn small" id="afboeken">Al betaald? Afboeken…</button>` : ""}</div>` : ""}
       <p class="muted">${b.mandate ? `Betaalmethode: ${esc(b.mandate.label)}. ` : ""}${b.nextPaymentDate ? `Volgende incasso: ${dateStr(b.nextPaymentDate)}.` : ""}</p>
       <ul class="list">${b.payments.map((p) => `<li><div class="item"><span class="title">${euro(p.amount)} · ${esc(PAY_STATUS[p.status] ?? p.status)}</span><span class="sub">${dateStr(p.date)} · ${esc(p.description)}</span>
         <span class="end">${p.invoiceId && can("money") ? `<button class="btn small" data-invoice="${esc(p.invoiceId)}">Factuur</button>` : ""}${p.status === "paid" && can("refund") ? `<button class="btn small" data-refund="${esc(p.id)}" data-amount="${esc(p.amount.value)}">Terugbetalen</button>` : ""}</span></div></li>`).join("") || `<li class="empty">Nog geen betalingen.</li>`}</ul>`;
@@ -457,12 +461,20 @@ async function klant(id) {
   $$("[data-act]").forEach((btn) => btn.onclick = async () => {
     const act = btn.dataset.act;
     if (act === "cleanup") return cleanup(o, btn);
+    if (act === "adres") return releaseAdres(o, btn);
     const [title, text, yes, danger] = ACT[act];
     if (!(await confirmDlg(title, text, yes, danger))) return;
     await busy(btn, async () => { await api(`/v1/admin/orders/${o.id}/${act}`, { body: {} }); toast("Gedaan"); rerender(); });
   });
   $$("[data-invoice]").forEach((btn) => btn.onclick = () => showInvoice(btn.dataset.invoice, btn));
   $$("[data-refund]").forEach((btn) => btn.onclick = () => refund(btn.dataset.refund, btn.dataset.amount, btn));
+  const af = $("#afboeken");
+  if (af) af.onclick = async () => {
+    const v = await formDlg("Achterstand afboeken?", `Heeft ${o.domain} de mislukte incasso's buiten de app om betaald (bijvoorbeeld per overschrijving)? Dan boek je ze hier af en staat de klant weer op "klaar". Er komt geen factuur; die maak je zelf.`,
+      `<label>Notitie <small>(bijv. datum en kenmerk van de overschrijving)</small><input name="note" maxlength="200"></label>`, "Afboeken");
+    if (!v) return;
+    await busy(af, async () => { const r = await api(`/v1/admin/orders/${o.id}/afboeken`, { body: { note: v.note } }); toast(`${r.settled} incasso${r.settled === 1 ? "" : "'s"} afgeboekt`); rerender(); });
+  };
   const sv = $("#servers");
   if (sv) sv.onclick = () => busy(sv, async () => {
     const s = await api(`/v1/admin/orders/${o.id}/servers`);
@@ -478,6 +490,13 @@ async function cleanup(o, btn) {
   const text = `Dit gebeurt:\n• ${plan.result.plan.join("\n• ")}\n\nDaarna zelf doen:\n• ${plan.result.manual.join("\n• ")}`;
   if (!(await confirmDlg(`${o.domain} opruimen?`, text, "Opruimen", true))) return;
   await busy(btn, async () => { await api(`/v1/admin/orders/${o.id}/cleanup`, { body: { sure: true } }); toast("Opgeruimd"); rerender(); });
+}
+
+async function releaseAdres(o, btn) {
+  const plan = await busy(btn, () => api(`/v1/admin/orders/${o.id}/adres-vrijgeven`, { body: {} }));
+  if (!plan) return;
+  if (!(await confirmDlg(`${o.domain} teruggeven?`, `Dit gebeurt:\n• ${plan.result.plan.join("\n• ")}\n\nDe klant kan het adres daarna niet meer meenemen naar een andere aanbieder.`, "Teruggeven", true))) return;
+  await busy(btn, async () => { const r = await api(`/v1/admin/orders/${o.id}/adres-vrijgeven`, { body: { sure: true } }); toast(r.result.done.join(" ")); rerender(); });
 }
 
 async function showInvoice(id, btn) {
@@ -623,8 +642,37 @@ async function kosten() {
     <div class="table-wrap"><table class="data"><thead><tr><th>Klant</th><th>Bundel</th><th class="num">Prijs excl.</th><th class="num">Kosten</th><th class="num">Marge</th></tr></thead><tbody>
     ${r.orders.map((o) => `<tr><td><a class="link" href="#/klant/${esc(o.id)}">${esc(o.domain)}</a></td><td>${esc(o.bundle)}</td><td class="num">${euro(o.price.excl)}</td><td class="num">${o.cost ? euro(o.cost.total) : "?"}</td><td class="num ${Number(o.margin) < 0 ? "neg" : ""}">${euro(o.margin)}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">Nog geen actieve klanten.</td></tr>`}
     </tbody></table></div>
-    <h2>Prijzen die we aannemen</h2><p class="hint">Aan te passen in bundles.json (onderdeel "costs"), zie BROKER.md.</p>
-    <dl class="facts">${Object.entries(r.table.servers).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${euro(v)} per maand</dd>`).join("")}<dt>Opslag</dt><dd>€ ${esc(String(r.table.storageGbMonthly).replace(".", ","))} per GB per maand (per kopie)</dd></dl>`;
+    <h2>Prijzen die we aannemen</h2><p class="hint">Wat je zelf betaalt bij Scaleway, excl. btw, per maand. Vergelijk ze met je eigen factuur; de marge rekent hiermee.</p>
+    ${can("offering") ? `<form class="panel fields" id="cf">
+      <div class="table-wrap"><table class="data"><thead><tr><th>Serverformaat</th><th class="num">€ per maand</th></tr></thead><tbody>
+      ${Object.entries(r.table.servers).map(([k, v]) => `<tr><td class="mono">${esc(k)}</td><td class="num"><input name="s:${esc(k)}" value="${esc(v)}" inputmode="decimal" style="max-width:8em"></td></tr>`).join("")}
+      <tr><td><input name="newSize" placeholder="Ander formaat, bijv. PRO2-XXS" style="max-width:14em"></td><td class="num"><input name="newPrice" inputmode="decimal" style="max-width:8em"></td></tr>
+      </tbody></table></div>
+      <label>Opslag (€ per GB per maand, per kopie)<input name="gb" value="${esc(r.table.storageGbMonthly)}" inputmode="decimal" style="max-width:8em"></label>
+      <p class="hint">Een prijs leegmaken haalt het formaat weg.</p>
+      <div class="row"><button class="btn primary">Opslaan</button></div><p class="msg"></p></form>`
+    : `<dl class="facts">${Object.entries(r.table.servers).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${euro(v)} per maand</dd>`).join("")}<dt>Opslag</dt><dd>€ ${esc(String(r.table.storageGbMonthly).replace(".", ","))} per GB per maand (per kopie)</dd></dl>`}
+    ${can("customers.act") ? `<h2>Bewaker</h2><p class="hint">Elk uur kijkt de Dienst of een klant meer servers draait dan zijn bundel toestaat (plus één reserve). Je kunt dat ook nu laten doen.</p>
+      <div class="actions"><button class="btn" id="guard">Nu controleren</button></div><div id="guardOut"></div>` : ""}`;
+  const cf = $("#cf");
+  if (cf) cf.onsubmit = async (e) => {
+    e.preventDefault();
+    const v = formObj(cf);
+    const servers = {};
+    for (const [k, x] of Object.entries(v)) if (k.startsWith("s:")) servers[k.slice(2)] = x.trim() ? x.trim().replace(",", ".") : null;
+    if (v.newSize.trim()) servers[v.newSize.trim()] = v.newPrice.trim().replace(",", ".");
+    await busy(cf.querySelector("button.primary"), async () => {
+      try { await api("/v1/admin/costs", { method: "PUT", body: { servers, storageGbMonthly: v.gb.trim().replace(",", ".") } }); toast("Opgeslagen"); rerender(); }
+      catch (err) { setMsg(cf.querySelector(".msg"), err.message); }
+    });
+  };
+  const g = $("#guard");
+  if (g) g.onclick = () => busy(g, async () => {
+    const r2 = await api("/v1/admin/bewaker", { body: {} });
+    $("#guardOut").innerHTML = r2.findings.length
+      ? `<ul class="list">${r2.findings.map((f) => `<li><a href="#/klant/${esc(f.orderId)}"><span class="title">${esc(f.domain)}</span><span class="sub">${f.running} servers, ${f.allowed} toegestaan${f.poweredOff.length ? ` · ${f.poweredOff.length} uitgezet` : ""}</span></a></li>`).join("")}</ul>`
+      : `<p class="note">Geen klant draait te veel servers.</p>`;
+  });
 }
 
 // ───────── Aanbod ─────────
@@ -849,20 +897,68 @@ start();
 
 async function lijst() {
   const r = await api("/v1/admin/lijst");
-  const json = JSON.stringify(r.entry, null, 2);
+  const entry = { ...r.entry };
+  const show = () => JSON.stringify(entry, null, 2);
+  const full = () => {
+    if (!r.nieuweLijst) return null;
+    const list = JSON.parse(r.nieuweLijst);
+    const i = list.findIndex((a) => String(a.url ?? "").replace(/\/+$/, "").toLowerCase() === String(entry.url).toLowerCase());
+    if (i >= 0) list[i] = entry; else list.push(entry);
+    return `${JSON.stringify(list, null, 2)}\n`;
+  };
   root.innerHTML = `<h1>Op de lijst van aanbieders</h1>
     <p class="lead">In de app kiezen nieuwe klanten een aanbieder uit een openbare lijst. Die lijst staat in het open-sourceproject op GitHub; je zet jezelf erop met een voorstel dat de beheerders van het project goedkeuren.</p>
-    ${r.opLijst ? `<p class="note">✓ Je staat op de lijst.</p>` : ""}
+    ${r.opLijst ? (r.actueel ? `<p class="note">✓ Je staat op de lijst, en je regel klopt.</p>` : `<p class="note warn">Je staat op de lijst, maar je regel is niet meer actueel${r.sleutelKlopt ? "" : " (de sleutel klopt niet: gratis adressen werken dan niet)"}. Werk hem bij zoals hieronder.</p>`) : ""}
+    <form class="panel fields" id="lf"><div class="row"><label>Land<input name="land" value="${esc(entry.land ?? "NL")}" maxlength="2" style="max-width:5em"></label>
+      <label>Omschrijving <small>(één zin, gewone taal)</small><input name="omschrijving" value="${esc(entry.omschrijving ?? "")}" maxlength="140"></label></div>
+      <p class="hint">Naam en contact komen uit je huisstijl.${entry.adressen ? ` Op deze server draait de gratis-adressendienst (${esc(entry.adressen)}); andere Diensten vinden hem via "adressen" op de standaardregel.` : ""}${entry.standaard ? " Deze regel is de standaard van de app (alleen de beheerders van het project zetten dat)." : ""}</p></form>
     <ol class="steps">
-      <li>Controleer de regel hieronder en vul <b>omschrijving</b> en <b>land</b> aan. Naam en contact komen uit je huisstijl.</li>
-      <li>Kopieer de regel en open het bestand op GitHub (je hebt een gratis GitHub-account nodig).</li>
-      <li>Zet de regel tussen de blokhaken, met een komma ertussen als er al aanbieders staan, en kies <i>Propose changes</i>. Daarmee maak je een voorstel; je hoeft niets te installeren.</li>
+      <li>Kopieer ${r.nieuweLijst ? "de hele nieuwe lijst (met jouw regel erin)" : "je regel"}.</li>
+      <li>Open het bestand op GitHub (je hebt een gratis GitHub-account nodig), kies het potlood, ${r.nieuweLijst ? "selecteer alles en plak de nieuwe lijst eroverheen" : "zet de regel tussen de blokhaken (met een komma ertussen als er al aanbieders staan)"}.</li>
+      <li>Kies <i>Propose changes</i>. Daarmee maak je een voorstel; je hoeft niets te installeren.</li>
     </ol>
-    <pre class="code" id="entry">${esc(json)}</pre>
-    <p><button class="btn" id="copy">Regel kopiëren</button> <a class="btn primary" href="${esc(r.editUrl)}" target="_blank" rel="noopener">aanbieders.json openen op GitHub</a></p>
-    <p class="muted"><small>De sleutel hoort bij deze dienst; daarmee herkent de gedeelde adressendienst je, zodat je klanten een gratis adres kunnen nemen en meenemen als ze overstappen. Deel nooit het bestand aanbieder.key zelf.</small></p>`;
-  $("#copy").onclick = async () => {
-    try { await navigator.clipboard.writeText(json); toast("Gekopieerd"); }
+    <pre class="code" id="entry">${esc(show())}</pre>
+    <p>${r.nieuweLijst ? `<button class="btn primary" id="copyAll">Hele lijst kopiëren</button> ` : ""}<button class="btn" id="copy">Regel kopiëren</button> <a class="btn" href="${esc(r.editUrl)}" target="_blank" rel="noopener">aanbieders.json openen op GitHub</a></p>
+    <p class="muted"><small>De sleutel hoort bij deze dienst; daarmee herkent de gedeelde adressendienst je, zodat je klanten een gratis adres kunnen nemen en meenemen als ze overstappen. Deel nooit het bestand aanbieder.key zelf.${r.adresUrl ? ` Gratis adressen komen nu van ${esc(r.adresUrl)}.` : ""}</small></p>`;
+  $("#lf").oninput = () => {
+    const v = formObj($("#lf"));
+    entry.land = v.land.trim().toUpperCase();
+    entry.omschrijving = v.omschrijving.trim();
+    $("#entry").textContent = show();
+  };
+  const copy = async (text) => {
+    try { await navigator.clipboard.writeText(text); toast("Gekopieerd"); }
     catch { const sel = getSelection(); const range = document.createRange(); range.selectNodeContents($("#entry")); sel.removeAllRanges(); sel.addRange(range); toast("Geselecteerd: kopieer met je toetsenbord"); }
   };
+  $("#copy").onclick = () => copy(show());
+  const ca = $("#copyAll");
+  if (ca) ca.onclick = () => copy(full());
+}
+
+// ───────── Adressendienst op deze server ─────────
+
+const NAAM_STATUS = { actief: "In gebruik", bezig: "Wordt aangemaakt", vrijgegeven: "Vrijgegeven" };
+async function adressen() {
+  const r = await api("/v1/admin/adressendienst");
+  const st = r.status;
+  const ab = r.aanbieders;
+  root.innerHTML = `<h1>Gratis-adressendienst</h1>
+    <p class="lead">Deze server geeft gratis adressen (naam.${esc(st.zone)}) uit aan alle aanbieders op de lijst. Klanten houden zo hun adres als ze overstappen. Hij draait op ${esc(r.publicUrl)}.</p>
+    <div class="cards"><div class="card ${st.zoneOk === false ? "bad" : ""}"><span class="muted">Gedeelde zone</span><span class="big">${esc(st.zone)}</span><small class="muted">${st.zoneOk === true ? "staat bij deSEC" : st.zoneOk === false ? "niet gevonden bij deSEC" : "deSEC niet bereikbaar"}</small></div>
+      <div class="card"><span class="muted">In gebruik</span><span class="big">${st.namen.actief}</span></div>
+      <div class="card"><span class="muted">Vrijgegeven</span><span class="big">${st.namen.vrijgegeven}</span></div></div>
+    <h2>Aanbieders</h2>${ab.error ? errorBox(ab.error) : `<ul class="list">${ab.aanbieders.map((a) => `<li><div class="item"><span class="title">${esc(a.naam)}</span><span class="sub">${esc(a.url)}</span><span class="end"><span class="chip ${a.sleutel ? "" : "warn"}">${a.sleutel ? "sleutel klopt" : "geen geldige sleutel"}</span> <small class="muted">${a.namen} adres${a.namen === 1 ? "" : "sen"}</small></span></div></li>`).join("") || `<li class="empty">Nog niemand op de lijst.</li>`}</ul>`}
+    <h2>Adressen</h2><ul class="list">${r.namen.map((n) => `<li><div class="item"><span class="title">${esc(n.naam)}</span><span class="sub">${esc(NAAM_STATUS[n.status] ?? n.status)}${n.status === "vrijgegeven" ? ` · weer vrij vanaf ${dateStr(new Date(n.vrijVanaf).toISOString().slice(0, 10))}` : ` · ${esc(n.dienst ?? "")}${n.ref ? ` (${esc(n.ref)})` : ""} · sinds ${dt(n.createdAt)}`}</span>
+      <span class="end"><button class="btn small" data-log="${esc(n.naam)}">Logboek</button>${n.status !== "vrijgegeven" ? ` <button class="btn small danger" data-free="${esc(n.naam)}">Vrijgeven…</button>` : ""}</span></div></li>`).join("") || `<li class="empty">Nog geen adressen uitgegeven.</li>`}</ul>
+    <h2>Logboek</h2><div id="alog"><button class="btn" data-log="">Laatste gebeurtenissen</button></div>`;
+  $$("[data-log]").forEach((b) => b.onclick = () => busy(b, async () => {
+    const l = await api(`/v1/admin/adressendienst/logboek${b.dataset.log ? `?naam=${encodeURIComponent(b.dataset.log)}` : ""}`);
+    $("#alog").innerHTML = `<ul class="events">${l.logboek.map((e) => `<li><time>${dt(e.at)}</time>${esc(e.actie)} ${esc(e.naam ?? "")} <small class="muted">${esc(e.dienst ?? "")}</small>${e.detail ? ` <code>${esc(e.detail.slice(0, 200))}</code>` : ""}</li>`).join("") || `<li class="muted">Nog niets.</li>`}</ul>`;
+    $("#alog").scrollIntoView({ behavior: "smooth" });
+  }));
+  $$("[data-free]").forEach((b) => b.onclick = async () => {
+    const naam = b.dataset.free;
+    if (!(await confirmDlg(`${naam} vrijgeven?`, "Het token van de aanbieder wordt ingetrokken, de verwijzing en de zone (met alle records van de klant) gaan weg. De naam is daarna 30 dagen niet opnieuw uit te geven. Doe dit alleen als de aanbieder het zelf niet meer kan.", "Vrijgeven", true))) return;
+    await busy(b, async () => { const x = await api(`/v1/admin/adressendienst/namen/${encodeURIComponent(naam)}/vrijgeven`, { body: { sure: true } }); toast(`${x.naam} vrijgegeven`); rerender(); });
+  });
 }

@@ -79,6 +79,8 @@ def copyWeb = tasks.register("copyWebAssets", Sync) {
     from("../../web/shared") { into "shared" }
     from("../../web/fonts") { into "fonts" }
     from("../../changelog.json")
+    // De lijst van aanbieders zoals bij deze versie (als de app de lijst op GitHub niet kan ophalen).
+    from("../../aanbieders.json")
     from("src/main/www")
 }
 preBuild.dependsOn copyWeb

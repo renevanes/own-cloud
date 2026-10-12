@@ -66,8 +66,16 @@ verder waar het was. Een gratis adres dat alleen bij je oude aanbieder hoort (`B
 **Zelf aanbieder worden?** Op het overzicht van de console staat **Aanbieder worden**: vul je bedrijfsgegevens in,
 koppel je accounts (Scaleway, Mollie, deSEC, mail) en de console zet je eigen Eigen Cloud Dienst op een server bij
 de aanbieder en in de regio die je kiest (Scaleway, Hetzner, UpCloud, Exoscale of OVHcloud; de back-ups mogen elders),
-op `dienst.<jouw domein>`, met elk uur een versleutelde back-up en automatische updates. Zie
-[BROKER.md](BROKER.md#opzetten-vanuit-de-app-zonder-terminal).
+op `dienst.<jouw domein>`, met elk uur een versleutelde back-up en automatische updates. Alles daarna doe je ook in de
+app: instellingen wijzigen (bijv. de Mollie-sleutel van test naar live) met **Wijzigingen toepassen**, zonder nieuwe
+server; klanten, geld, kosten, aanbod, huisstijl, medewerkers en *Op de lijst* in het beheer van je Dienst (**Beheer
+openen**). Een terminal is niet nodig. Beheerders van het project kunnen bij het adres van hun Dienst ook de
+**gratis-adressendienst** laten meedraaien (zelfde server). Zie
+[BROKER.md](BROKER.md#opzetten-vanuit-de-app-zonder-terminal) en [ADRESSEN.md](ADRESSEN.md).
+
+**Welke aanbieder biedt de app aan?** De lijst `aanbieders.json` in deze repository. De regel met `"standaard": true`
+(nu ESAPE) staat vooraan, maar alleen zolang die Dienst antwoordt; anders toont de app hem als *Nog niet beschikbaar* en
+regel je het zelf. Zie [CONTRIBUTING.md](CONTRIBUTING.md#op-de-lijst-van-aanbieders).
 
 **Bijwerken gaat vanzelf**: servers werken zichzelf rollend bij (zie [CLUSTER.md](CLUSTER.md)) en de Android-app haalt nieuwe versies op van ghcr.io, of van je eigen cloud als dat niet lukt.
 
@@ -156,7 +164,8 @@ npm install
 npm run set-password
 npm run dev          # http://localhost:3000, SMTP op poort 2525
 npm run beheer       # beheerconsole op http://localhost:4000
-npm run dienst       # de Eigen Cloud Dienst (centrale betaalde dienst), zie BROKER.md
+npm run dienst       # de Eigen Cloud Dienst van een aanbieder, zie BROKER.md (aanbieders zetten hem op vanuit de app)
+npm run adressen     # de gratis-adressendienst, zie ADRESSEN.md
 npm test             # mail, agenda, foto's, import, instellingen, gezondheid, versleuteling, Gmail,
                      # replicatie, aanbieders, cluster end-to-end en de console end-to-end
 android/core/test.sh # Java-kern van de Android-app tegen de TypeScript-code, moto (S3) en een echte cluster-node

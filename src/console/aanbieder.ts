@@ -20,6 +20,7 @@ import type { StoreConfig } from "../cluster/stores.js";
 import { dienstUserData } from "../cluster/cloudinit.js";
 import { deriveKey, randomKeyHex } from "../cluster/crypto.js";
 import { fetchSizes, pickSize, type ServerOffer, type StoreOffer, type SizeOption } from "./catalog.js";
+import { INSTELBAAR } from "../broker/instellingen.js";
 
 export const MOLLIE_URL = () => (process.env.EIGEN_MOLLIE_URL ?? "https://api.mollie.com/v2").replace(/\/+$/, "");
 export const OPENPROVIDER_URL = () => (process.env.EIGEN_OPENPROVIDER_URL ?? "https://api.openprovider.eu/v1beta").replace(/\/+$/, "");
@@ -34,7 +35,8 @@ type Step = (typeof STEPS)[number];
 
 export interface AanbiederState {
   step: Step;
-  company?: { name: string; address: string[]; kvk: string; vat: string; email: string };
+  /** vatPercent (tekst, bijv. "21") en enforce (bewaker zet extra servers uit) alleen als ze zijn ingevuld. */
+  company?: { name: string; address: string[]; kvk: string; vat: string; email: string; vatPercent?: string; enforce?: boolean };
   url?: string;
   accounts?: { scalewaySecretKey?: string; scalewayOrgId?: string; mollieKey?: string; desecToken?: string; smtpUrl?: string; openproviderUser?: string; openproviderPass?: string; adresUrl?: string; mailFrom?: string };
   checked?: Record<string, boolean>;
@@ -58,6 +60,15 @@ export interface AanbiederState {
   retired?: { provider: string; serverId: string }[];
   /** Vorige adressen (subnaam onder het domein) waarvan de cloud het record moet weghalen. */
   dnsRemove?: string[];
+  /**
+   * Ook de gratis-adressendienst op deze server (voor de beheerders van het project, zie ADRESSEN.md): de gedeelde zone,
+   * een deSEC-token voor het account van die zone (mag zones maken en tokens beheren) en zijn eigen hostnaam.
+   */
+  adressen?: { zone: string; desecToken: string; host: string };
+  /** Wanneer de console dienst.env voor de huidige server schreef (BROKER_ENV_AT). */
+  envAt?: number;
+  /** Wat er op de server staat (sha256): de instellingen die "Toepassen" kan wijzigen, en wat een nieuwe server vraagt. */
+  deployed?: { env: string; shape: string };
 }
 export interface Health { at: number; reachable: boolean; version: string | null; uptime: number | null; lastBackupAt: number | null; backup: string | null; closing: boolean; error?: string }
 
@@ -118,6 +129,15 @@ function hostOf(url?: string) {
 export function dnsInfo(c: AdminConfig) {
   const a = existing(c);
   const host = hostOf(a?.url);
+  const d = c.domain ?? "";
+  const sub = host && d && host.endsWith(`.${d}`) ? host.slice(0, -(d.length + 1)) : null;
+  return { host, sub, managed: !!sub && c.dns.length > 0 && !!c.console.done, value: a?.server?.ipv4 ?? null };
+}
+
+/** Zelfde voor de hostnaam van de adressendienst (als die op deze server draait). */
+export function adressenDns(c: AdminConfig) {
+  const a = existing(c);
+  const host = a?.adressen?.host ?? null;
   const d = c.domain ?? "";
   const sub = host && d && host.endsWith(`.${d}`) ? host.slice(0, -(d.length + 1)) : null;
   return { host, sub, managed: !!sub && c.dns.length > 0 && !!c.console.done, value: a?.server?.ipv4 ?? null };
@@ -186,7 +206,33 @@ export function view(c: AdminConfig, o: Offers) {
     removed: !!a.removed,
     retired: (a.retired ?? []).length,
     beheerUrl: a.url ? `${a.url}/beheer` : null,
+    adressen: a.adressen ? { zone: a.adressen.zone, desecToken: mask(a.adressen.desecToken), host: a.adressen.host, url: `https://${a.adressen.host}` } : null,
+    defaultAdressenHost: defaultAdressenHost(c, a),
+    wijzigingen: wijzigingen(c, a),
   };
+}
+
+/** Standaardhost van de adressendienst: dienst.x.nl → adressen.x.nl, anders adressen.<domein van je cloud>. */
+export function defaultAdressenHost(c: AdminConfig, a: AanbiederState) {
+  const host = hostOf(a.url);
+  if (host?.startsWith("dienst.")) return `adressen.${host.slice("dienst.".length)}`;
+  return c.domain ? `adressen.${c.domain}` : null;
+}
+
+const sha = (x: unknown) => crypto.createHash("sha256").update(JSON.stringify(x)).digest("hex");
+/** De instellingen die zonder nieuwe server kunnen wijzigen (zie INSTELBAAR in src/broker/instellingen.ts). */
+export const instelbaarEnv = (c: AdminConfig, a: AanbiederState) => dienstEnv(c, a).filter(([k]) => (INSTELBAAR as readonly string[]).includes(k));
+/** Wat bij de server hoort: adres, plek, back-upbucket en de adressendienst. Anders: opnieuw opzetten. */
+const shapeOf = (a: AanbiederState) => [a.url ?? "", a.hosting?.provider ?? "", a.hosting?.region ?? "", a.hosting?.size ?? "", a.backup?.bucket ?? "", a.adressen?.host ?? "", a.adressen?.zone ?? "", a.adressen?.desecToken ?? ""];
+
+/** Wat er nu op een (nieuwe) server zou staan, als sha256 (zoals in `deployed`). */
+export const deployedHashes = (c: AdminConfig, a: AanbiederState) => ({ env: sha(instelbaarEnv(c, a)), shape: sha(shapeOf(a)) });
+
+/** "geen", "toepassen" (kan zonder nieuwe server) of "opnieuw" (nieuwe server nodig); null = onbekend of geen server. */
+export function wijzigingen(c: AdminConfig, a: AanbiederState): "geen" | "toepassen" | "opnieuw" | null {
+  if (!a.server || !a.deployed) return null;
+  if (sha(shapeOf(a)) !== a.deployed.shape) return "opnieuw";
+  return sha(instelbaarEnv(c, a)) !== a.deployed.env ? "toepassen" : "geen";
 }
 
 /** Vorige/Volgende in de stappen. */
@@ -207,7 +253,7 @@ export function setStep(c: AdminConfig, step: string) {
 
 // ───────── 1. Bedrijf ─────────
 
-export function saveBedrijf(c: AdminConfig, b: { name?: string; address?: string | string[]; kvk?: string; vat?: string; email?: string }) {
+export function saveBedrijf(c: AdminConfig, b: { name?: string; address?: string | string[]; kvk?: string; vat?: string; email?: string; vatPercent?: string | number; enforce?: boolean | string }) {
   const name = String(b.name ?? "").trim();
   if (name.length < 2 || name.length > 100 || /[\r\n]/.test(name)) throw new Error("Vul de naam van je bedrijf in");
   const raw = Array.isArray(b.address) ? b.address.map(String) : String(b.address ?? "").split(/\r?\n/);
@@ -219,8 +265,12 @@ export function saveBedrijf(c: AdminConfig, b: { name?: string; address?: string
   if (vat && !/^[A-Z]{2}[0-9A-Z]{2,13}$/.test(vat)) throw new Error("Vul het btw-nummer in zoals NL001234567B01");
   const email = String(b.email ?? "").trim().toLowerCase();
   if (!EMAIL.test(email)) throw new Error("Vul het e-mailadres van de eigenaar in");
+  const pct = String(b.vatPercent ?? "").trim().replace(",", ".").replace(/%$/, "").trim();
+  if (pct && (!/^\d{1,3}(\.\d{1,2})?$/.test(pct) || Number(pct) > 100)) throw new Error("Vul het btw-percentage in als getal, bijvoorbeeld 21");
+  const vatPercent = pct ? String(Number(pct)) : "";
+  const enforce = b.enforce === true || b.enforce === "1" || b.enforce === "true" || b.enforce === "on";
   const a = state(c);
-  a.company = { name, address, kvk, vat, email };
+  a.company = { name, address, kvk, vat, email, ...(vatPercent ? { vatPercent } : {}), ...(enforce ? { enforce: true } : {}) };
   if (a.step === "bedrijf") a.step = "accounts";
   return { ok: true, step: a.step };
 }
@@ -365,6 +415,57 @@ export function saveAdres(c: AdminConfig, b: { url?: string }) {
   return { ok: true, url, step: a.step, dns: dnsInfo(c), pending: !!a.server };
 }
 
+// ───────── 3b. Gratis-adressendienst (optioneel, voor de beheerders van het project) ─────────
+
+const ZONE = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/;
+
+/**
+ * De gratis-adressendienst op dezelfde server als de Dienst: `aan: false` haalt hem weg; anders de gedeelde zone, een
+ * deSEC-token voor het account van die zone en de hostnaam (standaard adressen.<domein>). Live gecontroleerd: de zone
+ * staat in dit deSEC-account en het token mag tokens beheren (zie ADRESSEN.md). Gaat in bij (opnieuw) opzetten.
+ */
+export async function saveAdressen(c: AdminConfig, b: { aan?: boolean; zone?: string; desecToken?: string; host?: string }) {
+  const a = state(c);
+  const oldSub = a.server ? adressenDns(c).sub : null;
+  if (b.aan === false) {
+    if (oldSub) a.dnsRemove = [...new Set([...(a.dnsRemove ?? []), oldSub])];
+    delete a.adressen;
+    return { ok: true, checks: [] as Check[], adressen: null, pending: !!a.server };
+  }
+  const zone = String(b.zone ?? a.adressen?.zone ?? "").trim().toLowerCase().replace(/^\.+|\.+$/g, "");
+  if (!ZONE.test(zone)) throw new Error("Vul de gedeelde zone in, zoals eigencloud.nl");
+  let token = String(b.desecToken ?? "").trim();
+  if (!token || token.startsWith("••")) token = a.adressen?.desecToken ?? "";
+  if (!token) throw new Error("Vul het deSEC-token voor deze zone in");
+  if (/[\r\n\s]/.test(token)) throw new Error("Een token past op één regel, zonder spaties");
+  const rawHost = String(b.host ?? "").trim() || a.adressen?.host || defaultAdressenHost(c, a) || "";
+  let host: string;
+  try { host = new URL(cleanUrl(rawHost)).hostname; } catch { throw new Error("Vul een hostnaam in, zoals adressen.vanes.nl"); }
+  if (host === hostOf(a.url)) throw new Error("De adressendienst heeft een eigen hostnaam nodig, anders dan die van je Dienst");
+  const checks: Check[] = [];
+  const h = { authorization: `Token ${token}` };
+  try {
+    const z = await http(`${DESEC_URL()}/domains/${encodeURIComponent(zone)}/`, { headers: h });
+    checks.push(z.ok ? { id: "zone", label: "Gedeelde zone", ok: true, detail: `${zone} staat in dit deSEC-account` }
+      : z.status === 401 ? { id: "zone", label: "Gedeelde zone", ok: false, detail: "deSEC accepteert dit token niet" }
+      : z.status === 404 ? { id: "zone", label: "Gedeelde zone", ok: false, detail: `${zone} staat niet in het deSEC-account van dit token. Maak de zone daar eerst aan.` }
+      : { id: "zone", label: "Gedeelde zone", ok: false, detail: `deSEC antwoordt ${z.status}` });
+    const t = await http(`${DESEC_URL()}/auth/tokens/`, { headers: h });
+    checks.push(t.ok ? { id: "tokens", label: "Token mag tokens beheren", ok: true, detail: "Nodig om per adres een token te maken dat alleen in die zone mag schrijven" }
+      : t.status === 403 ? { id: "tokens", label: "Token mag tokens beheren", ok: false, detail: "Dit token mag geen tokens beheren. Maak bij deSEC een token met 'Manage tokens' (perm_manage_tokens)." }
+      : { id: "tokens", label: "Token mag tokens beheren", ok: false, detail: `deSEC antwoordt ${t.status}` });
+  } catch { checks.push({ id: "zone", label: "Gedeelde zone", ok: false, detail: "deSEC is niet bereikbaar" }); }
+  const ok = checks.length === 2 && checks.every((x) => x.ok);
+  if (ok) {
+    a.adressen = { zone, desecToken: token, host };
+    if (oldSub && oldSub !== adressenDns(c).sub) a.dnsRemove = [...new Set([...(a.dnsRemove ?? []), oldSub])];
+    a.dnsRemove = (a.dnsRemove ?? []).filter((x) => x !== adressenDns(c).sub && x !== dnsInfo(c).sub);
+    if (!a.dnsRemove.length) delete a.dnsRemove;
+  }
+  const x = a.adressen;
+  return { ok, checks, adressen: x ? { zone: x.zone, desecToken: mask(x.desecToken), host: x.host, url: `https://${x.host}` } : null, dns: adressenDns(c), pending: !!a.server };
+}
+
 // ───────── 4. Server en back-ups ─────────
 
 /**
@@ -479,12 +580,26 @@ export function dienstEnv(c: AdminConfig, a: AanbiederState): [string, string][]
   ];
   if (co.kvk) env.push(["BROKER_COMPANY_KVK", co.kvk]);
   if (co.vat) env.push(["BROKER_COMPANY_VAT", co.vat]);
+  if (co.vatPercent && co.vatPercent !== "21") env.push(["BROKER_VAT_PERCENT", co.vatPercent]);
+  if (co.enforce) env.push(["BROKER_ENFORCE", "1"]);
   env.push(["MOLLIE_API_KEY", acc.mollieKey!], ["DESEC_TOKEN", acc.desecToken!], ["SCW_SECRET_KEY", acc.scalewaySecretKey!], ["SCW_ORGANIZATION_ID", acc.scalewayOrgId!], ["BROKER_SMTP_URL", smtpOf(c, a)]);
   if (acc.openproviderUser && acc.openproviderPass) env.push(["OPENPROVIDER_USERNAME", acc.openproviderUser], ["OPENPROVIDER_PASSWORD", acc.openproviderPass]);
-  if (acc.adresUrl) env.push(["BROKER_ADRES_URL", acc.adresUrl]);
+  // De adressendienst op deze server gaat voor een ingevuld adres: de Dienst praat er rechtstreeks mee.
+  if (a.adressen) env.push(["BROKER_ADRES_URL", ADRESSEN_LOCAL], ["BROKER_ADRES_PUBLIEK", `https://${a.adressen.host}`], ["BROKER_BACKUP_ADRESSEN", "/adressen/adressen.sqlite"]);
+  else if (acc.adresUrl) env.push(["BROKER_ADRES_URL", acc.adresUrl]);
   const bk = a.backup!;
   env.push(["BROKER_BACKUP_ENDPOINT", bk.endpoint], ["BROKER_BACKUP_REGION", bk.region], ["BROKER_BACKUP_BUCKET", bk.bucket!], ["BROKER_BACKUP_ACCESS_KEY", bk.accessKey!], ["BROKER_BACKUP_SECRET_KEY", bk.secretKey!]);
+  if (a.envAt) env.push(["BROKER_ENV_AT", String(a.envAt)]);
   return env;
+}
+
+/** Waar de Dienst de adressendienst op dezelfde server bereikt. */
+export const ADRESSEN_LOCAL = "http://127.0.0.1:4200";
+
+/** adressen.env voor de adressendienst op de server van de Dienst (alleen voor de user-data). */
+export function adressenEnv(a: AanbiederState): [string, string][] {
+  const x = a.adressen!;
+  return [["ADRES_ZONE", x.zone], ["ADRES_DESEC_TOKEN", x.desecToken], ["ADRES_PUBLIC_URL", `https://${x.host}`], ["ADRES_LOKAAL_DIENST", a.url!]];
 }
 
 /** Het opstartscript voor de server van de Dienst (met dezelfde images als je cloud). */
@@ -493,7 +608,8 @@ export function serverUserData(c: AdminConfig, a: AanbiederState) {
   const appImage = img.ref || "ghcr.io/renevanes/eigen-cloud:latest";
   const caddyImage = img.caddyRef || "ghcr.io/renevanes/eigen-caddy:latest";
   const latest = (r: string) => r.replace(/@sha256:[0-9a-f]{64}$/, ":latest");
-  return dienstUserData({ host: hostOf(a.url)!, email: a.company!.email, env: dienstEnv(c, a), appImage, caddyImage, appRef: latest(appImage), caddyRef: latest(caddyImage) });
+  return dienstUserData({ host: hostOf(a.url)!, email: a.company!.email, env: dienstEnv(c, a), appImage, caddyImage, appRef: latest(appImage), caddyRef: latest(caddyImage),
+    ...(a.adressen ? { adressen: { host: a.adressen.host, env: adressenEnv(a) } } : {}) });
 }
 
 /** Token voor POST /v1/status/handover (zie src/broker/backup.ts). */
@@ -625,7 +741,10 @@ export async function opzetten(c: AdminConfig, deps: Deps) {
       steps.push({ label: "Laatste back-up van de huidige server", ok: h.ok, detail: h.detail });
     }
     const nodeId = `dienst-${crypto.randomBytes(3).toString("hex")}`;
+    // dienst.env van deze server is nieuwer dan instellingen die eerder met "Toepassen" zijn gestuurd.
+    a.envAt = Date.now();
     const info = await providerFor(c, a, hosting.provider).create({ cluster: PROJECT_NAME, nodeId, kind: "data", region: hosting.region, size: hosting.size, userData: serverUserData(c, a) });
+    a.deployed = deployedHashes(c, a);
     const old = a.server;
     a.server = { provider: hosting.provider, region: hosting.region, size: hosting.size, serverId: info.serverId, ...(info.ipv4 ? { ipv4: info.ipv4 } : {}), ...(info.ipv6 ? { ipv6: info.ipv6 } : {}), createdAt: Date.now() };
     a.removed = false;
@@ -640,6 +759,12 @@ export async function opzetten(c: AdminConfig, deps: Deps) {
     steps.push(d.managed
       ? { label: `${d.host} wijst naar ${info.ipv4}`, ok: true, detail: "Je cloud zet dit record zelf in je DNS" }
       : { label: `Zet bij je DNS een A-record: ${d.host} → ${info.ipv4}`, ok: true });
+    if (a.adressen) {
+      const ad = adressenDns(c);
+      steps.push(ad.managed
+        ? { label: `Adressendienst op ${ad.host}`, ok: true, detail: "Je cloud zet ook dit record zelf in je DNS" }
+        : { label: `Zet bij je DNS een A-record: ${ad.host} → ${info.ipv4}`, ok: true });
+    }
     if (a.retired?.length) void cleanupRetired(c, deps);
     return { ok: true, replaced: replace, steps, server: view(c, deps).server };
   } catch (e) {
@@ -700,7 +825,45 @@ export async function status(c: AdminConfig, deps: Pick<Deps, "save">) {
   const have = (await aanbiederNet.resolve4(host).catch(() => [] as string[])).sort();
   deps.save();
   void cleanupRetired(c, deps);
-  return { ...h, server: true, removed: false, dns: { host, want: a.server.ipv4 ?? null, have, ok: !!a.server.ipv4 && have.includes(a.server.ipv4) }, retired: (a.retired ?? []).length };
+  return { ...h, server: true, removed: false, dns: { host, want: a.server.ipv4 ?? null, have, ok: !!a.server.ipv4 && have.includes(a.server.ipv4) }, retired: (a.retired ?? []).length,
+    adressen: await adressenStatus(c, a) };
+}
+
+/**
+ * Gewijzigde instellingen (bedrijf, sleutels, mail, btw, …) naar de draaiende Dienst sturen, zonder nieuwe server: de
+ * Dienst bewaart ze versleuteld en start opnieuw (zie src/broker/instellingen.ts). Een ander adres, een andere plek of
+ * de adressendienst aan/uit vraagt een nieuwe server: dan "Opnieuw opzetten".
+ */
+export async function toepassen(c: AdminConfig, deps: Pick<Deps, "save">) {
+  const a = existing(c);
+  if (!a?.server || !a.url || !a.secret) throw new Error("Er draait geen Dienst");
+  if (!companyReady(a) || !accountsReady(a)) throw new Error("Controleer eerst je bedrijfsgegevens en accounts");
+  if (a.deployed && sha(shapeOf(a)) !== a.deployed.shape) throw new Error("Hiervoor is een nieuwe server nodig: kies Opnieuw opzetten");
+  const env = instelbaarEnv(c, a);
+  const at = Math.max(Date.now(), (a.envAt ?? 0) + 1);
+  let r;
+  try {
+    r = await http(`${aanbiederNet.reach(a.url)}/v1/status/instellingen`, { method: "POST", headers: { authorization: `Beheer ${beheerToken(a.secret)}`, "content-type": "application/json" }, body: JSON.stringify({ at, env: Object.fromEntries(env) }) }, 60_000);
+  } catch { throw new Error("Je Dienst is nu niet bereikbaar; probeer het later opnieuw"); }
+  if (r.status === 404) throw new Error("Je Dienst kent dit nog niet; wacht tot hij is bijgewerkt, of kies Opnieuw opzetten");
+  if (!r.ok) throw new Error(r.json?.error ? `De Dienst weigert: ${r.json.error}` : `De Dienst antwoordt ${r.status}`);
+  a.deployed = { env: sha(env), shape: a.deployed?.shape ?? sha(shapeOf(a)) };
+  deps.save();
+  return { ok: true, restart: !!r.json?.restart, keys: (r.json?.keys ?? []) as string[] };
+}
+
+/** Bereikbaarheid van de adressendienst op de server van de Dienst (null als hij er niet draait). */
+async function adressenStatus(c: AdminConfig, a: AanbiederState) {
+  if (!a.adressen) return null;
+  const url = `https://${a.adressen.host}`;
+  try {
+    const r = await http(`${aanbiederNet.reach(url)}/v1/info`, {}, 8000);
+    if (!r.ok || !r.json?.zone) throw new Error(`De adressendienst antwoordt ${r.status}`);
+    return { url, reachable: true, zone: String(r.json.zone), ok: r.json.zone === a.adressen.zone };
+  } catch (e) {
+    const m = (e as Error).message;
+    return { url, reachable: false, zone: null, ok: false, error: /antwoordt/.test(m) ? m : "Nog niet bereikbaar" };
+  }
 }
 
 /** De server weghalen. De back-ups (en de sleutel ervan) blijven, zodat "Opnieuw opzetten" alles terugzet. */

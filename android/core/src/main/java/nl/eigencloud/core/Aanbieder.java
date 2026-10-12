@@ -32,6 +32,15 @@ public final class Aanbieder {
     private static final Pattern UUID = Pattern.compile("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
     private static final Pattern MOLLIE_KEY = Pattern.compile("^(test|live)_[A-Za-z0-9]+$");
     private static final Pattern HOSTNAME = Pattern.compile("^[a-z0-9-]+(\\.[a-z0-9-]+)+$");
+    private static final Pattern ZONE = Pattern.compile("^[a-z0-9-]+(\\.[a-z0-9-]+)+$");
+    /** Waar de Dienst de adressendienst op dezelfde server bereikt (ADRESSEN_LOCAL in aanbieder.ts). */
+    public static final String ADRESSEN_LOCAL = "http://127.0.0.1:4200";
+    /** Wat zonder nieuwe server kan wijzigen (INSTELBAAR in src/broker/instellingen.ts). */
+    public static final List<String> INSTELBAAR = java.util.Arrays.asList(
+            "BROKER_OWNER_EMAIL", "BROKER_ADMIN_EMAIL", "BROKER_BRAND_NAME", "BROKER_MAIL_FROM",
+            "BROKER_COMPANY_NAME", "BROKER_COMPANY_ADDRESS", "BROKER_COMPANY_KVK", "BROKER_COMPANY_VAT", "BROKER_VAT_PERCENT", "BROKER_ENFORCE",
+            "MOLLIE_API_KEY", "DESEC_TOKEN", "SCW_SECRET_KEY", "SCW_ORGANIZATION_ID", "BROKER_SMTP_URL", "OPENPROVIDER_USERNAME", "OPENPROVIDER_PASSWORD",
+            "BROKER_ADRES_URL", "BROKER_ADRES_PUBLIEK");
 
     /** How the console reaches the Dienst (tests point the public address at a local server). */
     public interface Reach { String base(String url); }
@@ -175,6 +184,16 @@ public final class Aanbieder {
         return Json.obj("host", host, "sub", sub, "managed", managed, "value", Json.path(a, "server", "ipv4"));
     }
 
+    /** Zelfde voor de hostnaam van de adressendienst (als die op deze server draait). */
+    public static Map<String, Object> adressenDns(Map<String, Object> c) {
+        Map<String, Object> a = existing(c);
+        String host = Json.str(a, "adressen", "host");
+        String d = c.get("domain") != null ? Json.jsString(c.get("domain")) : "";
+        String sub = host != null && !d.isEmpty() && host.endsWith("." + d) ? host.substring(0, host.length() - d.length() - 1) : null;
+        boolean managed = sub != null && !Json.listAt(c, "dns").isEmpty() && Json.truthy(Json.path(c, "console", "done"));
+        return Json.obj("host", host, "sub", sub, "managed", managed, "value", Json.path(a, "server", "ipv4"));
+    }
+
     private static boolean accountsReady(Map<String, Object> a) {
         Map<String, Object> ch = Json.map(a, "checked");
         for (String k : new String[] {"scaleway", "mollie", "desec", "smtp"}) if (!Boolean.TRUE.equals(Json.path(ch, k))) return false;
@@ -267,7 +286,51 @@ public final class Aanbieder {
                 "lastHealth", a.get("lastHealth"),
                 "removed", Json.truthy(a.get("removed")),
                 "retired", (long) Json.listAt(a, "retired").size(),
-                "beheerUrl", url != null ? url + "/beheer" : null);
+                "beheerUrl", url != null ? url + "/beheer" : null,
+                "adressen", adressenView(a),
+                "defaultAdressenHost", defaultAdressenHost(c, a),
+                "wijzigingen", wijzigingen(c, a));
+    }
+
+    private static Map<String, Object> adressenView(Map<String, Object> a) {
+        Map<String, Object> x = Json.map(a, "adressen");
+        if (x == null) return null;
+        return Json.obj("zone", x.get("zone"), "desecToken", mask(Json.str(x, "desecToken")), "host", x.get("host"), "url", "https://" + Json.str(x, "host"));
+    }
+
+    /** Standaardhost van de adressendienst: dienst.x.nl → adressen.x.nl, anders adressen.<domein van je cloud>. */
+    public static String defaultAdressenHost(Map<String, Object> c, Map<String, Object> a) {
+        String host = hostOf(Json.str(a, "url"));
+        if (host != null && host.startsWith("dienst.")) return "adressen." + host.substring("dienst.".length());
+        return Json.truthy(c.get("domain")) ? "adressen." + Json.jsString(c.get("domain")) : null;
+    }
+
+    private static String sha(Object x) { return Bytes.sha256Hex(Bytes.utf8(Json.stringify(x))); }
+
+    private static List<Object> envList(List<String[]> env) {
+        List<Object> out = new ArrayList<>();
+        for (String[] kv : env) out.add(Json.list(kv[0], kv[1]));
+        return out;
+    }
+
+    /** De instellingen die zonder nieuwe server kunnen wijzigen. */
+    public static List<String[]> instelbaarEnv(Map<String, Object> c, Map<String, Object> a) {
+        List<String[]> out = new ArrayList<>();
+        for (String[] kv : dienstEnv(c, a)) if (INSTELBAAR.contains(kv[0])) out.add(kv);
+        return out;
+    }
+
+    /** Wat bij de server hoort: adres, plek, back-upbucket en de adressendienst. */
+    private static List<Object> shapeOf(Map<String, Object> a) {
+        return Json.list(nz(Json.str(a, "url")), nz(Json.str(a, "hosting", "provider")), nz(Json.str(a, "hosting", "region")), nz(Json.str(a, "hosting", "size")),
+                nz(Json.str(a, "backup", "bucket")), nz(Json.str(a, "adressen", "host")), nz(Json.str(a, "adressen", "zone")), nz(Json.str(a, "adressen", "desecToken")));
+    }
+
+    /** "geen", "toepassen" (zonder nieuwe server) of "opnieuw"; null = onbekend of geen server. */
+    public static String wijzigingen(Map<String, Object> c, Map<String, Object> a) {
+        if (a.get("server") == null || Json.map(a, "deployed") == null) return null;
+        if (!sha(shapeOf(a)).equals(Json.str(a, "deployed", "shape"))) return "opnieuw";
+        return sha(envList(instelbaarEnv(c, a))).equals(Json.str(a, "deployed", "env")) ? "geen" : "toepassen";
     }
 
     /** Providers the Dienst has its own credentials for (Scaleway always: the key at Accounts). */
@@ -313,8 +376,16 @@ public final class Aanbieder {
         if (!vat.isEmpty() && !vat.matches("^[A-Z]{2}[0-9A-Z]{2,13}$")) throw new IllegalArgumentException("Vul het btw-nummer in zoals NL001234567B01");
         String email = (b.get("email") == null ? "" : Json.jsString(b.get("email"))).trim().toLowerCase(Locale.ROOT);
         if (!EMAIL.matcher(email).matches()) throw new IllegalArgumentException("Vul het e-mailadres van de eigenaar in");
+        String pct = (b.get("vatPercent") == null ? "" : Json.jsString(b.get("vatPercent"))).trim().replaceFirst(",", ".").replaceFirst("%$", "").trim();
+        if (!pct.isEmpty() && (!pct.matches("^\\d{1,3}(\\.\\d{1,2})?$") || Double.parseDouble(pct) > 100)) throw new IllegalArgumentException("Vul het btw-percentage in als getal, bijvoorbeeld 21");
+        String vatPercent = pct.isEmpty() ? "" : Json.jsString(Double.parseDouble(pct));
+        Object ef = b.get("enforce");
+        boolean enforce = Boolean.TRUE.equals(ef) || "1".equals(ef) || "true".equals(ef) || "on".equals(ef);
         Map<String, Object> a = state(c);
-        a.put("company", Json.obj("name", name, "address", address, "kvk", kvk, "vat", vat, "email", email));
+        Map<String, Object> co = Json.obj("name", name, "address", address, "kvk", kvk, "vat", vat, "email", email);
+        if (!vatPercent.isEmpty()) co.put("vatPercent", vatPercent);
+        if (enforce) co.put("enforce", true);
+        a.put("company", co);
         if ("bedrijf".equals(a.get("step"))) a.put("step", "accounts");
         return Json.obj("ok", true, "step", a.get("step"));
     }
@@ -487,6 +558,65 @@ public final class Aanbieder {
         return Json.obj("ok", true, "url", url, "step", a.get("step"), "dns", dnsInfo(c), "pending", a.get("server") != null);
     }
 
+    // ───────── 3b. Gratis-adressendienst (optioneel, voor de beheerders van het project) ─────────
+
+    private static void addRemove(Map<String, Object> a, String sub) {
+        LinkedHashSet<Object> remove = new LinkedHashSet<>(Json.listAt(a, "dnsRemove"));
+        remove.add(sub);
+        a.put("dnsRemove", new ArrayList<>(remove));
+    }
+
+    /** De gratis-adressendienst op de server van de Dienst aan (met live controle bij deSEC) of uit (saveAdressen in TS). */
+    public static Map<String, Object> saveAdressen(Map<String, Object> c, Map<String, Object> b) {
+        Map<String, Object> a = state(c);
+        String oldSub = a.get("server") != null ? Json.str(adressenDns(c), "sub") : null;
+        if (Boolean.FALSE.equals(b.get("aan"))) {
+            if (oldSub != null) addRemove(a, oldSub);
+            a.remove("adressen");
+            return Json.obj("ok", true, "checks", new ArrayList<Object>(), "adressen", null, "pending", a.get("server") != null);
+        }
+        Map<String, Object> cur = Json.map(a, "adressen");
+        String zone = (b.get("zone") != null ? Json.jsString(b.get("zone")) : cur != null ? nz(Json.str(cur, "zone")) : "").trim().toLowerCase(Locale.ROOT).replaceAll("^\\.+|\\.+$", "");
+        if (!ZONE.matcher(zone).matches()) throw new IllegalArgumentException("Vul de gedeelde zone in, zoals eigencloud.nl");
+        String token = b.get("desecToken") == null ? "" : Json.jsString(b.get("desecToken")).trim();
+        if (token.isEmpty() || token.startsWith("••")) token = cur != null ? nz(Json.str(cur, "desecToken")) : "";
+        if (token.isEmpty()) throw new IllegalArgumentException("Vul het deSEC-token voor deze zone in");
+        if (token.matches("(?s).*\\s.*")) throw new IllegalArgumentException("Een token past op één regel, zonder spaties");
+        String rawHost = b.get("host") == null ? "" : Json.jsString(b.get("host")).trim();
+        if (rawHost.isEmpty()) rawHost = cur != null && nonEmpty(Json.str(cur, "host")) ? Json.str(cur, "host") : nz(defaultAdressenHost(c, a));
+        String host;
+        try { host = hostOf(cleanUrl(rawHost)); } catch (IllegalArgumentException e) { throw new IllegalArgumentException("Vul een hostnaam in, zoals adressen.vanes.nl"); }
+        if (host.equals(hostOf(Json.str(a, "url")))) throw new IllegalArgumentException("De adressendienst heeft een eigen hostnaam nodig, anders dan die van je Dienst");
+        List<Object> checks = new ArrayList<>();
+        Map<String, String> h = Http.headers("authorization", "Token " + token);
+        String base = Endpoints.DESEC.replaceAll("/+$", "");
+        try {
+            Res z = http("GET", base + "/domains/" + Bytes.encodeURIComponent(zone) + "/", h, null, 15_000);
+            checks.add(z.ok() ? check("zone", "Gedeelde zone", true, zone + " staat in dit deSEC-account")
+                    : z.status == 401 ? check("zone", "Gedeelde zone", false, "deSEC accepteert dit token niet")
+                    : z.status == 404 ? check("zone", "Gedeelde zone", false, zone + " staat niet in het deSEC-account van dit token. Maak de zone daar eerst aan.")
+                    : check("zone", "Gedeelde zone", false, "deSEC antwoordt " + z.status));
+            Res t = http("GET", base + "/auth/tokens/", h, null, 15_000);
+            checks.add(t.ok() ? check("tokens", "Token mag tokens beheren", true, "Nodig om per adres een token te maken dat alleen in die zone mag schrijven")
+                    : t.status == 403 ? check("tokens", "Token mag tokens beheren", false, "Dit token mag geen tokens beheren. Maak bij deSEC een token met 'Manage tokens' (perm_manage_tokens).")
+                    : check("tokens", "Token mag tokens beheren", false, "deSEC antwoordt " + t.status));
+        } catch (IOException | RuntimeException e) {
+            checks.add(check("zone", "Gedeelde zone", false, "deSEC is niet bereikbaar"));
+        }
+        boolean ok = checks.size() == 2;
+        for (Object x : checks) ok &= Boolean.TRUE.equals(Json.path(x, "ok"));
+        if (ok) {
+            a.put("adressen", Json.obj("zone", zone, "desecToken", token, "host", host));
+            String newSub = Json.str(adressenDns(c), "sub");
+            if (oldSub != null && !oldSub.equals(newSub)) addRemove(a, oldSub);
+            List<Object> left = new ArrayList<>();
+            String dienstSub = Json.str(dnsInfo(c), "sub");
+            for (Object x : Json.listAt(a, "dnsRemove")) if (!x.equals(newSub) && !x.equals(dienstSub)) left.add(x);
+            if (left.isEmpty()) a.remove("dnsRemove"); else a.put("dnsRemove", left);
+        }
+        return Json.obj("ok", ok, "checks", checks, "adressen", adressenView(a), "dns", adressenDns(c), "pending", a.get("server") != null);
+    }
+
     // ───────── 4. Server en back-ups ─────────
 
     /**
@@ -639,6 +769,9 @@ public final class Aanbieder {
         env.add(new String[] {"BROKER_COMPANY_ADDRESS", String.join("\\n", lines)});
         if (nonEmpty(Json.str(co, "kvk"))) env.add(new String[] {"BROKER_COMPANY_KVK", Json.str(co, "kvk")});
         if (nonEmpty(Json.str(co, "vat"))) env.add(new String[] {"BROKER_COMPANY_VAT", Json.str(co, "vat")});
+        String pct = Json.str(co, "vatPercent");
+        if (nonEmpty(pct) && !"21".equals(pct)) env.add(new String[] {"BROKER_VAT_PERCENT", pct});
+        if (Json.truthy(co.get("enforce"))) env.add(new String[] {"BROKER_ENFORCE", "1"});
         env.add(new String[] {"MOLLIE_API_KEY", Json.str(acc, "mollieKey")});
         env.add(new String[] {"DESEC_TOKEN", Json.str(acc, "desecToken")});
         env.add(new String[] {"SCW_SECRET_KEY", Json.str(acc, "scalewaySecretKey")});
@@ -648,12 +781,29 @@ public final class Aanbieder {
             env.add(new String[] {"OPENPROVIDER_USERNAME", Json.str(acc, "openproviderUser")});
             env.add(new String[] {"OPENPROVIDER_PASSWORD", Json.str(acc, "openproviderPass")});
         }
-        if (nonEmpty(Json.str(acc, "adresUrl"))) env.add(new String[] {"BROKER_ADRES_URL", Json.str(acc, "adresUrl")});
+        // De adressendienst op deze server gaat voor een ingevuld adres: de Dienst praat er rechtstreeks mee.
+        if (Json.map(a, "adressen") != null) {
+            env.add(new String[] {"BROKER_ADRES_URL", ADRESSEN_LOCAL});
+            env.add(new String[] {"BROKER_ADRES_PUBLIEK", "https://" + Json.str(a, "adressen", "host")});
+            env.add(new String[] {"BROKER_BACKUP_ADRESSEN", "/adressen/adressen.sqlite"});
+        } else if (nonEmpty(Json.str(acc, "adresUrl"))) env.add(new String[] {"BROKER_ADRES_URL", Json.str(acc, "adresUrl")});
         env.add(new String[] {"BROKER_BACKUP_ENDPOINT", Json.str(bk, "endpoint")});
         env.add(new String[] {"BROKER_BACKUP_REGION", Json.str(bk, "region")});
         env.add(new String[] {"BROKER_BACKUP_BUCKET", Json.str(bk, "bucket")});
         env.add(new String[] {"BROKER_BACKUP_ACCESS_KEY", Json.str(bk, "accessKey")});
         env.add(new String[] {"BROKER_BACKUP_SECRET_KEY", Json.str(bk, "secretKey")});
+        Object at = a.get("envAt");
+        if (Json.truthy(at)) env.add(new String[] {"BROKER_ENV_AT", Json.jsString(at)});
+        return env;
+    }
+
+    /** adressen.env voor de adressendienst op de server van de Dienst (alleen voor de user-data). */
+    public static List<String[]> adressenEnv(Map<String, Object> a) {
+        List<String[]> env = new ArrayList<>();
+        env.add(new String[] {"ADRES_ZONE", Json.str(a, "adressen", "zone")});
+        env.add(new String[] {"ADRES_DESEC_TOKEN", Json.str(a, "adressen", "desecToken")});
+        env.add(new String[] {"ADRES_PUBLIC_URL", "https://" + Json.str(a, "adressen", "host")});
+        env.add(new String[] {"ADRES_LOKAAL_DIENST", Json.str(a, "url")});
         return env;
     }
 
@@ -668,6 +818,10 @@ public final class Aanbieder {
         o.caddyImage = nonEmpty(caddyRef) ? caddyRef : "ghcr.io/renevanes/eigen-caddy:latest";
         o.appRef = o.appImage.replaceFirst("@sha256:[0-9a-f]{64}$", ":latest");
         o.caddyRef = o.caddyImage.replaceFirst("@sha256:[0-9a-f]{64}$", ":latest");
+        if (Json.map(a, "adressen") != null) {
+            o.adressenHost = Json.str(a, "adressen", "host");
+            o.adressenEnv = adressenEnv(a);
+        }
         return CloudInit.dienstUserData(o);
     }
 
@@ -811,7 +965,10 @@ public final class Aanbieder {
                 steps.add(step("Laatste back-up van de huidige server", (Boolean) h[0], (String) h[1]));
             }
             String nodeId = "dienst-" + Bytes.hex(Bytes.random(3));
+            // dienst.env van deze server is nieuwer dan instellingen die eerder met "Toepassen" zijn gestuurd.
+            a.put("envAt", System.currentTimeMillis());
             Provider.ServerInfo info = providerFor(c, a, hp).create(new Provider.CreateSpec(PROJECT_NAME, nodeId, "data", hr, hs, serverUserData(c, a)));
+            a.put("deployed", Json.obj("env", sha(envList(instelbaarEnv(c, a))), "shape", sha(shapeOf(a))));
             Map<String, Object> old = Json.map(a, "server");
             Map<String, Object> srv = Json.obj("provider", hp, "region", hr, "size", hs, "serverId", info.serverId);
             if (info.ipv4 != null) srv.put("ipv4", info.ipv4);
@@ -836,6 +993,12 @@ public final class Aanbieder {
             steps.add(Json.truthy(d.get("managed"))
                     ? step(Json.str(d, "host") + " wijst naar " + info.ipv4, true, "Je cloud zet dit record zelf in je DNS")
                     : step("Zet bij je DNS een A-record: " + Json.str(d, "host") + " → " + info.ipv4, true, null));
+            if (Json.map(a, "adressen") != null) {
+                Map<String, Object> ad = adressenDns(c);
+                steps.add(Json.truthy(ad.get("managed"))
+                        ? step("Adressendienst op " + Json.str(ad, "host"), true, "Je cloud zet ook dit record zelf in je DNS")
+                        : step("Zet bij je DNS een A-record: " + Json.str(ad, "host") + " → " + info.ipv4, true, null));
+            }
             if (!Json.listAt(a, "retired").isEmpty()) cleanupRetiredAsync(c, deps);
             return Json.obj("ok", true, "replaced", replace, "steps", steps, "server", view(c, deps).get("server"));
         } catch (IOException | RuntimeException e) {
@@ -952,7 +1115,54 @@ public final class Aanbieder {
         out.put("removed", false);
         out.put("dns", Json.obj("host", host, "want", want, "have", new ArrayList<Object>(have), "ok", want != null && have.contains(Json.jsString(want))));
         out.put("retired", (long) Json.listAt(a, "retired").size());
+        out.put("adressen", adressenStatus(a));
         return out;
+    }
+
+    /**
+     * Gewijzigde instellingen naar de draaiende Dienst sturen zonder nieuwe server; de Dienst bewaart ze versleuteld en
+     * start opnieuw (toepassen in aanbieder.ts).
+     */
+    public static Map<String, Object> toepassen(Map<String, Object> c, Deps deps) throws IOException {
+        Map<String, Object> a = existing(c);
+        if (a == null || a.get("server") == null || !nonEmpty(Json.str(a, "url")) || !nonEmpty(Json.str(a, "secret"))) throw new IllegalArgumentException("Er draait geen Dienst");
+        if (!companyReady(a) || !accountsReady(a)) throw new IllegalArgumentException("Controleer eerst je bedrijfsgegevens en accounts");
+        Map<String, Object> dep = Json.map(a, "deployed");
+        if (dep != null && !sha(shapeOf(a)).equals(Json.str(dep, "shape"))) throw new IllegalArgumentException("Hiervoor is een nieuwe server nodig: kies Opnieuw opzetten");
+        List<String[]> env = instelbaarEnv(c, a);
+        Map<String, Object> envObj = Json.obj();
+        for (String[] kv : env) envObj.put(kv[0], kv[1]);
+        Number envAt = Json.num(a, "envAt");
+        long at = Math.max(System.currentTimeMillis(), (envAt == null ? 0L : envAt.longValue()) + 1);
+        Res r;
+        try {
+            r = http("POST", reach.base(Json.str(a, "url")) + "/v1/status/instellingen", Http.headers("authorization", "Beheer " + beheerToken(Json.str(a, "secret")), "content-type", "application/json"),
+                    Json.obj("at", at, "env", envObj), 60_000);
+        } catch (IOException | RuntimeException e) {
+            throw new IOException("Je Dienst is nu niet bereikbaar; probeer het later opnieuw", e);
+        }
+        if (r.status == 404) throw new IOException("Je Dienst kent dit nog niet; wacht tot hij is bijgewerkt, of kies Opnieuw opzetten");
+        if (!r.ok()) throw new IOException(Json.truthy(Json.path(r.json, "error")) ? "De Dienst weigert: " + Json.str(r.json, "error") : "De Dienst antwoordt " + r.status);
+        a.put("deployed", Json.obj("env", sha(envList(env)), "shape", dep != null ? dep.get("shape") : sha(shapeOf(a))));
+        deps.save();
+        List<Object> keys = Json.listAt(r.json, "keys");
+        return Json.obj("ok", true, "restart", Json.truthy(Json.path(r.json, "restart")), "keys", keys);
+    }
+
+    /** Bereikbaarheid van de adressendienst op de server van de Dienst (null als hij er niet draait). */
+    private static Map<String, Object> adressenStatus(Map<String, Object> a) {
+        Map<String, Object> x = Json.map(a, "adressen");
+        if (x == null) return null;
+        String url = "https://" + Json.str(x, "host");
+        try {
+            Res r = http("GET", reach.base(url) + "/v1/info", null, null, 8000);
+            if (!r.ok() || !Json.truthy(Json.path(r.json, "zone"))) throw new IOException("De adressendienst antwoordt " + r.status);
+            String zone = Json.str(r.json, "zone");
+            return Json.obj("url", url, "reachable", true, "zone", zone, "ok", zone.equals(Json.str(x, "zone")));
+        } catch (IOException | RuntimeException e) {
+            String m = e.getMessage() == null ? "" : e.getMessage();
+            return Json.obj("url", url, "reachable", false, "zone", null, "ok", false, "error", m.contains("antwoordt") ? m : "Nog niet bereikbaar");
+        }
     }
 
     /** De server weghalen; de back-ups (en hun sleutel) blijven, zodat "Opnieuw opzetten" alles terugzet. */

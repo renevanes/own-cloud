@@ -182,7 +182,7 @@ export interface Adressen { app: ReturnType<typeof Fastify>; ctx: AdresCtx; clos
 
 export async function createAdressen(cfg: AdresConfig): Promise<Adressen> {
   const db = openAdresDb(cfg.dataDir);
-  const ctx: AdresCtx = { cfg, db, desec: new CentralDesec(cfg.desec), providers: new ProviderList(cfg.listUrl, cfg.listCacheMs) };
+  const ctx: AdresCtx = { cfg, db, desec: new CentralDesec(cfg.desec), providers: new ProviderList(cfg.listUrl, cfg.listCacheMs, cfg.lokaal) };
   const app = Fastify({ logger: false, trustProxy: cfg.trustProxy, bodyLimit: 16 * 1024 });
 
   // De handtekening gaat over de body zoals verstuurd: die bewaren we naast de geparste JSON.
@@ -274,6 +274,48 @@ export async function createAdressen(cfg: AdresConfig): Promise<Adressen> {
     const { dienst } = await authenticate(req);
     const { label } = labelOf(req.params.naam);
     return releaseName(ctx, dienst, label);
+  });
+
+  // ── Beheer, alleen door de Dienst op dezelfde server (de beheerder van de adressendienst, via /beheer in de app) ──
+  const beheer = async (req: FastifyRequest) => {
+    const { dienst } = await authenticate(req);
+    if (!ctx.providers.isLocal(dienst)) throw new AdresError(403, "Alleen de Dienst op deze server mag de adressendienst beheren");
+    return dienst;
+  };
+  app.get("/v1/beheer/status", async (req) => {
+    await beheer(req);
+    let zoneOk: boolean | null = null;
+    try { zoneOk = !!(await ctx.desec.getZone(cfg.zone)); } catch { zoneOk = null; }
+    const count = (st: string) => (db.prepare("SELECT COUNT(*) AS n FROM namen WHERE status = ?").get(st) as { n: number }).n;
+    return { zone: cfg.zone, zoneOk, publicUrl: cfg.publicUrl, namen: { actief: count("actief"), bezig: count("bezig"), vrijgegeven: count("vrijgegeven") } };
+  });
+  app.get("/v1/beheer/namen", async (req) => {
+    await beheer(req);
+    const rows = db.prepare("SELECT * FROM namen ORDER BY naam").all() as NaamRow[];
+    return { namen: rows.map((r) => ({
+      naam: r.naam, status: r.status, dienst: r.dienst, ref: r.ref, createdAt: r.created_at, updatedAt: r.updated_at, releasedAt: r.released_at,
+      vrijVanaf: r.status === "vrijgegeven" ? (r.released_at ?? 0) + cfg.quarantineMs : null,
+    })) };
+  });
+  app.get<{ Querystring: { naam?: string } }>("/v1/beheer/logboek", async (req) => {
+    await beheer(req);
+    const naam = req.query.naam ? labelOf(req.query.naam).naam : null;
+    const rows = (naam
+      ? db.prepare("SELECT * FROM logboek WHERE naam = ? ORDER BY id DESC LIMIT 200").all(naam)
+      : db.prepare("SELECT * FROM logboek ORDER BY id DESC LIMIT 100").all()) as { at: number; dienst: string | null; actie: string; naam: string | null; detail: string | null }[];
+    return { logboek: rows.map((r) => ({ at: r.at, dienst: r.dienst, actie: r.actie, naam: r.naam, detail: r.detail })) };
+  });
+  app.get("/v1/beheer/aanbieders", async (req) => {
+    await beheer(req);
+    let map: Map<string, KnownProvider>;
+    try { map = await ctx.providers.refresh(); } catch { throw new AdresError(503, "De lijst van aanbieders is nu niet op te halen"); }
+    const n = (url: string) => (db.prepare("SELECT COUNT(*) AS n FROM namen WHERE dienst = ? AND status != 'vrijgegeven'").get(normDienstUrl(url)) as { n: number }).n;
+    return { lijst: cfg.listUrl, aanbieders: [...map.values()].map((p) => ({ naam: p.naam, url: p.url, sleutel: !!p.key, namen: n(p.url) })) };
+  });
+  app.post<{ Params: { naam: string } }>("/v1/beheer/namen/:naam/vrijgeven", async (req) => {
+    const who = await beheer(req);
+    const { label } = labelOf(req.params.naam);
+    return releaseName(ctx, null, label, `beheer (${who})`);
   });
 
   return {

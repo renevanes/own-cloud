@@ -352,6 +352,16 @@ const aanbiederState = {
   server: { provider: "scaleway", region: "nl-ams-1", size: "DEV1-S", serverId: "nl-ams-1/srv-1/ip-1", ipv4: "192.0.2.10", createdAt: 1760000001000 },
   lastHealth: { at: 1760000002000, reachable: true, version: "1.9.0.4", uptime: 120, lastBackupAt: 1760000001500, backup: "aan", closing: false },
 };
+const adressenState = {
+  ...aanbiederState, company: { ...aanbiederState.company, vatPercent: "9", enforce: true }, envAt: 1760000000500,
+  accounts: { ...aanbiederState.accounts, adresUrl: undefined },
+  adressen: { zone: "eigencloud.nl", desecToken: "desec-centraal-geheim", host: "adressen.vanes.nl" },
+};
+/** Zoals na opzetten: wat er op de server staat (sha256), uitgerekend met de TS-code. */
+function withDeployed(a: any) {
+  const cfg = JSON.parse(JSON.stringify(withA(a)));
+  return { ...a, deployed: aanbieder.deployedHashes(cfg, aanbieder.migrate(cfg.console.aanbieder)) };
+}
 const withA = (a: unknown, extra: Record<string, unknown> = {}) => ({ ...sampleConfig, ...extra, console: { ...sampleConfig.console, mailRelay: "smtp://proj:geheim@smtp.tem.scaleway.com:587", extraDns: [{ sub: "x._domainkey", type: "TXT", value: "v=DKIM1" }], ...(a ? { aanbieder: a } : {}) } });
 const aanbiederConfigs = [
   withA(aanbiederState),
@@ -373,6 +383,13 @@ const aanbiederConfigs = [
   withA({ step: "opzetten", company: aanbiederState.company, url: "https://dienst.vanes.nl" }),
   // Eigen S3-opslag (custom) met een onbekende regio.
   withA({ ...aanbiederState, backup: { provider: "custom", endpoint: "https://s3.eigen.example", region: "us-east-1", country: "", bucket: "b-2", accessKey: "a", secretKey: "s" } }),
+  // Met de gratis-adressendienst op dezelfde server, btw 9% en de bewaker die echt uitzet; alles toegepast.
+  withA(withDeployed(adressenState)),
+  // Daarna btw gewijzigd (kan zonder nieuwe server), en de hostnaam van de adressendienst gewijzigd (nieuwe server).
+  withA({ ...withDeployed(adressenState), company: { ...adressenState.company, vatPercent: "21" } }),
+  withA({ ...withDeployed(adressenState), adressen: { ...adressenState.adressen, host: "adres.vanes.nl" }, dnsRemove: ["adressen"] }),
+  // Adressendienst onder een ander domein (de cloud publiceert dat record niet), Dienst verwijderd.
+  withA({ ...adressenState, adressen: { ...adressenState.adressen, host: "adressen.elders.example" }, server: null, removed: true }),
 ];
 const offers = { serverOffers: () => serverOffers(), storeOffers: () => storeOffers() };
 const clean = (x: unknown) => JSON.parse(JSON.stringify(x));
@@ -389,10 +406,20 @@ const aanbiederOut = aanbiederConfigs.map((cfg) => {
 const dienstInits = [
   { host: "dienst.vanes.nl", email: "rene@elders.example", env: [["A", "x y 'z' \\n $HOME"], ["B_2", ""]], appImage: "ghcr.io/renevanes/eigen-cloud:latest", caddyImage: "ghcr.io/renevanes/eigen-caddy:latest", appRef: "ghcr.io/renevanes/eigen-cloud:latest", caddyRef: "ghcr.io/renevanes/eigen-caddy:latest" },
   { host: "d.example.org", email: "a@b.c", env: [], appImage: "eigen-cloud:1", caddyImage: "caddy:2", appRef: "eigen-cloud:1", caddyRef: "caddy:2" },
+  { host: "dienst.vanes.nl", email: "rene@elders.example", env: [["BROKER_ADRES_URL", "http://127.0.0.1:4200"]], appImage: "ghcr.io/renevanes/eigen-cloud@sha256:" + "a".repeat(64), caddyImage: "ghcr.io/renevanes/eigen-caddy:latest", appRef: "ghcr.io/renevanes/eigen-cloud:latest", caddyRef: "ghcr.io/renevanes/eigen-caddy:latest",
+    adressen: { host: "adressen.vanes.nl", env: [["ADRES_ZONE", "eigencloud.nl"], ["ADRES_DESEC_TOKEN", "t'ok $x"]] } },
 ] as const;
 const dienstUserDataOut = dienstInits.map((o) => ({ o, out: dienstUserData(o as never) }));
 const urlCases = ["dienst.vanes.nl", " HTTPS://Dienst.Vanes.NL/ ", "http://dienst.vanes.nl", "https://dienst.vanes.nl/pad", "https://dienst.vanes.nl:8443", "https://u:p@d.nl", "localhost", "https://d.nl?x=1"]
   .map((input) => { try { return { input, out: aanbieder.cleanUrl(input) }; } catch (e) { return { input, error: (e as Error).message }; } });
+// Bedrijf: btw-percentage en de bewaker (zelfde controle en opslag in Java).
+const bedrijfCases = [
+  { name: "Van Es", email: "a@b.nl", vatPercent: " 9,50 % " }, { name: "Van Es", email: "a@b.nl", vatPercent: "21.0", enforce: true }, { name: "Van Es", email: "a@b.nl", vatPercent: "0" },
+  { name: "Van Es", email: "a@b.nl", vatPercent: "101" }, { name: "Van Es", email: "a@b.nl", vatPercent: "abc" }, { name: "Van Es", email: "a@b.nl", enforce: "on" }, { name: "Van Es", email: "a@b.nl", vatPercent: "" },
+].map((b) => {
+  const cfg = clean(withA(null));
+  try { aanbieder.saveBedrijf(cfg, b as never); return { b, company: cfg.console.aanbieder.company }; } catch (e) { return { b, error: (e as Error).message }; }
+});
 const smtpCases = ["smtp://user%40x.nl:geheim@smtp.example.org:587", "smtps://mail.example.org", "smtp://127.0.0.1:2525", "", "geen url"].map((input) => ({ input, out: aanbieder.smtpDisplay(input) }));
 
 // ───────── Kosten en budget (src/cluster/costs.ts, src/console/costs.ts) ─────────
@@ -435,7 +462,7 @@ const out = {
   json, presign, sign, userData: userDataOut, caddyfile: caddyOut,
   pickSize: pickCases, presets, apiResponses, fetchSizes: fetchSizesOut, dnsFormat, scalewayDns, signatures, secretFields,
   sheets, sheetDateText: dateText, dates, checklists, pbkdf2, passwords, proofs, sampleConfig,
-  aanbieder: aanbiederOut, costs: costsOut, dienstUserData: dienstUserDataOut, dienstCheckScript: dienstCheckScript(), updaterScript: updaterScript(), cleanUrl: urlCases, smtpDisplay: smtpCases,
+  aanbieder: aanbiederOut, costs: costsOut, dienstUserData: dienstUserDataOut, dienstCheckScript: dienstCheckScript(), updaterScript: updaterScript(), cleanUrl: urlCases, smtpDisplay: smtpCases, bedrijf: bedrijfCases,
 };
 fs.mkdirSync(path.dirname(outFile), { recursive: true });
 fs.writeFileSync(outFile, JSON.stringify(out, null, 1));

@@ -159,6 +159,10 @@ export function fakeUpstream() {
         st.desec.tokens.set(value, t);
         return [201, { id: t.id, name: t.name, token: value, perm_manage_tokens: t.perm_manage_tokens, perm_create_domain: t.perm_create_domain, perm_delete_domain: t.perm_delete_domain, is_valid: true }];
       }
+      if (q === "/auth/tokens/" && c.method === "GET") {
+        if (!tok.perm_manage_tokens) return denied;
+        return [200, [...st.desec.tokens.values()].filter((t) => t.account === tok.account).map((t) => ({ id: t.id, name: t.name, perm_manage_tokens: t.perm_manage_tokens }))];
+      }
       if ((m = /^\/auth\/tokens\/([^/]+)\/(policies\/rrsets\/)?$/.exec(q))) {
         if (!tok.perm_manage_tokens) return denied;
         const entry = [...st.desec.tokens.entries()].find(([, t]) => t.id === m![1] && t.account === tok.account);

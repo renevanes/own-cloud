@@ -2,6 +2,7 @@
 import { loadConfig, loadEnvFile, missingSettings } from "./config.js";
 import { createBroker } from "./app.js";
 import { restoreIfEmpty } from "./backup.js";
+import { applyOverride } from "./instellingen.js";
 
 loadEnvFile();
 // Nieuwe server met een lege datamap (bijv. na "Opnieuw opzetten"): eerst de nieuwste back-up terugzetten.
@@ -12,10 +13,18 @@ try {
   console.error(`[dienst] back-up terugzetten mislukt: ${(e as Error).message}`);
   process.exit(1);
 }
+// Instellingen die later vanuit de app zijn gewijzigd (zonder nieuwe server) gaan vóór dienst.env, als ze nieuwer zijn.
+try {
+  const at = applyOverride(process.env);
+  if (at) console.log(`[dienst] instellingen uit de app van ${new Date(at).toISOString()} toegepast`);
+} catch (e) {
+  console.error(`[dienst] gewijzigde instellingen lezen mislukt (dienst.env geldt): ${(e as Error).message}`);
+}
 const cfg = loadConfig();
 const missing = missingSettings(cfg);
 if (missing.length) console.warn(`[dienst] Nog niet ingesteld: ${missing.join(", ")}. Zie BROKER.md.`);
-const broker = await createBroker(cfg);
+// Na nieuwe instellingen: netjes stoppen; Docker (restart: unless-stopped) start de Dienst opnieuw.
+const broker = await createBroker(cfg, { restart: () => { console.log("[dienst] opnieuw starten voor nieuwe instellingen"); void stop(); } });
 await broker.app.listen({ port: cfg.port, host: cfg.host });
 broker.startLoops();
 console.log(`[dienst] sleutel van deze aanbieder (voor "sleutel" in aanbieders.json): ${cfg.providerPublicKey}`);

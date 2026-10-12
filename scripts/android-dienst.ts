@@ -5,6 +5,7 @@
  *   GET  <control>/mails          → ontvangen mails
  *   POST <control>/pay?order=<id> → betaling op "betaald" zetten en de webhook sturen
  *   GET  <control>/aanbieders.json → openbare lijst van aanbieders (met deze dienst, een ongeldige en een andere)
+ *   GET  <control>/aanbieders-standaard.json, /aanbieders-nog-niet.json → met een standaardaanbieder (bereikbaar of niet)
  *   POST <control>/brand           → huisstijl wijzigen ({name, accentColor, contact, …}; logoPng = base64 van een PNG)
  *   POST <control>/invite          → uitnodigingscode maken (door de eigenaar) → {code}
  *   POST <control>/announcement    → bericht van de aanbieder ({title, body, severity})
@@ -79,6 +80,9 @@ const control = http.createServer(async (req, res) => {
   res.setHeader("content-type", "application/json");
   try {
     if (u.pathname === "/aanbieders.json") return res.end(JSON.stringify([{ naam: "Dienst Test", url: PUBLIC, land: "NL" }, { naam: "Kapot", url: "ftp://nee" }, { naam: "Ander", url: "https://ander.example" }]));
+    // Met een standaardaanbieder (alleen de eerste telt) en aanbieders die niet antwoorden.
+    if (u.pathname === "/aanbieders-standaard.json") return res.end(JSON.stringify([{ naam: "Ander", url: "http://127.0.0.1:1" }, { naam: "Dienst Test", url: `${PUBLIC}/`, land: "NL", standaard: true, adressen: "https://adressen.example" }, { naam: "Ook standaard", url: "http://127.0.0.1:2/", standaard: true }]));
+    if (u.pathname === "/aanbieders-nog-niet.json") return res.end(JSON.stringify([{ naam: "Nog niet", url: "http://127.0.0.1:3", standaard: true }]));
     if (req.method === "POST" && u.pathname === "/brand") {
       const b = await readBody(req);
       if (b.logoPng) saveLogo(broker.ctx.db, "image/png", Buffer.from(b.logoPng, "base64"));

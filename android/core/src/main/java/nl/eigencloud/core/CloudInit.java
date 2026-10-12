@@ -177,6 +177,9 @@ public final class CloudInit {
     public static final class DienstInit {
         public String host, email, appImage, caddyImage, appRef, caddyRef;
         public java.util.List<String[]> env = new java.util.ArrayList<>();
+        /** Ook de gratis-adressendienst op deze server (null = niet): hostnaam en adressen.env. */
+        public String adressenHost;
+        public java.util.List<String[]> adressenEnv = new java.util.ArrayList<>();
     }
 
     private static final java.util.regex.Pattern ENV_NAME = java.util.regex.Pattern.compile("^[A-Z][A-Z0-9_]*$");
@@ -199,11 +202,45 @@ public final class CloudInit {
     public static String dienstUserData(DienstInit o) {
         if (!HOST.matcher(o.host).matches() || !MAIL.matcher(o.email).matches()) throw new IllegalArgumentException("Ongeldig adres of e-mailadres");
         String prefix = updatePrefix(o.appRef);
+        String ad = o.adressenHost;
+        if (ad != null && !HOST.matcher(ad).matches()) throw new IllegalArgumentException("Ongeldige hostnaam voor de adressendienst");
         String head = DienstTemplates.HEAD.replace("@@HOST@@", o.host).replace("@@EMAIL@@", o.email)
                 .replace("@@APP_IMAGE@@", o.appImage).replace("@@CADDY_IMAGE@@", o.caddyImage)
                 .replace("@@APP_REF@@", o.appRef).replace("@@CADDY_REF@@", o.caddyRef)
                 .replace("@@ENV@@", dienstEnvFile(o.env));
+        if (ad != null) head = withAdressen(head, ad, dienstEnvFile(o.adressenEnv), o.appImage);
         return head + (prefix != null ? DienstTemplates.UPDATER.replace("@@PREFIX@@", prefix) : "# geen updates op afstand: image zonder registry-pad") + "\n";
+    }
+
+    private static String insertAfter(String s, String anchor, String text) {
+        int i = s.indexOf(anchor);
+        if (i < 0) throw new IllegalStateException("sjabloon: " + anchor);
+        return s.substring(0, i + anchor.length()) + text + s.substring(i + anchor.length());
+    }
+
+    /** De adressendienst in het opstartscript (zelfde tekst als de ${ad ? … : ""}-stukken in dienstUserData in TS). */
+    private static String withAdressen(String head, String host, String envFile, String appImage) {
+        String h = insertAfter(head, "mkdir -p /srv/dienst/data /srv/dienst/caddy", " /srv/dienst/adressen");
+        h = insertAfter(h, "chmod 600 /srv/dienst/dienst.env\n", "cat > /srv/dienst/adressen.env <<'EOF'\n" + envFile + "\nEOF\nchmod 600 /srv/dienst/adressen.env\n");
+        h = insertAfter(h, "\treverse_proxy 127.0.0.1:4100\n}\n", host + " {\n\tencode zstd gzip\n\treverse_proxy 127.0.0.1:4200\n}\n");
+        h = insertAfter(h, "      - /srv/dienst/dienst.env:/etc/dienst/dienst.env:ro\n", "      - /srv/dienst/adressen:/adressen\n"
+                + "  adressen:\n"
+                + "    image: " + appImage + "  # eigen-app\n"
+                + "    restart: unless-stopped\n"
+                + "    network_mode: host\n"
+                + "    command: [\"node\", \"dist/adressen/main.js\"]\n"
+                + "    env_file: /srv/dienst/adressen.env\n"
+                + "    environment:\n"
+                + "      - ADRES_DATA_DIR=/data\n"
+                + "      - ADRES_HOST=127.0.0.1\n"
+                + "      - ADRES_PORT=4200\n"
+                + "      - ADRES_TRUST_PROXY=loopback\n"
+                + "      - ADRES_LOKAAL_SLEUTEL=/dienst/aanbieder.key\n"
+                + "      - ADRES_WACHT_OP=/dienst/dienst.sqlite\n"
+                + "    volumes:\n"
+                + "      - /srv/dienst/adressen:/data\n"
+                + "      - /srv/dienst/data:/dienst:ro\n");
+        return h;
     }
 
     /** Het updatescript (updaterScript in cloudinit.ts). */

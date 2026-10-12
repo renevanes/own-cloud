@@ -41,6 +41,17 @@ export interface BrokerConfig {
    * in plaats van uit BROKER_FREE_ZONE, zodat de klant zijn adres houdt als hij overstapt. Zie ADRESSEN.md.
    */
   adresUrl: string | null;
+  /** true als adresUrl uit BROKER_ADRES_URL komt (gaat altijd voor); anders zoekt de Dienst hem op in de lijst. */
+  adresFromEnv: boolean;
+  /**
+   * De lijst van aanbieders (BROKER_LIST_URL, standaard aanbieders.json op GitHub; "uit" = niet kijken). Staat deze
+   * Dienst erop met zijn sleutel, dan gebruikt hij vanzelf de adressendienst van de standaardregel ("adressen").
+   */
+  listUrl: string | null;
+  /** Openbaar adres van de adressendienst op deze server (BROKER_ADRES_PUBLIEK), voor de regel op de lijst; null = geen. */
+  adressenPubliek: string | null;
+  /** Database van de adressendienst op deze server (BROKER_BACKUP_ADRESSEN): gaat mee in de back-up van de Dienst. */
+  adressenDb: string | null;
   /** Ed25519-sleutel van deze aanbieder (aanbieder.key in de datamap); ondertekent verzoeken aan de adressendienst. */
   providerKey: crypto.KeyObject;
   /** De publieke sleutel daarvan (base64 SPKI) voor "sleutel" in aanbieders.json. */
@@ -77,6 +88,8 @@ export interface BrokerConfig {
 }
 
 export const NAMESERVERS = ["ns1.desec.io", "ns2.desec.org"];
+/** De openbare lijst van aanbieders in de repository. */
+export const DEFAULT_LIST_URL = "https://raw.githubusercontent.com/renevanes/own-cloud/main/aanbieders.json";
 
 /** Namen die niet als gratis adres uitgedeeld worden (van de dienst zelf, of verwarrend). */
 export const RESERVED_LABELS = new Set(["www", "mail", "cloud", "api", "dienst", "admin", "beheer", "app", "ns1", "ns2", "smtp", "imap", "_acme", "status", "help", "support", "info", "test"]);
@@ -220,6 +233,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BrokerConfig {
     publicUrl: trim(env.BROKER_PUBLIC_URL || `http://localhost:${port}`),
     freeZone: env.BROKER_FREE_ZONE ? env.BROKER_FREE_ZONE.trim().toLowerCase().replace(/^\.|\.$/g, "") : null,
     adresUrl: env.BROKER_ADRES_URL ? trim(env.BROKER_ADRES_URL.trim()) : null,
+    adresFromEnv: !!env.BROKER_ADRES_URL,
+    listUrl: env.BROKER_LIST_URL === "uit" ? null : env.BROKER_LIST_URL || DEFAULT_LIST_URL,
+    adressenPubliek: env.BROKER_ADRES_PUBLIEK ? trim(env.BROKER_ADRES_PUBLIEK.trim()) : null,
+    adressenDb: env.BROKER_BACKUP_ADRESSEN || null,
     providerKey,
     providerPublicKey: crypto.createPublicKey(providerKey).export({ type: "spki", format: "der" }).toString("base64"),
     termsUrl: env.BROKER_TERMS_URL || null,

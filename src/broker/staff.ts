@@ -24,9 +24,9 @@ export const ROLE_LABELS: Record<Role, string> = { eigenaar: "Eigenaar", beheer:
 
 export type Perm =
   | "customers.read" | "customers.act" | "costs" | "money" | "refund" | "offering" | "invites"
-  | "announcements.read" | "announcements" | "tickets" | "health" | "staff" | "brand" | "audit";
+  | "announcements.read" | "announcements" | "tickets" | "health" | "staff" | "brand" | "audit" | "adressen";
 
-const ALL: Perm[] = ["customers.read", "customers.act", "costs", "money", "refund", "offering", "invites", "announcements.read", "announcements", "tickets", "health", "staff", "brand", "audit"];
+const ALL: Perm[] = ["customers.read", "customers.act", "costs", "money", "refund", "offering", "invites", "announcements.read", "announcements", "tickets", "health", "staff", "brand", "audit", "adressen"];
 
 export const PERMISSIONS: Record<Role, Perm[]> = {
   eigenaar: ALL,
@@ -392,7 +392,7 @@ export function registerStaffAuth(app: FastifyInstance, ctx: Ctx, httpError: Htt
 
   app.get("/v1/admin/me", async (req, reply) => {
     const s = me(req, reply); if (!s) return;
-    return { staff: staffView(ctx, s), permissions: PERMISSIONS[s.role], brand: getBrand(ctx) };
+    return { staff: staffView(ctx, s), permissions: PERMISSIONS[s.role], brand: getBrand(ctx), adressendienst: !!ctx.cfg.adressenPubliek };
   });
   app.post("/v1/admin/auth/logout", async (req, reply) => {
     const s = me(req, reply); if (!s) return;

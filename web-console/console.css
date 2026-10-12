@@ -46,6 +46,8 @@ label small { color: var(--muted); }
 .choice { text-align: left; display: grid; gap: 4px; padding: 18px 20px; border: 1.5px solid var(--line); border-radius: var(--radius-l); background: var(--panel); }
 .choice b { font-size: var(--fs-1); }
 .choice:hover { border-color: var(--accent); }
+.choice:disabled { opacity: .6; cursor: not-allowed; }
+.choice:disabled:hover { border-color: var(--line); }
 
 /* ── Assistent: het spoor ── */
 .wizard { display: grid; grid-template-columns: 240px minmax(0, 680px); gap: 48px; padding: 18px 28px 80px; max-width: 1040px; margin: 0 auto; }

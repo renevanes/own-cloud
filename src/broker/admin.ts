@@ -4,15 +4,19 @@
  */
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { type OrderRow, type PaymentRow, getOrder, getCustomer, orderState, event } from "./db.js";
+import { type OrderRow, type PaymentRow, getOrder, getCustomer, orderState, event, setStatus } from "./db.js";
 import { type Ctx, bundleOf, getSteps, todayNl } from "./context.js";
 import type { Bundle } from "./config.js";
 import { ApiError } from "./apis.js";
 import { UserError, billingView, outstandingOf, unsettled } from "./billing.js";
-import { suspendOrder, resumeOrder, cancelOrder, retryOrder, cleanupOrder, projectServers } from "./ops.js";
+import { suspendOrder, resumeOrder, cancelOrder, retryOrder, cleanupOrder, projectServers, releaseAdres } from "./ops.js";
+import { isCentral } from "./provision.js";
+import { runGuard } from "./guard.js";
+import { type LijstRegel, fetchLijst } from "./adres.js";
+import { DEFAULT_LIST_URL } from "./config.js";
 import { type InvoiceRow, readInvoice, renderInvoiceHtml, toCents, fromCents, vatSplit } from "./invoice.js";
 import { readKit } from "./provision.js";
-import { getBrand, updateBrand, saveLogo, getLogo, putBundle, deleteBundle, publicBundle, LOGO_MAX } from "./brand.js";
+import { getBrand, updateBrand, saveLogo, getLogo, putBundle, deleteBundle, publicBundle, saveCosts, LOGO_MAX } from "./brand.js";
 import {
   type Perm, type Role, type StaffRow, ROLES, ROLE_LABELS, PERMISSIONS, can, StaffError, staffFromRequest, staffView, audit,
   addStaff, setRole, removeStaff, resetSecondFactor, getStaff, mailInvite,
@@ -82,6 +86,10 @@ function actionsFor(o: OrderRow) {
     cancel: o.status !== "cancelled",
     retry: ["failed", "provisioning"].includes(o.status),
     cleanup: o.status === "cancelled" && !orderState(o).cleanedAt,
+    /** Gratis adres van de adressendienst teruggeven (alleen na opzeggen, als het nog van ons is). */
+    adres: o.status === "cancelled" && isCentral(o) && !orderState(o).adresReleasedAt,
+    /** Achterstand buiten de dienst om betaald: met de hand afboeken. */
+    afboeken: o.status === "payment_problem",
   };
 }
 
@@ -122,15 +130,54 @@ export function registerAdmin(app: FastifyInstance, ctx: Ctx, httpError: HttpErr
 
   // ── Overzicht ──
   // Aanmelden voor de openbare lijst van aanbieders: de regel voor aanbieders.json, met de sleutel van deze dienst.
+  // Bestaat de lijst al, dan neemt de regel land, omschrijving en (voor de beheerders) "standaard" daaruit over, en
+  // krijg je ook de hele nieuwe lijst om in één keer op GitHub te plakken.
   app.get("/v1/admin/lijst", admin("brand", async () => {
     const b = getBrand(ctx);
-    const entry = { naam: b.name, url: ctx.cfg.publicUrl, land: "NL", contact: b.contact.email ?? "", omschrijving: "", sleutel: ctx.cfg.providerPublicKey };
-    let opLijst = false;
-    try {
-      const r = await fetch(process.env.EIGEN_AANBIEDERS_URL || "https://raw.githubusercontent.com/renevanes/own-cloud/main/aanbieders.json", { signal: AbortSignal.timeout(10_000) });
-      if (r.ok) opLijst = ((await r.json()) as { url?: string }[]).some((a) => (a.url ?? "").replace(/\/$/, "") === ctx.cfg.publicUrl);
-    } catch { /* lijst niet bereikbaar */ }
-    return { entry, opLijst, editUrl: "https://github.com/renevanes/own-cloud/edit/main/aanbieders.json" };
+    const norm = (u: unknown) => String(u ?? "").trim().replace(/\/+$/, "").toLowerCase();
+    let lijst: LijstRegel[] | null = null;
+    try { lijst = await fetchLijst(process.env.EIGEN_AANBIEDERS_URL || ctx.cfg.listUrl || DEFAULT_LIST_URL); } catch { /* lijst niet bereikbaar */ }
+    const cur = lijst?.find((a) => norm(a.url) === norm(ctx.cfg.publicUrl)) ?? null;
+    const adressen = ctx.cfg.adressenPubliek ?? (typeof cur?.adressen === "string" ? cur.adressen : null);
+    const entry: LijstRegel = {
+      naam: b.name, url: ctx.cfg.publicUrl, land: typeof cur?.land === "string" ? cur.land : "NL", contact: b.contact.email ?? (typeof cur?.contact === "string" ? cur.contact : ""),
+      omschrijving: typeof cur?.omschrijving === "string" ? cur.omschrijving : "", sleutel: ctx.cfg.providerPublicKey,
+      ...(cur?.standaard === true ? { standaard: true } : {}), ...(adressen ? { adressen } : {}),
+    };
+    const nieuweLijst = lijst ? (cur ? lijst.map((a) => (a === cur ? entry : a)) : [...lijst, entry]) : null;
+    const same = !!cur && JSON.stringify(cur) === JSON.stringify(entry);
+    return {
+      entry, opLijst: !!cur, actueel: same, sleutelKlopt: !!cur && cur.sleutel === ctx.cfg.providerPublicKey,
+      nieuweLijst: nieuweLijst ? `${JSON.stringify(nieuweLijst, null, 2)}\n` : null,
+      adressendienst: ctx.cfg.adressenPubliek, adresUrl: ctx.cfg.adresUrl,
+      editUrl: "https://github.com/renevanes/own-cloud/edit/main/aanbieders.json",
+    };
+  }));
+
+  // ── Adressendienst op deze server (alleen als de console hem hier opzette; zie ADRESSEN.md) ──
+  const adresBeheer = () => {
+    if (!ctx.cfg.adressenPubliek || !ctx.apis.adres) throw new UserError(404, "Op deze server draait geen adressendienst");
+    return ctx.apis.adres;
+  };
+  const adresCall = async <T>(fn: () => Promise<T>) => {
+    try { return await fn(); }
+    catch (e) {
+      if (e instanceof ApiError && e.status >= 400 && e.status < 500) throw new UserError(e.status === 404 ? 404 : 409, e.message);
+      throw e;
+    }
+  };
+  app.get("/v1/admin/adressendienst", admin("adressen", async () => {
+    const a = adresBeheer();
+    const [status, namen, aanbieders] = await Promise.all([adresCall(() => a.beheerStatus()), adresCall(() => a.beheerNamen()), adresCall(() => a.beheerAanbieders()).catch((e) => ({ error: (e as Error).message }))]);
+    return { publicUrl: ctx.cfg.adressenPubliek, status, namen: namen.namen, aanbieders };
+  }));
+  app.get<{ Querystring: { naam?: string } }>("/v1/admin/adressendienst/logboek", admin("adressen", async (_s, req) => adresCall(() => adresBeheer().beheerLogboek(req.query.naam || undefined))));
+  app.post<{ Params: { naam: string }; Body: { sure?: boolean } }>("/v1/admin/adressendienst/namen/:naam/vrijgeven", admin("adressen", async (s, req) => {
+    const a = adresBeheer();
+    if (req.body?.sure !== true) throw new UserError(400, "Bevestig dat je deze naam wilt vrijgeven");
+    const r = await adresCall(() => a.beheerVrijgeven(req.params.naam));
+    audit(ctx, s, "adres-vrijgeven", r.naam, { vrijVanaf: r.vrijVanaf });
+    return r;
   }));
 
   app.get("/v1/admin/overview", admin("announcements.read", async (s) => {
@@ -226,6 +273,26 @@ export function registerAdmin(app: FastifyInstance, ctx: Ctx, httpError: HttpErr
   }));
   app.post("/v1/admin/orders/:id/retry", orderAction("retry", (o) => retryOrder(ctx, o.id)));
   app.post("/v1/admin/orders/:id/cleanup", orderAction("cleanup", (o, body) => cleanupOrder(ctx, o.id, body.sure === true)));
+  app.post("/v1/admin/orders/:id/adres-vrijgeven", orderAction("adres", (o, body) => releaseAdres(ctx, o.id, body.sure === true)));
+  // Een achterstand die buiten de dienst om is betaald (bijv. per bankoverschrijving): mislukte incasso's afboeken.
+  app.post<{ Params: { id: string }; Body: { note?: string } }>("/v1/admin/orders/:id/afboeken", admin("money", async (s, req) => {
+    const o = needOrder(req.params.id);
+    const rows = unsettled(ctx, o.id);
+    if (!rows.length) throw new UserError(409, "Er staat niets open");
+    const note = String(req.body?.note ?? "").trim().slice(0, 200);
+    const by = `hand:${s.email}`;
+    for (const r of rows) db.prepare("UPDATE payments SET settled_by = ? WHERE id = ? AND settled_by IS NULL").run(by, r.id);
+    if (o.status === "payment_problem") setStatus(db, o.id, o.kit_enc ? "ready" : "provisioning");
+    event(db, o.id, "settled-by-hand", { by: s.email, payments: rows.map((r) => r.id), ...(note ? { note } : {}) });
+    audit(ctx, s, "order-afboeken", o.id, { domain: o.domain, payments: rows.length, ...(note ? { note } : {}) });
+    return { ok: true, settled: rows.length, order: orderListView(ctx, getOrder(db, o.id)!) };
+  }));
+  // De bewaker nu laten kijken (anders elk uur vanzelf).
+  app.post("/v1/admin/bewaker", admin("customers.act", async (s) => {
+    const findings = await runGuard(ctx);
+    audit(ctx, s, "bewaker", null, { findings: findings.length });
+    return { findings, enforce: ctx.cfg.enforce };
+  }));
 
   app.get<{ Params: { id: string } }>("/v1/admin/orders/:id/servers", admin("costs", async (_s, req) => {
     const o = needOrder(req.params.id);
@@ -366,6 +433,13 @@ export function registerAdmin(app: FastifyInstance, ctx: Ctx, httpError: HttpErr
   }));
 
   // ── Huisstijl ──
+  // Geschatte kosten per serverformaat en per GB opslag (voor de marge); gaan voor bundles.json.
+  app.put<{ Body: any }>("/v1/admin/costs", admin("offering", async (s, req) => {
+    const c = input(() => saveCosts(ctx, req.body ?? {}));
+    audit(ctx, s, "costs-change", null, c);
+    return { costs: c };
+  }));
+
   app.get("/v1/admin/brand", admin("brand", async () => ({ brand: getBrand(ctx), defaults: { name: ctx.cfg.brandName, termsUrl: ctx.cfg.termsUrl, privacyUrl: ctx.cfg.privacyUrl } })));
   app.put<{ Body: any }>("/v1/admin/brand", admin("brand", async (s, req) => {
     const brand = input(() => updateBrand(ctx, req.body ?? {}));

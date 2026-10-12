@@ -205,7 +205,7 @@ export async function prepareStore(cfg: StoreConfig): Promise<StepResult[]> {
 
 /** Stuurt gewijzigde beheerinstellingen naar het draaiende cluster (ondertekend). */
 type ConsolePart = { budget?: number | null; catalog?: Parameters<typeof serverPrices>[0]; mailRelay?: string; spfExtra?: string; alertEmail?: string; extraDns?: unknown[]; maxUsers?: number; dienst?: { url?: string; orderId?: string; applied?: boolean };
-  aanbieder?: { url?: string; removed?: boolean; dnsRemove?: string[]; server?: { ipv4?: string; ipv6?: string } | null } };
+  aanbieder?: { url?: string; removed?: boolean; dnsRemove?: string[]; server?: { ipv4?: string; ipv6?: string } | null; adressen?: { host?: string } } };
 
 /**
  * DNS-records voor de Eigen Cloud Dienst van een aanbieder die de cloud zelf publiceert (extra_dns): A/AAAA voor het
@@ -220,11 +220,14 @@ export function aanbiederDns(c: { domain?: string } & { console?: ConsolePart })
   for (const sub of a.dnsRemove ?? []) out.push({ sub, type: "A", value: "" }, { sub, type: "AAAA", value: "" });
   let host = "";
   try { host = a.url ? new URL(a.url).hostname : ""; } catch { /* geen geldig adres */ }
-  const sub = host ? subOf(host) : null;
-  if (sub && (a.removed || a.server?.ipv4)) {
-    const keep = out.filter((x) => x.sub !== sub);
-    out.length = 0;
-    out.push(...keep, { sub, type: "A", value: a.removed ? "" : a.server?.ipv4 ?? "" }, { sub, type: "AAAA", value: a.removed ? "" : a.server?.ipv6 ?? "" });
+  // De Dienst en (als hij er draait) de adressendienst op dezelfde server.
+  for (const h of [host, a.adressen?.host ?? ""]) {
+    const sub = h ? subOf(h) : null;
+    if (sub && (a.removed || a.server?.ipv4)) {
+      const keep = out.filter((x) => x.sub !== sub);
+      out.length = 0;
+      out.push(...keep, { sub, type: "A", value: a.removed ? "" : a.server?.ipv4 ?? "" }, { sub, type: "AAAA", value: a.removed ? "" : a.server?.ipv6 ?? "" });
+    }
   }
   return out;
 }

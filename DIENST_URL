@@ -1,3 +1,3 @@
-# Adres van de Eigen Cloud Dienst (bijv. https://dienst.eigencloud.nl). Vul het in zodra de dienst draait
-# (zie BROKER.md): dan bieden de app en de console hem aan nieuwe gebruikers aan. Leeg = optie verborgen.
-# EIGEN_DIENST_URL (omgeving of GitHub-variabele) gaat voor.
+# Vaste standaardaanbieder voor deze versie (bijv. https://dienst.eigencloud.nl). Meestal leeg laten: de standaard komt
+# uit aanbieders.json (de regel met "standaard": true) en verandert dan zonder nieuwe versie van de app; de app biedt
+# hem pas aan als hij antwoordt. Wat hier staat (of in EIGEN_DIENST_URL, omgeving of GitHub-variabele) gaat voor.
