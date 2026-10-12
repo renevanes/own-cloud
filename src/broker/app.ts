@@ -24,7 +24,7 @@ import { type InvoiceRow, readInvoice, renderInvoiceHtml } from "./invoice.js";
 import { RateLimit, EMAIL, issueCode, checkCode } from "./codes.js";
 import { getBrand, loadOfferingFromDb, publicBundle } from "./brand.js";
 import { registerStaffAuth, ensureOwner } from "./staff.js";
-import { registerAdmin, dienstOverzicht } from "./admin.js";
+import { registerAdmin, dienstOverzicht, lijstView } from "./admin.js";
 import { registerCustomerSupport, checkHealth, useInvite, SupportError, getInvite, inviteState } from "./support.js";
 import { DienstBackup, beheerToken } from "./backup.js";
 import { discoverAdres } from "./adres.js";
@@ -141,6 +141,11 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
     if (!beheerOk(req)) return httpError(reply, 401, "Geen toegang");
     return { version: VERSION(), ...dienstOverzicht(ctx) };
   });
+  /** De regel voor de lijst van aanbieders, voor "Op de lijst" in de console (die maakt er een voorstel op GitHub van). */
+  app.get("/v1/status/lijst", async (req, reply) => {
+    if (!beheerOk(req)) return httpError(reply, 401, "Geen toegang");
+    return lijstView(ctx);
+  });
   app.post("/v1/status/handover", async (req, reply) => {
     if (!beheerOk(req)) return httpError(reply, 401, "Geen toegang");
     closing = true;
@@ -151,6 +156,21 @@ export async function createBroker(cfg: BrokerConfig, deps: { apis?: Apis; mail?
       closing = false;
       backup?.start();
       return httpError(reply, 502, `Laatste back-up mislukt: ${(e as Error).message}`);
+    }
+  });
+  /**
+   * Kan deze server bij Openprovider (staat zijn IP-adres op de lijst van de API-gebruiker)? Voor "Wat je nodig hebt" in
+   * de console: de controle moet van deze server komen. Alleen lezen: inloggen en één domein opvragen.
+   */
+  app.get("/v1/status/check/openprovider", async (req, reply) => {
+    if (!beheerOk(req)) return httpError(reply, 401, "Geen toegang");
+    if (!cfg.openprovider.username || !cfg.openprovider.password) return { ok: false, ingesteld: false, detail: "Je Dienst heeft nog geen Openprovider-gegevens; pas eerst de wijzigingen toe" };
+    try {
+      await ctx.apis.openprovider.req("GET", "/domains?limit=1");
+      return { ok: true, ingesteld: true, detail: "De server van je Dienst kan bij Openprovider" };
+    } catch (e) {
+      const m = (e as Error).message;
+      return { ok: false, ingesteld: true, detail: /token|401|inlog/i.test(m) ? "Openprovider laat de server van je Dienst niet inloggen: zet het IP-adres van de server op de lijst" : m.slice(0, 200) };
     }
   });
 

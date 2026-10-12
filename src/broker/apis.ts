@@ -86,7 +86,9 @@ export class Openprovider {
 
   async check(name: string, extension: string) {
     const j = await this.req("POST", "/domains/check", { domains: [{ name, extension }], with_price: true });
-    const res = j?.data?.results?.[0] ?? {};
+    const res = (Array.isArray(j?.data) ? j.data[0] : j?.data?.results?.[0]) ?? {};
+    // Een premium-domein kost meer dan price.reseller (premium.price.create): niet aanbieden tegen de gewone prijs.
+    if (res.is_premium === true) return { available: false, price: null };
     const p = res.price?.reseller ?? res.price?.product ?? null;
     const price = p && p.price !== undefined && p.price !== null ? { currency: String(p.currency ?? "EUR"), value: Number(p.price).toFixed(2) } : null;
     return { available: res.status === "free", price };

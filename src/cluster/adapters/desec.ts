@@ -9,7 +9,7 @@ export class DesecDns implements DnsProvider {
   constructor(readonly name: string, private cfg: { token: string; zone: string; api?: string }) {}
   async setRecords(sub: string, type: string, values: string[], ttl: number) {
     // deSEC hanteert standaard een minimale TTL van 3600 s; dat is prima omdat failover niet van DNS afhangt.
-    const api = (this.cfg.api || "https://desec.io/api/v1").replace(/\/+$/, "");
+    const api = (this.cfg.api || desecApi()).replace(/\/+$/, "");
     const r = await fetch(`${api}/domains/${this.cfg.zone}/rrsets/`, {
       method: "PUT",
       headers: { authorization: `Token ${this.cfg.token}`, "content-type": "application/json" },

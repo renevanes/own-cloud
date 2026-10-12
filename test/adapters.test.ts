@@ -417,7 +417,7 @@ test("registry → catalogus, catalog.json en Caddy", () => {
   assert.deepEqual(catalog.serverOffers().map((o) => o.id), ["scaleway", "hetzner", "upcloud", "exoscale", "ovh"]);
   assert.ok(!catalog.serverOffers().some((o) => o.id === "local"), "testaanbieder niet zichtbaar");
   assert.ok(catalog.serverOffers(true).some((o) => o.id === "local"));
-  assert.deepEqual(catalog.dnsOffers().map((o) => [o.id, o.sharesKeyWith ?? null]), [["desec", null], ["scaleway", "scaleway"], ["hetzner", "hetzner"], ["exoscale", "exoscale"], ["ovh", "ovh"]]);
+  assert.deepEqual(catalog.dnsOffers().map((o) => [o.id, o.sharesKeyWith ?? null]), [["desec", null], ["scaleway", "scaleway"], ["hetzner", "hetzner"], ["exoscale", "exoscale"], ["ovh", "ovh"], ["openprovider", null]]);
   const j = catalogJson();
   assert.deepEqual(JSON.parse(JSON.stringify(j)), j, "pure data");
   assert.equal(j.version, 2);

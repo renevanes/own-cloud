@@ -64,6 +64,12 @@ GROUPS_STARTED+=($!)
 rm -f "$BUILD/dienst-info.json"
 setsid npx tsx scripts/android-dienst.ts "$BUILD/dienst-info.json" >"$BUILD/dienst.log" 2>&1 &
 GROUPS_STARTED+=($!)
+rm -f "$BUILD/github-info.json"
+setsid npx tsx scripts/android-github.ts "$BUILD/github-info.json" >"$BUILD/github.log" 2>&1 &
+GROUPS_STARTED+=($!)
+rm -f "$BUILD/nodig-info.json"
+setsid npx tsx scripts/android-nodig.ts "$BUILD/nodig-info.json" >"$BUILD/nodig.log" 2>&1 &
+GROUPS_STARTED+=($!)
 setsid npx tsx scripts/android-cluster-node.ts "$BUILD/cluster-info.json" >"$BUILD/cluster.log" 2>&1 &
 GROUPS_STARTED+=($!)
 CLUSTER_HELPER=$!
@@ -108,6 +114,16 @@ fi
 jrun QuickSetupTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
 jrun AanbiederTest MOTO_URL="http://127.0.0.1:$MOTO_PORT" SMTP_INFO="$BUILD/smtp-info.json"
 jrun AanbiederHubTest MOTO_URL="http://127.0.0.1:$MOTO_PORT" SMTP_INFO="$BUILD/smtp-info.json"
+if wait_for 60 test -s "$BUILD/nodig-info.json"; then
+  jrun BenodigdhedenTest NODIG_INFO="$BUILD/nodig-info.json"
+else
+  echo "   nep-aanbieders (nodig) niet gestart:"; tail -30 "$BUILD/nodig.log"; RESULTS+=("FAIL BenodigdhedenTest"); FAILED=1
+fi
+if wait_for 60 test -s "$BUILD/github-info.json"; then
+  jrun GitHubTest GITHUB_INFO="$BUILD/github-info.json"
+else
+  echo "   nep-GitHub niet gestart:"; tail -30 "$BUILD/github.log"; RESULTS+=("FAIL GitHubTest"); FAILED=1
+fi
 run golden-verify.ts npx tsx scripts/golden-verify.ts "$BUILD"
 # Na golden-verify: die controleert berichten met een geldigheid van een paar minuten (sinds CryptoGoldenTest).
 if [ "$DIENST_OK" -eq 1 ]; then

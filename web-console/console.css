@@ -269,3 +269,5 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
 .check small { flex-basis: 100%; margin-left: 26px; }
 .brand, .bar .link { white-space: nowrap; }
 @media (max-width: 480px) { .brand span { display: none; } .bar { gap: 14px; } }
+/* Op de lijst: je regel zoals hij in aanbieders.json komt */
+.hubpane pre.regel { margin: 0; background: var(--bg); border: 1.5px solid var(--line); border-radius: var(--radius-s); padding: 10px 12px; font-size: 12.5px; white-space: pre-wrap; word-break: break-all; max-height: 260px; overflow: auto; }

@@ -534,6 +534,25 @@
       "keyHelp": "Je domein moet bij OVHcloud DNS staan (Web Cloud → Domeinen → DNS-zone). De sleutel heeft GET/POST/DELETE-rechten op /domain/zone/* nodig; daarmee haalt je server ook zelf zijn HTTPS-certificaten.",
       "signupUrl": "https://www.ovhcloud.com/nl/public-cloud/",
       "sharesKeyWith": "ovh"
+    },
+    {
+      "id": "openprovider",
+      "name": "Openprovider DNS",
+      "owner": "Openprovider (Hosting Concepts B.V., Nederland)",
+      "home": "NL",
+      "fields": [
+        {
+          "key": "username",
+          "label": "Gebruikersnaam"
+        },
+        {
+          "key": "password",
+          "label": "Wachtwoord",
+          "secret": true
+        }
+      ],
+      "keyHelp": "Openprovider → Account → Contactpersonen → je naam → API: zet API-toegang aan. Vul hier je gebruikersnaam en wachtwoord in. Staat er een lijst met IP-adressen? Zet dan ook het adres van dit apparaat erop.",
+      "signupUrl": "https://www.openprovider.com"
     }
   ],
   "adapters": [
@@ -685,6 +704,31 @@
       "capabilities": {
         "servers": true,
         "storage": true,
+        "dns": true,
+        "quick": false
+      }
+    },
+    {
+      "id": "openprovider",
+      "name": "Openprovider",
+      "owner": "Openprovider (Hosting Concepts B.V., Nederland)",
+      "home": "NL",
+      "signupUrl": "https://www.openprovider.com",
+      "keyHelp": "Openprovider → Account → Contactpersonen → je naam → API: zet API-toegang aan. Vul hier je gebruikersnaam en wachtwoord in. Staat er een lijst met IP-adressen? Zet dan ook het adres van dit apparaat erop.",
+      "fields": [
+        {
+          "key": "username",
+          "label": "Gebruikersnaam"
+        },
+        {
+          "key": "password",
+          "label": "Wachtwoord",
+          "secret": true
+        }
+      ],
+      "capabilities": {
+        "servers": false,
+        "storage": false,
         "dns": true,
         "quick": false
       }

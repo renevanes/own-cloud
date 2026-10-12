@@ -144,7 +144,8 @@ public class AanbiederTest {
                         ? new FakeApi.Reply(200, "{\"name\":\"eigencloud.nl\"}", "application/json") : new FakeApi.Reply(404, "{\"detail\":\"Not found.\"}", "application/json"));
                 f.on("^GET /desec/auth/tokens/$", c -> "Token desec-centraal".equals(c.headers.get("authorization")) ? new FakeApi.Reply(200, "[]", "application/json")
                         : new FakeApi.Reply(403, "{\"detail\":\"You do not have permission to perform this action.\"}", "application/json"));
-                f.on("^GET /doh\\?name=dienst\\.vanes\\.nl&type=A$", c -> new FakeApi.Reply(200, Json.stringify(Json.obj("Status", 0, "Answer", servers.isEmpty() ? Json.list() : Json.list(Json.obj("type", 1, "data", "192.0.2." + (10 + servers.size() - 1))))), "application/json"));
+                f.on("^GET /doh\\?dns=", c -> DohFake.reply(c, java.util.Collections.singletonMap("dienst.vanes.nl A",
+                        servers.isEmpty() ? java.util.Collections.<String>emptyList() : java.util.Collections.singletonList("192.0.2." + (10 + servers.size() - 1)))));
                 Endpoints.SCALEWAY = f.base() + "/scw";
                 Endpoints.HETZNER = f.base() + "/hz";
                 Endpoints.MOLLIE = f.base() + "/mollie";

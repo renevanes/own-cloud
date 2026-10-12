@@ -15,13 +15,16 @@ public class DnsTest {
 
             Catalog cat;
             try (java.io.FileInputStream in = new java.io.FileInputStream(System.getProperty("catalog.file", "../app/src/main/assets/catalog.json"))) { cat = Catalog.load(in); }
+            final Map<String, java.util.List<String>> dohRecords = new java.util.HashMap<>();
+            dohRecords.put("vanes.nl NS", Arrays.asList("NS1.deSEC.io.", "ns2.desec.org"));
+            dohRecords.put("other.nl NS", Arrays.asList("hydrogen.ns.hetzner.com."));
             try (FakeApi api = new FakeApi()) {
                 Endpoints.DESEC = api.base() + "/desec";
                 Endpoints.HETZNER = api.base() + "/hz";
                 Endpoints.DOH = new String[] {api.base() + "/kapot", api.base() + "/doh"};
                 api.json("^GET /kapot", 500, Json.obj())
-                        .on("^GET /doh\\?name=vanes\\.nl&type=NS$", c -> new FakeApi.Reply("application/dns-json".equals(c.headers.get("accept")) ? 200 : 400, doh, "application/dns-json"))
-                        .on("^GET /doh\\?name=other\\.nl", c -> new FakeApi.Reply(200, "{\"Status\":0,\"Answer\":[{\"type\":2,\"data\":\"hydrogen.ns.hetzner.com.\"}]}", "application/dns-json"))
+                        // DoH (RFC 8484, binair): vanes.nl bij deSEC, other.nl bij Hetzner.
+                        .on("^GET /doh\\?dns=", c -> DohFake.reply(c, dohRecords))
                         .json("^GET /desec/domains/vanes\\.nl/$", 404, Json.obj())
                         .json("^POST /desec/domains/$", 201, Json.obj("name", "vanes.nl"))
                         .json("^GET /desec/domains/fout\\.nl/$", 401, Json.obj())

@@ -79,7 +79,7 @@ en variabelen hieronder zijn voor wie de Dienst zelf met Docker draait; ze laten
 | Mollie | mollie.com | Bedrijfsaccount, iDEAL en SEPA-incasso aan. Gebruik eerst een `test_`-sleutel. |
 | Openprovider | openprovider.com | Reseller-account met tegoed. API-gebruiker met wachtwoord; zet het IP-adres van je server op de lijst. |
 | deSEC | desec.io | Account met een token dat zones mag aanmaken (geen beperking op één domein). |
-| Scaleway | console.scaleway.com | Organisatie. Maak een IAM-applicatie "eigen-cloud-dienst" met (voor de hele organisatie) `ProjectManager`, `IAMManager`, `InstancesFullAccess` (bewaker, opschorten) en `TransactionalEmailFullAccess`, en een API-sleutel daarvoor. Let op: met `IAMManager` kan deze sleutel zichzelf alle rechten geven; behandel hem als de sleutel van je organisatie. |
+| Scaleway | console.scaleway.com | Organisatie. *Vanuit de app: plak één eigen sleutel, de app maakt de rest (zie Wat je nodig hebt).* Met de hand: maak een IAM-applicatie "eigen-cloud-dienst" met (voor de hele organisatie) `ProjectManager`, `IAMManager`, `InstancesFullAccess` (bewaker, opschorten) en `TransactionalEmailFullAccess`, en een API-sleutel daarvoor. Let op: met `IAMManager` kan deze sleutel zichzelf alle rechten geven; behandel hem als de sleutel van je organisatie. |
 | Mail | je eigen domein | SMTP-adres voor inlogcodes en meldingen (bijv. Scaleway TEM van je eigen project). |
 
 ### 2. Omgevingsvariabelen
@@ -91,7 +91,8 @@ en variabelen hieronder zijn voor wie de Dienst zelf met Docker draait; ze laten
 | `BROKER_PUBLIC_URL` | `http://localhost:4100` | Openbaar adres, bijv. `https://dienst.jouwbedrijf.nl` (voor Mollie en de DNS-proxy in het pakket) |
 | `BROKER_TRUST_PROXY` | `loopback,uniquelocal` | Welke proxy het IP-adres van de bezoeker mag doorgeven |
 | `BROKER_SECRET` | — | 64 hex-tekens; anders wordt `geheim.key` gemaakt. **Bewaar een kopie veilig**: zonder deze sleutel zijn de pakketten niet meer te lezen |
-| `BROKER_TERMS_URL`, `BROKER_PRIVACY_URL` | — | Links naar je voorwaarden en privacyverklaring (standaard; in het beheer onder Huisstijl te overschrijven) |
+| `BROKER_TERMS_URL`, `BROKER_PRIVACY_URL` | — | Eigen links naar je voorwaarden en privacyverklaring (in het beheer onder Huisstijl te overschrijven). Niet gezet: de pagina's die de Dienst zelf host (`/voorwaarden`, `/privacy`), zodra je ze in het beheer publiceert; zie *Voorwaarden, privacy en verwerkersovereenkomst* |
+| `BROKER_HOSTING` | — | Waar de server van de Dienst staat, `<aanbieder> <regio>` (bijv. `scaleway nl-ams-1`; de app zet het). Alleen voor de subverwerkers in de voorbeeldteksten |
 | `BROKER_FREE_ZONE` | uit | Domein van de dienst voor gratis adressen, bijv. `eigencloud.nl`: klanten kiezen dan alleen een naam (`vanes.eigencloud.nl`), zonder domein te kopen. Zie hieronder. Wordt genegeerd als `BROKER_ADRES_URL` is ingesteld |
 | `BROKER_ADRES_URL` | uit (dan: uit de lijst) | Adres van de centrale **adressendienst**, bijv. `https://adressen.eigencloud.nl`. Gratis adressen komen dan uit de gedeelde zone van die dienst, zodat klanten hun adres houden als ze van aanbieder wisselen. Niet gezet: staat deze Dienst met zijn sleutel op de lijst, dan gebruikt hij vanzelf de adressendienst van de standaardregel (`adressen`). Zie hieronder en [ADRESSEN.md](ADRESSEN.md) |
 | `BROKER_LIST_URL` | `https://raw.githubusercontent.com/renevanes/own-cloud/main/aanbieders.json` | De lijst van aanbieders, voor de adressendienst hierboven en *Op de lijst*. `uit` = niet kijken |
@@ -155,7 +156,7 @@ Gebruik liever de centrale adressendienst (4b).
 2. Zet bij je registrar de nameservers van dat domein op `ns1.desec.io` en `ns2.desec.org` (en de DS-records van deSEC voor DNSSEC).
 3. Zet `BROKER_FREE_ZONE=eigencloud.nl`.
 
-Per klant maakt de dienst een eigen zone `naam.eigencloud.nl` bij deSEC (met een eigen DNS-token, net als bij een eigen domein) en zet in `eigencloud.nl` de verwijzing ernaartoe (NS en DS). Namen van 3 tot 32 tekens; een paar namen zijn gereserveerd (`www`, `mail`, `cloud`, `api`, `dienst`, …, zie `RESERVED_LABELS` in `src/broker/config.ts`). Let op: deSEC heeft een standaardlimiet op het aantal zones per account; vraag deSEC om een hogere limiet voordat je veel klanten hebt. Na opzeggen en opruimen blijft de zone staan (naam bezet) tot je hem zelf weghaalt.
+Per klant maakt de dienst een eigen zone `naam.eigencloud.nl` bij deSEC (met een eigen DNS-token, net als bij een eigen domein) en zet in `eigencloud.nl` de verwijzing ernaartoe (NS en DS). Namen van 3 tot 32 tekens; een paar namen zijn gereserveerd (`www`, `mail`, `cloud`, `api`, `dienst`, …, zie `RESERVED_LABELS` in `src/broker/config.ts`). Let op: deSEC heeft een standaardlimiet op het aantal zones per account; vraag deSEC om een hogere limiet voordat je veel klanten hebt (in de app: *Je dienst → Adressendienst → Hogere zonelimiet aanvragen*). Na opzeggen en opruimen blijft de zone staan (naam bezet) tot je hem zelf weghaalt.
 
 ### 4b. Gratis adressen via de centrale adressendienst (`BROKER_ADRES_URL`)
 
@@ -167,8 +168,9 @@ Een klant houdt zijn adres als hij naar een andere aanbieder overstapt.
    alleen leesbaar voor de eigenaar). Je ziet hem in het beheer onder **Op de lijst**, in een kant-en-klare regel voor
    `aanbieders.json` (of met `dienst:cli -- sleutel`). De back-up van de Dienst neemt `aanbieder.key` mee; een nieuwe
    sleutel betekent een nieuw voorstel voor de lijst.
-2. **Op de lijst.** In het beheer: **Op de lijst** → *Hele lijst kopiëren* → *aanbieders.json openen op GitHub* →
-   plakken → *Propose changes* (zie CONTRIBUTING.md). De `url` moet **precies** je `BROKER_PUBLIC_URL` zijn: zo herkent de
+2. **Op de lijst.** In de app: **Je dienst → Op de lijst** → GitHub koppelen → *Aanmelden voor de lijst*: de app maakt het
+   voorstel (pull request) op GitHub. Met de hand kan ook: in het beheer **Op de lijst** → *Hele lijst kopiëren* →
+   *aanbieders.json openen op GitHub* → plakken → *Propose changes* (zie CONTRIBUTING.md). De `url` moet **precies** je `BROKER_PUBLIC_URL` zijn: zo herkent de
    adressendienst je verzoeken.
 3. Niets meer: zodra de beheerders je regel hebben samengevoegd, vindt je Dienst de adressendienst zelf in de lijst
    (veld `adressen` op de standaardregel; hij kijkt bij het starten en elk uur). `BROKER_ADRES_URL` gaat altijd voor.
@@ -201,7 +203,8 @@ Wat er dan anders is:
 ### De lijst van aanbieders (`aanbieders.json`)
 
 Een JSON-lijst in de repository; de app leest hem (om een aanbieder te kiezen) en de adressendienst ook (wie
-gratis adressen mag aanvragen). Een aanbieder voegt zich toe met een pull request.
+gratis adressen mag aanvragen). Een aanbieder voegt zich toe met een pull request; de app maakt dat voor hem (zie
+*Op de lijst via GitHub* hieronder).
 
 ```json
 [
@@ -327,8 +330,10 @@ het beheer op die pagina (`https://dienst.x.nl/beheer#/klanten`) en `pending` (n
 | Bedrijf | console | Naam, adres, KvK, btw, e-mail van de eigenaar, btw-percentage, bewaker |
 | Accounts en sleutels | console | Mollie (test/live), deSEC, Scaleway, mail (SMTP), Openprovider, adressendienst |
 | Aanbod en prijzen | dienst | Bundels, prijzen, prijs per extra gebruiker, en per bundel waar de servers en opslag staan (zie *Bundels*) |
-| Huisstijl, Medewerkers, Klanten, Hulpvragen, Berichten, Op de lijst | dienst | Het beheer op die pagina |
-| Adressendienst | beide | Aan/uit, zone, token en adres in de kluis; uitgegeven adressen in het beheer |
+| Huisstijl, Medewerkers, Klanten, Hulpvragen, Berichten | dienst | Het beheer op die pagina |
+| Voorwaarden en privacy | beide | Wat de Dienst host (versie en datum per document) en welke links de app laat zien (`GET /api/aanbieder/juridisch`); maken en wijzigen in het beheer (*Voorwaarden en privacy*) |
+| Adressendienst | beide | Aan/uit, zone, token en adres in de kluis; uitgegeven adressen in het beheer. Plus *Zones bij deSEC*: het aantal zones en de limiet, en **Hogere zonelimiet aanvragen** (zie hieronder) |
+| Op de lijst | beide | Je regel op de lijst met een voorstel op GitHub, en de status (zie *Op de lijst via GitHub*); met de hand via het beheer |
 | Server en back-ups | console | Andere aanbieder of regio, ander adres, DNS, back-ups met **Hersteltest** (`POST /api/aanbieder/hersteltest`: nieuwste back-up ophalen, ontsleutelen, database controleren; alleen lezen), opnieuw opzetten, verwijderen |
 | Kosten | beide | De server van de Dienst hier; kosten en marge per klant in het beheer |
 | Updates | console | Draaiende versie; bijwerken gaat elke nacht vanzelf (zie hieronder) |
@@ -368,11 +373,102 @@ secretKey?}`, `POST /api/aanbieder/opzetten` (ook voor opnieuw opzetten), `GET /
 synced, detail}`), `POST /api/aanbieder/hersteltest` (→ `{at, ok, backupAt, detail}`), `POST /api/setup/aanbieder
 {passphrase}` en `POST /api/setup/cloud {domain, domainMode?, mailbox, appPassword, alertEmail?}`. `GET /api/aanbieder`
 heeft ook `dns.mode` (`eigen`, `cloud`, `handmatig`), `dnsLink`, `dnsKeuze`, `defaultZone`, `cloudDns`, `alleenDienst`,
-`hersteltest`, `pending` en `hub`; `GET /api/aanbieder/status` ook `dns.mode`, `dns.error` en `overzicht`.
+`hersteltest`, `pending` en `hub`; `GET /api/aanbieder/status` ook `dns.mode`, `dns.error` en `overzicht`. Verder
+`GET /api/aanbieder/lijst`, `POST /api/github/koppelen {token}`, `POST /api/github/ontkoppelen`,
+`POST /api/aanbieder/lijst/aanmelden {land, omschrijving}`, `POST /api/aanbieder/lijst/samenvoegen {confirm: true}` (zie
+*Op de lijst via GitHub*), `GET /api/aanbieder/juridisch` (→ `{bereikbaar, documenten: [{soort, titel, versie, gewijzigd,
+url}], termsUrl, privacyUrl, fout}`) en `GET /api/aanbieder/zonelimiet?welke=adressen|dienst` (→ `{welke, zone, account,
+zones, limiet, support, fout}`).
+
+### Op de lijst via GitHub
+
+Zo zet een aanbieder zich op de lijst zonder kopiëren en plakken (`src/console/github.ts`, in de app `GitHub.java`):
+
+1. **GitHub koppelen** (één keer): de app geeft de link
+   `https://github.com/settings/tokens/new?scopes=public_repo&description=Eigen%20Cloud`, waar GitHub een klassiek token
+   met het vinkje `public_repo` klaarzet (schrijven in openbare repositories: fork, branch, commit en pull request).
+   Een fijnmazig token (`github_pat_…`) werkt niet: daarmee kun je geen voorstel doen in een repository van een ander.
+   De app controleert het token (`GET /user`, kop `X-OAuth-Scopes` met `public_repo` of `repo`) en kijkt of je
+   schrijfrechten hebt op `renevanes/own-cloud` (`GET /repos/renevanes/own-cloud` → `permissions.push`: de beheerders).
+   Het token staat alleen in de kluis (`console.github`), nooit in een antwoord.
+2. **Aanmelden voor de lijst** (of *Regel bijwerken*): de regel komt van de Dienst zelf (`GET /v1/status/lijst` met het
+   beheertoken, zelfde inhoud als `GET /v1/admin/lijst`), met het land en de omschrijving die je invult. De app leest
+   `aanbieders.json` op `main` (`GET …/contents/aanbieders.json`), vervangt de regel met dezelfde `url` (of zet hem
+   achteraan), laat de rest staan en schrijft JSON met 2 spaties zoals het bestand. `standaard` neemt hij alleen over van de
+   bestaande regel; `adressen` van de Dienst als de adressendienst daar draait. Staat de regel er al precies zo, dan
+   gebeurt er niets.
+   - Zonder schrijfrechten: een fork (`POST /repos/renevanes/own-cloud/forks`; wachten tot hij klaar is, dan
+     `POST /repos/<fork>/merge-upstream`), een branch `aanbieder-<adres>` op de nieuwste `main` (`POST …/git/refs`, of
+     `PATCH …/git/refs/heads/<branch>` met `force`), de commit (`PUT …/contents/aanbieders.json` met de `sha`) en een
+     pull request naar `main` (`POST /repos/renevanes/own-cloud/pulls`, met `maintainer_can_modify`). Een open voorstel
+     wordt bijgewerkt (zelfde branch, `GET …/pulls?head=<eigenaar>:<branch>`).
+   - De beheerders (schrijfrechten): dezelfde branch in de repository zelf, geen fork.
+3. **Status**: open, samengevoegd of gesloten (`GET /repos/renevanes/own-cloud/pulls/<nr>`), en of de regel met de sleutel
+   in de openbare lijst staat (de lijst die de app leest). GitHub kan na het samenvoegen een paar minuten nodig hebben.
+4. **Zelf samenvoegen** (alleen de beheerders, met bevestiging): `PUT /repos/renevanes/own-cloud/pulls/<nr>/merge`
+   (`squash`). Dat is een gewone push naar `main`, maar zonder nieuwe versie: de CI slaat een push over die alleen
+   `aanbieders.json` wijzigt (`paths-ignore` in `.github/workflows/ci.yml`), dus geen mislukte stap *versie*. De lijst
+   staat meteen online (de app leest hem van GitHub); een gewone versie met andere bestanden bouwt alles zoals altijd.
+
+GitHub-API: versie `2022-11-28`, basisadres `EIGEN_GITHUB_API` (standaard `https://api.github.com`; in de app
+`Endpoints.GITHUB`). Getest tegen een nep-GitHub (`test/helpers/fake-github.ts`), niet tegen de echte.
+
+### Hogere zonelimiet bij deSEC
+
+Elk gratis adres is een eigen zone in het deSEC-account van de gedeelde zone, en elke klant met een eigen domein een zone in
+het deSEC-account van de Dienst. deSEC heeft een limiet per account. In *Je dienst → Adressendienst* staat bij *Zones bij
+deSEC* hoeveel zones er zijn (`GET /api/v1/domains/?cursor=`, per 500, volgende bladzijde in de kop `Link`) en de limiet
+(`GET /api/v1/auth/account/` → `limit_domains`; alleen met een token dat tokens mag beheren, anders zegt de app dat).
+**Hogere zonelimiet aanvragen** opent een mail (in het Engels) aan `support@desec.io` met het account, de zone, het
+huidige aantal, het verwachte aantal en het doel. deSEC wil die mail vanaf het e-mailadres van het account.
 De toestand staat in de kluis onder `console.aanbieder`; antwoorden bevatten
 nooit sleutels (alleen de laatste 4 tekens). Een kluis van vóór de keuze van aanbieder (alles bij Scaleway) wordt bij
 het lezen bijgewerkt: `hosting` (Scaleway, regio en formaat van de server), `backup.provider` en `server.provider`
 `scaleway`, en `retired` van losse id's naar `{provider, serverId}`.
+
+### Wat je nodig hebt (alles via de app)
+
+Het eerste scherm van *Aanbieder worden* (en later *Je dienst* → **Wat je nodig hebt**, `#aanbieder/nodig`) is een lijst
+met alles wat een aanbieder nodig heeft, met de status van nu (✓ geregeld, ! bijna, ○ nog niet), een korte uitleg, de
+kosten en **Regelen**. Uitgangspunt: wat via een API kan, doet de app; wat de persoon zelf moet doen (een account openen
+met naam, betaalgegevens of een ID-controle) wordt een begeleide stap: de app opent de juiste pagina en ziet daarna zelf
+dat het gelukt is (hooguit één geplakte sleutel). Code: `src/console/benodigdheden.ts` en `web-console/nodig.js`; in de
+app `android/core Benodigdheden.java` (dezelfde JSON; `BenodigdhedenTest` vergelijkt elk antwoord met TypeScript). Dezelfde
+panelen openen ook in een venster vanuit de stap *Accounts* en *Je dienst → Accounts en sleutels* (knoppen **Regel het met
+één sleutel**, **Nog geen deSEC-account? Laat de app er een maken**, **Nagaan wat er bij Mollie nog aan moet**, **Regel de
+mail via Scaleway**).
+
+| Onderdeel | Wat de app doet | Wat jij doet |
+|---|---|---|
+| Domein | Kijkt of het domein bestaat en waar de DNS staat (DoH, zie PROVIDERS.md); is het nog vrij en is Openprovider gekoppeld, dan koopt hij het (`POST /domains/check` met prijs, `POST /customers`, `POST /domains`), alleen na je bevestiging met die prijs. Een premium-domein (`is_premium`, andere prijs) koopt hij niet | Het adres kiezen; bij een andere registrar (of een premium-domein) zelf kopen |
+| DNS | Koppelt de DNS-aanbieder (ook Openprovider DNS), zet de records; staat het domein bij Openprovider, dan zet hij de nameservers en (bij deSEC) DNSSEC (`PUT /domains/{id}` met `name_servers`, `is_dnssec_enabled`, `dnssec_keys`) | Anders: nameservers (en DS) bij je registrar invullen; de app laat ze zien, met de naam van je huidige DNS-aanbieder, en kijkt elke halve minuut opnieuw |
+| Server en back-ups | Alles (zie hierboven) | Kiezen waar |
+| Scaleway | Met één persoonlijke sleutel: organisatie opzoeken, IAM-applicatie `eigen-cloud-dienst`, een policy met twee regels voor de hele organisatie (`ProjectManager`, `IAMManager`; en `InstancesFullAccess`, `ObjectStorageFullAccess`, `TransactionalEmailFullAccess`), een sleutel voor die applicatie, en (aangevinkt, standaard aan) je persoonlijke sleutel weggooien. Opnieuw proberen maakt niets dubbel; rechten die zijn veranderd zet hij terug | Account maken (naam, betaalmethode) en één API-sleutel voor jezelf |
+| Mollie | Sleutel controleren, profiel en status (`GET /v2/profiles/me`), welke betaalmethoden aan staan voor de eerste betaling en de incasso (`GET /v2/methods?sequenceType=first|recurring`), en zegt wat er nog moet (bijv. "iDEAL staat nog niet aan") met een link naar het dashboard. Test of live staat er groot bij; live gaat in met *Wijzigingen toepassen* | Account maken en de ID-controle bij Mollie; methoden aanzetten in het dashboard. Hoe ver de aanmelding is (`/v2/onboarding/me`) kan alleen met OAuth; dat leest de app niet |
+| Mail van je Dienst | *Via Scaleway*: het adres van je Dienst (`dienst.jouwbedrijf.nl`) als maildomein bij Transactional Email in het project `eigen-cloud-dienst`, SPF, DKIM en DMARC via je DNS-koppeling (alleen namen onder dat adres; de mail van je eigen domein verandert niet), SMTP-instellingen (gebruiker = project-ID, wachtwoord = de sleutel van de Dienst, afzender `noreply@dienst.…`), en de controle bij Scaleway. Ook: via de mail van je eigen cloud, of een eigen SMTP-server | Niets (zonder DNS-koppeling: de drie records zelf zetten; de app laat ze zien) |
+| deSEC | Account maken (plaatje overtypen: `POST /api/v1/captcha/`, `POST /api/v1/auth/`), en na de bevestigingslink inloggen (`POST /api/v1/auth/login/`; dat token mag tokens maken) en een token dat zones mag maken en weghalen (`POST /api/v1/auth/tokens/` met `perm_create_domain`, `perm_delete_domain`); desgewenst een tweede token voor de adressendienst dat ook tokens mag beheren (`perm_manage_tokens`; die maakt per gratis adres een token met een beperkende policy). Geen policies op deze twee tokens: ze moeten alle zones van het account kunnen beheren | Op de link in de mail klikken |
+| Openprovider (optioneel) | Inloggen controleren en het IP-adres van de server op de lijst van je API-gebruiker zetten (`GET /contacts?username_pattern=`, `PUT /contacts/{id}` met `api_client_ip_list.allow`, "API access IP whitelist"; de rest van de contactpersoon gaat ongewijzigd mee, `rcp_client_ip_list` voor het controlepaneel blijft zoals hij is). Is die lijst leeg (alles mag), dan blijft hij leeg. Daarna controleert de server van je Dienst zelf (`GET /v1/status/check/openprovider`) | Reseller-account met tegoed; API-toegang aanzetten. Lukt het niet via de API: het IP-adres staat er met een kopieerknop en een link |
+| Gratis-adressendienst (optioneel, beheerders) | Zone bij deSEC aanmaken (met het adressen-token), domein kopen of de nameservers en DNSSEC goedzetten bij Openprovider | Aanzetten bij Adressendienst |
+| Voorwaarden en privacy | Alleen status, dezelfde als `GET /api/aanbieder/juridisch`: ✓ als `termsUrl` en `privacyUrl` er allebei zijn | Maken in *Voorwaarden en privacy* (**Regelen** → `#aanbieder/voorwaarden`) |
+| Op de lijst | Alleen status, dezelfde als `GET /api/aanbieder/lijst`: ✓ als je Dienst in de openbare lijst staat (met de sleutel van je Dienst); ! als je voorstel op GitHub nog open is | Aanmelden bij *Op de lijst* (**Regelen** → `#aanbieder/lijst`) |
+
+Routes (console en app, zelfde JSON; nooit sleutels in een antwoord): `GET /api/aanbieder/benodigdheden?fresh=1`
+(→ `{items: [{id, label, status: "ok"|"bijna"|"open", uitleg, kosten, detail, optioneel, actie: {label, soort:
+"paneel"|"stap"|"hub", doel}}], klaar, totaal, links, at}`; netwerkcontroles met korte time-outs (de lijst wacht hooguit
+6 seconden op een controle; een later antwoord staat de volgende keer klaar), een minuut bewaard, `fresh=1` kijkt opnieuw), `POST /api/aanbieder/scaleway {accessKey, secretKey, verwijderen?}` (→ `{ok, steps, org,
+applicatie, verwijderd}`), `POST /api/aanbieder/mollie {key?}` (→ `{ok, mode, profiel, methoden: {eerste, terugkerend},
+todo: [{tekst, link}], test, links, onboarding, pending}`), `POST /api/aanbieder/desec/register {captchaId, solution,
+email?}` (het plaatje: `POST /api/desec/captcha`), `POST /api/aanbieder/desec/finish {adressen?}` (→ `{ok, pending,
+email, tokens}`), `POST /api/aanbieder/domein {voor?: "dienst"|"adressen", zone?}` (→ `{zone, voor, geregistreerd,
+nameservers, bij, doel, goed, ds, dnssec, openprovider: {gekoppeld, domeinId, vrij, premium, prijs, fout}, kanDelegeren,
+uitleg}`), `POST /api/aanbieder/domein/delegeren {voor?, zone?}`, `POST /api/aanbieder/domein/kopen {voor?, zone, prijs,
+akkoord: true, houder?}`, `GET|POST /api/aanbieder/mail {manier: "scaleway"|"cloud"|"smtp", smtpUrl?, mailFrom?}` en
+`GET|POST /api/aanbieder/openprovider {gebruiker?, wachtwoord?}`. De toestand staat in de kluis onder
+`console.aanbieder` (`scw`, `mollie`, `desecAccount`, `mail`, `openprovider`, `opHandle`).
+
+De Dienst heeft er één route bij: `GET /v1/status/check/openprovider` (met het beheertoken, zoals `/v1/status/overzicht`)
+→ `{ok, ingesteld, detail}`: inloggen bij Openprovider en één domein opvragen, vanaf de server zelf (de IP-lijst geldt
+voor het adres van de server).
 
 ### Instellingen wijzigen zonder nieuwe server
 
@@ -388,7 +484,8 @@ de console zegt dat (`wijzigingen: "opnieuw"`). Het adres, `BROKER_SECRET` en de
 
 ## Back-up van de Dienst (`BROKER_BACKUP_*`)
 
-- Elk uur (en bij het starten en stoppen) een kopie via de online back-up van SQLite (`db.backup`), samen met
+- Elk uur (en bij het starten en stoppen) een kopie via de online back-up van SQLite (`db.backup`; dus ook de voorwaarden,
+  privacyverklaring en verwerkersovereenkomst in `legal_docs`), samen met
   `aanbieder.key`, `bundles.json` en (als de adressendienst op dezelfde server draait, `BROKER_BACKUP_ADRESSEN`) ook
   diens `adressen.sqlite`, gzip, versleuteld (AES-256-GCM in blokken, zoals de back-ups van een cloud) met een
   sleutel afgeleid van `BROKER_SECRET` (HKDF, doel `dienst-backup`). Naam: `dienst/<JJJJMMDDTHHMMSSZ>-<x>.enc`.
@@ -716,7 +813,10 @@ als Mollie of Scaleway een fout gaf).
 | `GET /v1/admin/health` | health | Alle actieve clouds met hun laatste melding |
 | `GET /v1/admin/staff` · `POST /v1/admin/staff {email, role, name?}` · `PATCH /v1/admin/staff/:id {role}` · `DELETE /v1/admin/staff/:id` · `POST /v1/admin/staff/:id/reset` | staff | Medewerkers; een nieuwe medewerker krijgt een mail |
 | `GET /v1/admin/audit?limit=&before=&staff=&action=` | audit | Logboek, nieuwste eerst; `before` = id voor de volgende bladzijde |
-| `GET /v1/admin/lijst` | brand | Regel voor `aanbieders.json` (`entry`, met land/omschrijving/`standaard` uit de huidige lijst en `adressen` als de adressendienst hier draait), `opLijst`, `actueel`, `sleutelKlopt`, `nieuweLijst` (de hele lijst met deze regel, om te plakken) en `editUrl` |
+| `GET /v1/admin/juridisch` | brand | Voorwaarden, privacyverklaring en verwerkersovereenkomst: per document de tekst, versie, datum, wie, eerdere versies; de links die de app laat zien en of dat eigen links zijn (`own`) |
+| `GET /v1/admin/juridisch/:soort/voorbeeld` · `POST …/:soort/weergave {body}` | brand | Een voorbeeldtekst uit de gegevens van de Dienst (met `subverwerkers`); de pagina zoals klanten hem zien (HTML, niet bewaard) |
+| `PUT /v1/admin/juridisch/:soort` `{body, announce?, summary?}` | brand | Nieuwe versie bewaren en publiceren (ongewijzigd: geen nieuwe versie); `announce`: bericht aan alle klanten (30 dagen). `soort` = `voorwaarden`, `privacy` of `verwerkersovereenkomst` |
+| `GET /v1/admin/lijst` | brand | Regel voor `aanbieders.json` (`entry`, met land/omschrijving/`standaard` uit de huidige lijst en `adressen` als de adressendienst hier draait), `opLijst`, `actueel`, `sleutelKlopt`, `nieuweLijst` (de hele lijst met deze regel, om te plakken), `voorwaarden` (`termsUrl`, `privacyUrl`) en `editUrl`. Hetzelfde voor de console: `GET /v1/status/lijst` met het beheertoken |
 | `GET /v1/admin/adressendienst` · `GET …/logboek?naam=` · `POST …/namen/:naam/vrijgeven {sure: true}` | adressen | Beheer van de adressendienst op deze server (404 als die er niet draait); zie ADRESSEN.md |
 
 ### Extra gebruikers
@@ -787,11 +887,43 @@ Controleer met echte (test)accounts vóór je live gaat:
   400 met "conflict"/"exists"); `PUT /domains/{id}` bij Openprovider om DNSSEC uit en weer aan te zetten; en of een
   verhuizing tussen twee Openprovider-resellers met `POST /domains` + `auth_code` werkt.
 
+**Wat je nodig hebt** (gebouwd volgens de documentatie, tegen nep-API's getest, nog niet tegen echte accounts). Nagekeken:
+de IAM-aanroepen en velden van Scaleway (scaleway-sdk-go `api/iam/v1alpha1`), de namen van de rechten (docs-content
+`iam/policies-permissions/permission-sets`: `ProjectManager` en `IAMManager` per organisatie, de rest per project), een
+regel met `organization_id` = alle projecten (Terraform-documentatie `scaleway_iam_policy`), Transactional Email
+(`api/tem/v1alpha1`, SMTP: gebruiker = project-ID, wachtwoord = geheime sleutel), Mollie (`GET /v2/profiles/me` is voor
+een API-sleutel, statussen `unverified`/`verified`/`blocked`, `GET /v2/methods?sequenceType=` geeft alleen methoden die
+aan staan; de officiële client mollie-api-node), deSEC (desec.readthedocs.io: account, inloggen, tokens, rechten),
+Openprovider (swagger.json op de branch `v1beta` van openprovider/api-documentation: `full_name`, `data.results`,
+`is_premium`, `api_client_ip_list`, `records: {add, remove, replace, update}`), Quad9 en DNS4EU (DoH-adressen,
+privacy). Niet na te gaan: of een persoonlijke sleutel zichzelf mag weggooien (anders zegt de app het en gooi je hem zelf
+weg); Openprovider: of `PUT /contacts/{id}` alleen de meegestuurde velden wijzigt (daarom gaat de hele contactpersoon
+mee), recordnamen relatief, TXT zonder aanhalingstekens, minimale TTL 900 en de eigen nameservers
+(`ns1.openprovider.nl`, `ns2.openprovider.be`, `ns3.openprovider.eu`); de aanmeldpagina van Mollie
+(`my.mollie.com/dashboard/signup`).
+
 **Opzetten vanuit de app** (nog niet tegen echte accounts gedraaid): of `GET /account/v3/projects?organization_id=…`
 werkt met een sleutel van een IAM-applicatie met `ProjectManager`; of een nieuwe IAM-sleutel binnen een paar seconden
 bij Object Storage werkt (de console probeert het 4 keer); `DELETE …/servers/{id}/user_data/cloud-init`; of
 `eigen-caddy` met alleen HTTP-01 een certificaat haalt; of `docker run … --entrypoint node <image> -e …` in het image de
 nieuwste versie vindt; en `GET /v2/methods` bij Mollie met een live-sleutel.
+
+## Voorwaarden, privacy en verwerkersovereenkomst
+
+De Dienst host ze zelf (`src/broker/juridisch.ts`): `/voorwaarden`, `/privacy` en `/verwerkersovereenkomst`, eenvoudige
+pagina's in je huisstijl met versie en datum, links naar elkaar en eerdere versies (`?versie=N`). In het beheer
+(*Voorwaarden en privacy*, recht `brand`) kies je **Maak een voorbeeld**: een Nederlandse tekst uit de gegevens van je Dienst
+(bedrijf, KvK, adres, contact, btw, bundels en prijzen, maandelijks opzegbaar via het Mollie-abonnement, 30 dagen bewaren na
+het einde, medewerkers zien alleen techniek, en de subverwerkers zoals ze echt zijn ingesteld: Scaleway voor de clouds,
+de server en de back-ups van de Dienst (`BROKER_HOSTING`, `BROKER_BACKUP_ENDPOINT`), de mailserver, Mollie, deSEC,
+Openprovider en de gratis-adressendienst). Wat de Dienst niet weet, staat er als `[vul in: …]`. Je past de tekst aan
+(opmaak: `#`, `##`, `-`, `**vet**`, `[tekst](https://…)`), bekijkt hem zoals klanten hem zien en publiceert. Elke keer
+opslaan is een nieuwe versie (tabel `legal_docs` in dezelfde database, dus vanzelf in de back-up). Bij een wijziging kun je
+alle klanten een bericht sturen (het gewone berichtensysteem, 30 dagen zichtbaar). **Een voorbeeld is geen juridisch
+advies: laat het nakijken.**
+
+Zolang je geen eigen link hebt (Huisstijl of `BROKER_TERMS_URL`/`BROKER_PRIVACY_URL`), wijzen `termsUrl` en `privacyUrl` in
+`/v1/info` en `/v1/brand` naar deze pagina's; de app en het bestellen linken er dan vanzelf naartoe. Een eigen link gaat voor.
 
 ## Juridisch en administratief (kort)
 
@@ -802,8 +934,8 @@ nieuwste versie vindt; en `GET /v2/methods` bij Mollie met een live-sleutel.
 - **Btw**: je prijzen voor consumenten zijn inclusief 21% btw. Voor zakelijke klanten in andere EU-landen
   geldt mogelijk verlegging; voor consumenten elders in de EU het btw-tarief van hun land (OSS).
 - **Verwerkersovereenkomst**: je verwerkt persoonsgegevens (e-mailadres, houdergegevens, betaalgegevens via
-  Mollie). Bied zakelijke klanten een verwerkersovereenkomst aan en sluit er zelf een met Scaleway en
-  Openprovider (meestal via hun voorwaarden). De inhoud van de cloud kun je niet lezen; zeg dat ook zo.
+  Mollie). Bied klanten een verwerkersovereenkomst aan (de Dienst maakt een voorbeeld, zie hierboven) en sluit er zelf een
+  met Scaleway en Openprovider (meestal via hun voorwaarden). De inhoud van de cloud kun je niet lezen; zeg dat ook zo.
 - **Privacyverklaring**: welke gegevens, waarom, hoe lang (bijv. houdergegevens zolang het domein loopt,
   boekhouding 7 jaar), en wie de subverwerkers zijn (Mollie, Openprovider, deSEC, Scaleway).
 - **Algemene voorwaarden**: opzegtermijn, wat er gebeurt bij wanbetaling (opschorten na X dagen),
@@ -818,6 +950,8 @@ JSON; fouten als `{ "error": "…" }`. Inloggen met `Authorization: Bearer <toke
 | `GET /v1/status` | `{version, uptime, lastBackupAt, backup, closing}`; zie *Back-up van de Dienst* |
 | `POST /v1/status/instellingen` | `{at, env}` met `Authorization: Beheer …`; zie *Instellingen wijzigen zonder nieuwe server* |
 | `GET /v1/info` | Naam, bundels (met `includes.users` en `extraUserMonthly`), links naar voorwaarden en privacy, `brand`, `freeZone` (zone voor gratis adressen: van de adressendienst of `BROKER_FREE_ZONE`; `null` = uit) |
+| `GET /voorwaarden` · `/privacy` · `/verwerkersovereenkomst` (`?versie=N`) | De gepubliceerde tekst als pagina in de huisstijl (404 als hij er nog niet is); eerdere versies blijven te lezen |
+| `GET /v1/juridisch` | `{documents: [{kind, title, url, version, updatedAt}]}`: wat er gepubliceerd is |
 | `GET /v1/brand` · `GET /v1/brand/logo` | Huisstijl van de aanbieder: `{name, accentColor, contact:{email,phone,website}, termsUrl, privacyUrl, logoUrl}`; het logo als PNG/SVG |
 | `GET /v1/invite/:code` | `{valid, code?, reason?, brand, bundle?}` (hoofdletters en streepjes maken niet uit) |
 | `POST /v1/auth/start` `{email}` | Mailt een code van 6 cijfers (15 minuten, 5 pogingen) → 202 |

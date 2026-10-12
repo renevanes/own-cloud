@@ -12,6 +12,7 @@ import { hetzner } from "./adapters/hetzner.js";
 import { upcloud } from "./adapters/upcloud.js";
 import { exoscale } from "./adapters/exoscale.js";
 import { ovh } from "./adapters/ovh.js";
+import { openprovider } from "./adapters/openprovider.js";
 import { desec } from "./adapters/desec.js";
 import { custom } from "./adapters/custom.js";
 import { local } from "./adapters/local.js";
@@ -19,7 +20,7 @@ import { local } from "./adapters/local.js";
 export type * from "./adapters/types.js";
 
 /** Volgorde = volgorde in de console (en bij gelijke keuze in de verspreidingsvoorstellen). */
-const BUILTIN: ProviderAdapter[] = [desec, scaleway, hetzner, upcloud, exoscale, ovh, custom, local];
+const BUILTIN: ProviderAdapter[] = [desec, scaleway, hetzner, upcloud, exoscale, ovh, openprovider, custom, local];
 
 const registry: ProviderAdapter[] = [...BUILTIN];
 

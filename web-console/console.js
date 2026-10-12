@@ -1,6 +1,7 @@
 // Eigen Cloud — beheerconsole
 import { europeMap, MAP_CSS } from "/shared/europe.js";
-document.head.insertAdjacentHTML("beforeend", `<style>${MAP_CSS}</style>`);
+import { renderNodig, regelVenster, NODIG_CSS } from "./nodig.js";
+document.head.insertAdjacentHTML("beforeend", `<style>${MAP_CSS}${NODIG_CSS}</style>`);
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -1603,11 +1604,12 @@ async function helpPanel(box, fail) {
 
 const A_STEPS = [["bedrijf", "Bedrijf"], ["accounts", "Accounts"], ["adres", "Adres"], ["server", "Server en back-ups"], ["opzetten", "Opzetten"]];
 const A_HELP = {
-  scaleway: `Hiermee zet je Dienst de clouds van je klanten op. Maak in de Scaleway-console onder IAM een applicatie "eigen-cloud-dienst" met de rechten ProjectManager, IAMManager, InstancesFullAccess, ObjectStorageFullAccess en TransactionalEmailFullAccess, en maak daarvoor een API-sleutel. Het organisatie-ID staat bij Organisatie → Instellingen. De server van je Dienst zelf mag ook bij een andere aanbieder staan. <a href="https://console.scaleway.com/iam/applications" target="_blank" rel="noopener">IAM openen</a>`,
+  scaleway: `Hiermee zet je Dienst de clouds van je klanten op. Het makkelijkst: plak één eigen sleutel, de app maakt dan een sleutel met alleen de rechten die je Dienst nodig heeft.`,
+  scalewayHand: `Maak in de Scaleway-console onder IAM een applicatie "eigen-cloud-dienst" met de rechten ProjectManager, IAMManager, InstancesFullAccess, ObjectStorageFullAccess en TransactionalEmailFullAccess, en maak daarvoor een API-sleutel. Het organisatie-ID staat bij Organisatie → Instellingen. De server van je Dienst zelf mag ook bij een andere aanbieder staan. <a href="https://console.scaleway.com/iam/applications" target="_blank" rel="noopener">IAM openen</a>`,
   mollie: `Voor de betalingen van je klanten. Begin met de testsleutel (test_…); later zet je hier de live-sleutel. <a href="https://my.mollie.com/dashboard/developers/api-keys" target="_blank" rel="noopener">Sleutels bij Mollie</a>`,
-  desec: `Voor de DNS van je klanten. Maak bij deSEC een token dat domeinen mag aanmaken. <a href="https://desec.io/tokens" target="_blank" rel="noopener">Tokens bij deSEC</a>`,
+  desec: `Voor de DNS van je klanten. Nog geen account? Laat de app er een maken, met een token dat zones mag maken en weghalen. Of maak bij deSEC zelf een token dat domeinen mag aanmaken. <a href="https://desec.io/tokens" target="_blank" rel="noopener">Tokens bij deSEC</a>`,
   smtp: `Voor inlogcodes, facturen en meldingen. Leeg laten = via de mail van je eigen cloud.`,
-  smtpZelf: `Voor inlogcodes, facturen en meldingen, bijvoorbeeld Scaleway Transactional Email of de SMTP-server van je mailprovider: smtp://gebruiker:wachtwoord@server:587.`,
+  smtpZelf: `Voor inlogcodes, facturen en meldingen, bijvoorbeeld Scaleway Transactional Email of de SMTP-server van je mailprovider: smtp://gebruiker:wachtwoord@server:587. Of laat de app het bij Scaleway regelen.`,
   dns: `Op dit adres vinden je klanten je Dienst. Kies wie het in de DNS zet. Met een DNS-aanbieder doet de console het zelf, ook als je server later een ander IP-adres krijgt.`,
   openprovider: `Alleen nodig als klanten via jou een domein kopen. Zet bij Openprovider het IP-adres van je server op de lijst. <a href="https://cp.openprovider.eu" target="_blank" rel="noopener">Openprovider</a>`,
   adres: `Gratis adressen (naam.eigencloud.nl) voor je klanten, via de centrale adressendienst. Leeg laten = vanzelf: staat je Dienst op de lijst van aanbieders, dan gebruikt hij de adressendienst van het project.`,
@@ -1634,18 +1636,19 @@ async function renderAanbieder(msg) {
   let a;
   try { a = await api("/api/aanbieder"); } catch { return; }
   rememberDienst(a);
-  if (!a.started) {
-    box.innerHTML = `<div class="panel"><p style="margin:0">Draai zelf een Eigen Cloud Dienst: mensen nemen dan bij jou een cloud, met jouw prijzen en jouw naam, en betalen via je eigen Mollie. De console zet de Dienst op een eigen server bij een Europese aanbieder naar keuze, maakt elk uur een back-up en houdt hem bij.</p>
-      <ol class="steps-mini">${A_STEPS.map(([, l]) => `<li>${esc(l)}</li>`).join("")}</ol>
-      <div><button class="btn primary" id="aStart">Beginnen</button></div></div>`;
-    $("#aStart").onclick = () => aStep("bedrijf").catch(() => {});
+  if (!a.started || location.hash.slice(1).startsWith("aanbieder/nodig")) {
+    // Eerste scherm (en #aanbieder/nodig tijdens de stappen): wat je nodig hebt, met per onderdeel "Regelen".
+    box.innerHTML = `${a.started ? `<p style="margin:0"><button type="button" class="link" id="aBack">Terug naar de stappen</button></p>` : `<div class="panel"><p style="margin:0">Draai zelf een Eigen Cloud Dienst: mensen nemen dan bij jou een cloud, met jouw prijzen en jouw naam, en betalen via je eigen Mollie. De console zet de Dienst op een eigen server bij een Europese aanbieder naar keuze, maakt elk uur een back-up en houdt hem bij.</p></div>`}
+      <h2 class="astep">Wat je nodig hebt</h2><div id="nodigBox"></div>`;
+    $("#aBack")?.addEventListener("click", () => goHash("aanbieder"));
+    renderNodig($("#nodigBox"), nodigCtx(a), { start: !a.started, open: location.hash.split("/")[2] ?? null });
     return;
   }
   if (a.step === "klaar" && a.hub) return renderHub(isDienstHash(location.hash.slice(1)) ? location.hash.slice(1) : "aanbieder", msg);
   if (a.step === "klaar") a.step = "opzetten";
   const i = A_STEPS.findIndex(([id]) => id === a.step);
   const head = `<ol class="atrail" aria-label="Stappen">${A_STEPS.map(([, l], k) => `<li class="${k < i ? "done" : k === i ? "now" : ""}" ${k === i ? 'aria-current="step"' : ""}><span class="pip">${k < i ? "✓" : k + 1}</span><span class="t">${esc(l)}</span></li>`).join("")}</ol>
-    <h2 class="astep">Stap ${i + 1} van ${A_STEPS.length}: ${esc(A_STEPS[i][1])}</h2>`;
+    <h2 class="astep">Stap ${i + 1} van ${A_STEPS.length}: ${esc(A_STEPS[i][1])}</h2><p class="muted" style="margin:0"><a class="link" href="#aanbieder/nodig">Wat je nodig hebt</a></p>`;
   const nav = (canNext, nextLabel = "Volgende") => `<div class="actions" style="margin:0"><button type="button" class="btn" id="aPrev">${i > 0 ? "Vorige" : a.server || a.removed ? "Terug" : "Stoppen"}</button><button class="btn primary" ${canNext === false ? "disabled" : ""}>${nextLabel}</button></div>`;
   const wire = () => {
     $("#aPrev").onclick = () => {
@@ -1677,12 +1680,17 @@ async function renderAanbieder(msg) {
     const field = (name, label, value, extra = "") => `<label>${label}<input name="${name}" value="${esc(value ?? "")}" autocomplete="off" autocapitalize="off" spellcheck="false" ${extra}></label>`;
     box.innerHTML = `${head}<form class="fields panel" id="af"><p class="muted" style="margin:0">Je Dienst gebruikt je eigen accounts. Elke sleutel wordt meteen gecontroleerd; ze worden versleuteld in je kluis bewaard.</p>
       <h3 style="margin:0">Scaleway</h3><small class="muted">${A_HELP.scaleway}</small>
-      <div class="row">${field("scalewaySecretKey", "Geheime sleutel", ac.scalewaySecretKey, 'placeholder="8-4-4-4-12 tekens"')}${field("scalewayOrgId", "Organisatie-ID", ac.scalewayOrgId)}</div>
+      ${regelKnop("scaleway", ac.scalewaySecretKey ? "Opnieuw regelen met één sleutel" : "Regel het met één sleutel")}
+      <details ${ac.scalewaySecretKey ? "open" : ""}><summary>Of vul de sleutel van de Dienst zelf in</summary><div class="fields" style="margin-top:10px"><small class="muted">${A_HELP.scalewayHand}</small>
+      <div class="row">${field("scalewaySecretKey", "Geheime sleutel", ac.scalewaySecretKey, 'placeholder="8-4-4-4-12 tekens"')}${field("scalewayOrgId", "Organisatie-ID", ac.scalewayOrgId)}</div></div></details>
       <h3 style="margin:0">Mollie</h3><small class="muted">${A_HELP.mollie}</small>
       ${field("mollieKey", "API-sleutel", ac.mollieKey, 'placeholder="test_…"')}
+      ${regelKnop("mollie", "Nagaan wat er bij Mollie nog aan moet")}
       <h3 style="margin:0">deSEC</h3><small class="muted">${A_HELP.desec}</small>
+      ${ac.desecToken ? "" : regelKnop("desec", "Nog geen deSEC-account? Laat de app er een maken")}
       ${field("desecToken", "Token", ac.desecToken)}
       <h3 style="margin:0">Mail versturen</h3><small class="muted">${config?.mailRelay ? A_HELP.smtp : A_HELP.smtpZelf}</small>
+      ${regelKnop("mail", "Regel de mail via Scaleway")}
       ${config?.mailRelay ? `<label class="check"><input type="checkbox" name="smtpCloud" ${!ac.smtp || ac.smtpFromCloud ? "checked" : ""}> Via de mail van mijn eigen cloud${ac.smtpFromCloud ? ` (${esc(ac.smtp)})` : ""}</label>` : ""}
       <div class="row">${field("smtpUrl", "Andere mailserver", "", `placeholder="${ac.smtp && !ac.smtpFromCloud ? `Nu ${esc(ac.smtp)}; leeg = zo laten` : "smtp://gebruiker:wachtwoord@smtp.tem.scaleway.com:587"}"`)}${field("mailFrom", "Afzender", ac.mailFrom, 'type="email"')}</div>
       <details ${ac.openproviderUser || ac.adresUrl ? "open" : ""}><summary>Optioneel: domeinen verkopen en gratis adressen</summary><div class="fields" style="margin-top:10px">
@@ -1694,6 +1702,7 @@ async function renderAanbieder(msg) {
       <ul class="results" id="aChecks"></ul>
       <p class="msg"></p>${nav(undefined, a.ready.accounts ? "Controleren en verder" : "Controleren")}</form>`;
     wire();
+    wireRegel($("#af"), a, () => renderAanbieder());
     $("#af").smtpUrl.oninput = (e) => { if (e.target.value.trim() && $("#af").smtpCloud) $("#af").smtpCloud.checked = false; };
     $("#af").onsubmit = async (e) => {
       e.preventDefault();
@@ -1859,19 +1868,39 @@ const HUB_TEXT = {
   bedrijf: "Naam, adres, KvK, btw en contact",
   accounts: "Mollie, deSEC, Scaleway, Openprovider en mail",
   aanbod: "Bundels, prijzen en waar de servers staan",
-  huisstijl: "Naam, logo, kleur en voorwaarden",
+  huisstijl: "Naam, logo, kleur en contact",
+  voorwaarden: "Voorwaarden, privacy en verwerkersovereenkomst",
   medewerkers: "Wie mag wat in het beheer",
   klanten: "Zoeken, opschorten, hervatten en opruimen",
   hulpvragen: "Vragen van je klanten beantwoorden",
   berichten: "Meldingen en storingen aan je klanten",
   adressendienst: "Gratis adressen voor alle aanbieders",
-  lijst: "Je regel op de lijst van aanbieders",
+  lijst: "Je regel op de lijst van aanbieders, via GitHub",
   server: "Plek, adres, DNS, back-ups en hersteltest",
   kosten: "Wat je Dienst en je klanten kosten",
   updates: "Versie en automatisch bijwerken",
 };
 /** Waar de gegevens van een onderdeel staan. */
 const WAAR = { console: "In je kluis", dienst: "In het beheer", beide: "Hier en in het beheer" };
+HUB_TEXT.nodig = "Alles om aanbieder te zijn, met wat nog moet";
+
+/** Wat nodig.js van de console gebruikt (zie renderNodig). */
+function nodigCtx(a) {
+  return { api, esc, busy, formMsg, resultItems, openBeheer, NATIVE, readClipboard, fillKeys, dnsChooser, config, a, aStep, goHash,
+    openUrl: (u) => (NATIVE ? NATIVE.openUrl(u) : window.open(u, "_blank", "noopener")) };
+}
+
+/** Knop "Laat de app het regelen" bij een account (stap Accounts, Je dienst → Accounts en sleutels): opent het paneel uit Wat je nodig hebt. */
+const regelKnop = (id, label) => `<div><button type="button" class="btn" data-regel="${esc(id)}">${esc(label)}</button></div>`;
+function wireRegel(form, a, onDone) {
+  form.querySelectorAll("[data-regel]").forEach((b) => b.onclick = () => regelVenster(b.dataset.regel, nodigCtx(a), onDone));
+}
+
+/** Je dienst → Wat je nodig hebt: dezelfde lijst als bij het opzetten. */
+function hubNodig(pane, a) {
+  pane.innerHTML = `${sectionHead(a, "nodig")}<div id="nodigBox"></div>`;
+  renderNodig($("#nodigBox"), nodigCtx(a), { open: location.hash.split("/")[2] ?? null });
+}
 let lastChecks = null;
 
 const cloudLater = () => `<p class="muted cloudlater"><small>Ook zelf een cloud voor je mail, agenda en foto's? <a href="#jij">Eigen cloud maken</a></small></p>`;
@@ -1902,7 +1931,9 @@ async function renderHub(hash, msg) {
     $("#hBack")?.addEventListener("click", () => aStep("klaar").catch(() => {}));
     return renderAanbieder(msg);
   }
-  const cur = a.hub.some((x) => x.id === section && x.waar !== "dienst") ? section : "overzicht";
+  const cur = section === "nodig" || a.hub.some((x) => x.id === section && x.waar !== "dienst") ? section : "overzicht";
+  // "Wat je nodig hebt" staat in de console zelf (niet in de onderdelen van de server): na het Overzicht.
+  a.hub = [...a.hub.slice(0, 1), { id: "nodig", label: "Wat je nodig hebt", waar: "console", link: null, pending: false }, ...a.hub.slice(1)];
   const host = (a.url ?? "").replace(/^https:\/\//, "");
   root.innerHTML = `<div class="hubwrap">
     <header class="hubhead">
@@ -1926,7 +1957,7 @@ async function renderHub(hash, msg) {
     } catch (err) { hubMsg(err.message); }
   });
   const pane = $("#hubPane");
-  const fn = { overzicht: hubOverzicht, bedrijf: hubBedrijf, accounts: hubAccounts, adressendienst: hubAdressen, server: hubServer, kosten: hubKosten, updates: hubUpdates }[cur] ?? hubOverzicht;
+  const fn = { overzicht: hubOverzicht, nodig: hubNodig, bedrijf: hubBedrijf, accounts: hubAccounts, adressendienst: hubAdressen, voorwaarden: hubVoorwaarden, lijst: hubLijst, server: hubServer, kosten: hubKosten, updates: hubUpdates }[cur] ?? hubOverzicht;
   fn(pane, a);
   // Op de telefoon: het gekozen onderdeel in beeld schuiven.
   root.querySelector(".hubitem.now")?.scrollIntoView?.({ block: "nearest", inline: "center" });
@@ -2025,11 +2056,16 @@ function hubAccounts(pane, a) {
     <form class="fields" id="hf"><p class="muted" style="margin:0">Sleutels staan versleuteld in je kluis; je ziet alleen de laatste vier tekens. Leeg laten of zo laten = niet wijzigen. Elke sleutel wordt meteen gecontroleerd.</p>
       <h3 style="margin:0">Mollie <small class="muted">${ac.mollieMode === "live" ? "· live: echte betalingen" : ac.mollieMode === "test" ? "· testsleutel" : ""}</small></h3><small class="muted">${A_HELP.mollie}</small>
       ${field("mollieKey", "API-sleutel", ac.mollieKey, 'placeholder="test_… of live_…"')}
+      ${regelKnop("mollie", "Nagaan wat er bij Mollie nog aan moet")}
       <h3 style="margin:0">deSEC</h3><small class="muted">${A_HELP.desec}</small>
+      ${ac.desecToken ? "" : regelKnop("desec", "Nog geen deSEC-account? Laat de app er een maken")}
       ${field("desecToken", "Token", ac.desecToken)}
       <h3 style="margin:0">Scaleway</h3><small class="muted">${A_HELP.scaleway}</small>
-      <div class="row">${field("scalewaySecretKey", "Geheime sleutel", ac.scalewaySecretKey)}${field("scalewayOrgId", "Organisatie-ID", ac.scalewayOrgId)}</div>
+      ${regelKnop("scaleway", ac.scalewaySecretKey ? "Opnieuw regelen met één sleutel" : "Regel het met één sleutel")}
+      <details ${ac.scalewaySecretKey ? "open" : ""}><summary>Of vul de sleutel van de Dienst zelf in</summary><div class="fields" style="margin-top:10px"><small class="muted">${A_HELP.scalewayHand}</small>
+      <div class="row">${field("scalewaySecretKey", "Geheime sleutel", ac.scalewaySecretKey)}${field("scalewayOrgId", "Organisatie-ID", ac.scalewayOrgId)}</div></div></details>
       <h3 style="margin:0">Mail versturen</h3><small class="muted">${config?.mailRelay ? A_HELP.smtp : A_HELP.smtpZelf}</small>
+      ${regelKnop("mail", "Regel de mail via Scaleway")}
       <div class="row">${field("smtpUrl", "Mailserver", "", `placeholder="${ac.smtp ? `Nu ${esc(ac.smtp)}; leeg = zo laten` : "smtp://gebruiker:wachtwoord@server:587"}"`)}${field("mailFrom", "Afzender", ac.mailFrom, 'type="email"')}</div>
       <h3 style="margin:0">Openprovider <small class="muted">· optioneel</small></h3><small class="muted">${A_HELP.openprovider}</small>
       <div class="row">${field("openproviderUser", "Gebruiker", ac.openproviderUser)}${field("openproviderPass", "Wachtwoord", ac.openproviderPass, 'type="password"')}</div>
@@ -2038,6 +2074,7 @@ function hubAccounts(pane, a) {
       <ul class="results" id="hChecks">${lastChecks ? resultItems(lastChecks) : ""}</ul>
       <p class="msg"></p><div><button class="btn primary">Opslaan en controleren</button></div></form>`;
   lastChecks = null;
+  wireRegel($("#hf"), a, (flash) => renderHub("aanbieder/accounts", flash ? { ok: true, text: "Geregeld." } : null));
   $("#hf").onsubmit = async (e) => {
     e.preventDefault();
     const f = e.target;
@@ -2066,6 +2103,7 @@ function hubAdressen(pane, a) {
       <ul class="results" id="adrChecks"></ul>
       <p class="msg"></p><div><button class="btn primary">Opslaan</button></div></form>`;
   $("#hAdrOpen")?.addEventListener("click", () => openBeheer(x.link));
+  zoneLimit(pane, a);
   $("#hf").onsubmit = async (e) => {
     e.preventDefault();
     const f = e.target;
@@ -2225,6 +2263,145 @@ function hubUpdates(pane, a) {
   const show = (s) => { if ($("#hUpd")) $("#hUpd").innerHTML = s?.version ? `<p style="margin:0">Je Dienst draait versie <b>${esc(s.version)}</b>${s.uptime != null ? `, sinds ${s.uptime < 3600 ? Math.max(1, Math.round(s.uptime / 60)) + " minuten" : Math.round(s.uptime / 3600) + " uur"}` : ""}.</p>` : `<p class="muted" style="margin:0">${a.server ? "Je Dienst is nu niet bereikbaar." : "Er draait geen server."}</p>`; };
   if (a.lastHealth) show(a.lastHealth);
   if (a.server) api("/api/aanbieder/status").then(show).catch(() => {});
+}
+
+// ── Voorwaarden en privacy, Op de lijst (GitHub) en de zonelimiet bij deSEC ──
+
+const dateLong = (ms) => new Date(ms).toLocaleDateString("nl-NL", { day: "numeric", month: "long", year: "numeric" });
+
+/** Wat de Dienst host (voorwaarden, privacy, verwerkersovereenkomst) en welke links de app laat zien; maken in het beheer. */
+async function hubVoorwaarden(pane, a) {
+  const x = a.hub.find((y) => y.id === "voorwaarden");
+  pane.innerHTML = `${sectionHead(a, "voorwaarden")}
+    <p style="margin:0">Je Dienst zet je algemene voorwaarden, privacyverklaring en verwerkersovereenkomst op een eigen pagina. In het beheer maak je met één tik een voorbeeld uit je bedrijfsgegevens, je prijzen en de partijen waar alles staat. Lees het na en publiceer het; de app en het bestellen linken er dan vanzelf naartoe.</p>
+    <p class="note warn" style="margin:0"><small>Een voorbeeld is geen juridisch advies. Laat het nakijken.</small></p>
+    <div class="panel"><div id="hJur"><p class="muted" style="margin:0">Ophalen…</p></div>
+      ${x?.link ? `<div><button class="btn primary" id="hJurOpen">Maken of wijzigen in het beheer ↗</button></div>` : ""}</div>`;
+  $("#hJurOpen")?.addEventListener("click", () => openBeheer(x.link));
+  let j;
+  try { j = await api("/api/aanbieder/juridisch"); } catch (err) { if ($("#hJur")) $("#hJur").innerHTML = `<p class="msg err" style="margin:0">${esc(err.message)}</p>`; return; }
+  if (!$("#hJur")) return;
+  const link = (u) => (u ? `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u.replace(/^https:\/\//, ""))}</a>` : "nog geen link");
+  $("#hJur").innerHTML = `<ul class="results">
+    ${j.documenten.map((d) => `<li class="${d.versie ? "" : "meh"}">${esc(d.titel)}${d.versie ? `: versie ${d.versie}, ${esc(dateLong(d.gewijzigd))}<small><a href="${esc(d.url)}" target="_blank" rel="noopener">Bekijken</a></small>` : `: nog niet gepubliceerd`}</li>`).join("")}
+    </ul>
+    ${j.fout ? `<p class="msg err" style="margin:0">${esc(j.fout)}</p>` : `<p class="muted" style="margin:0"><small>In de app en bij het bestellen: voorwaarden ${link(j.termsUrl)}, privacyverklaring ${link(j.privacyUrl)}. Een eigen link (beheer → Huisstijl) gaat voor.</small></p>`}`;
+}
+
+const PR_STATUS = { open: "open", samengevoegd: "samengevoegd", gesloten: "gesloten" };
+
+/** Op de lijst van aanbieders: GitHub koppelen, je regel, aanmelden met een voorstel (pull request) en de status. */
+async function hubLijst(pane, a) {
+  const x = a.hub.find((y) => y.id === "lijst");
+  pane.innerHTML = `${sectionHead(a, "lijst")}<div id="hLijst" class="fields"><p class="muted" style="margin:0">Ophalen…</p></div>`;
+  let v;
+  try { v = await api("/api/aanbieder/lijst"); } catch (err) { if ($("#hLijst")) $("#hLijst").innerHTML = `<p class="msg err" style="margin:0">${esc(err.message)}</p>`; return; }
+  const box = $("#hLijst");
+  if (!box) return;
+  const g = v.github, pr = v.voorstel, r = v.regel;
+  const st = v.opLijst && v.sleutelKlopt && v.actueel ? ["", "Je staat op de lijst. Nieuwe klanten kunnen je in de app kiezen."]
+    : v.opLijst ? ["meh", v.sleutelKlopt ? "Je staat op de lijst, maar je regel is niet meer actueel." : "Je staat op de lijst, maar zonder de sleutel van je Dienst: gratis adressen werken dan niet."]
+    : ["meh", "Je staat nog niet op de lijst."];
+  const prNote = !pr ? "" : pr.status === "open" ? "De beheerders van het project kijken ernaar."
+    : pr.status === "samengevoegd" ? (v.opLijst ? `Samengevoegd op ${dateLong(pr.samengevoegdOp)}.` : "Samengevoegd. GitHub heeft een paar minuten nodig om de openbare lijst bij te werken.")
+    : "Gesloten zonder samenvoegen. Kijk op GitHub waarom; pas je regel aan en meld je opnieuw aan.";
+  const knop = pr?.status === "open" ? "Voorstel bijwerken" : v.opLijst ? "Regel bijwerken" : "Aanmelden voor de lijst";
+  box.innerHTML = `<ul class="results">
+      <li class="${st[0]}">${esc(st[1])}</li>
+      ${pr ? `<li class="${pr.status === "gesloten" ? "bad" : pr.status === "open" ? "busy" : ""}">Voorstel #${pr.nummer}: ${esc(PR_STATUS[pr.status] ?? pr.status)}<small>${esc(prNote)} <a href="${esc(pr.url)}" target="_blank" rel="noopener">Bekijken op GitHub</a></small></li>` : ""}
+      ${v.voorwaarden && (!v.voorwaarden.termsUrl || !v.voorwaarden.privacyUrl) ? `<li class="meh">Nog geen voorwaarden of privacyverklaring<small>De beheerders van de lijst kijken daarnaar. <a href="#aanbieder/voorwaarden">Voorwaarden en privacy</a></small></li>` : ""}
+      ${v.lijstFout ? `<li class="unknown">${esc(v.lijstFout)}</li>` : ""}
+    </ul>
+    <div class="panel">
+      <div><b>1. GitHub koppelen</b><br><small class="muted">De lijst staat in het open-sourceproject op GitHub (${esc(v.repo)}). De app maakt het voorstel voor je; je hebt alleen een gratis GitHub-account nodig.</small></div>
+      ${g.gekoppeld ? `<p style="margin:0">Gekoppeld als <b>@${esc(g.login ?? "")}</b>${g.beheerder ? ` <span class="chip">beheerder van het project</span>` : ""} · <button type="button" class="link" id="ghOff">Ontkoppelen</button></p>`
+        : `<ol class="steps-mini"><li><a href="${esc(v.tokenUrl)}" target="_blank" rel="noopener">Maak een token op GitHub</a>. Het vinkje bij <b>public_repo</b> staat al aan; kies een vervaldatum en tik onderaan op <i>Generate token</i>.</li><li>Kopieer het token en plak het hier. Het staat daarna alleen in je kluis.</li></ol>
+        <form class="fields" id="ghF"><label>Token<input name="token" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="ghp_…"></label><p class="msg"></p><div><button class="btn primary">Koppelen</button></div></form>`}
+    </div>
+    <div class="panel">
+      <div><b>2. Je regel op de lijst</b><br><small class="muted">Naam en contact komen uit je huisstijl (beheer), de sleutel uit je Dienst.</small></div>
+      ${r ? `<form class="fields" id="lF"><div class="row"><label style="flex:0 0 90px">Land<input name="land" maxlength="2" value="${esc(r.land ?? "NL")}" autocapitalize="characters"></label>
+          <label>Omschrijving<input name="omschrijving" maxlength="140" value="${esc(r.omschrijving ?? "")}" placeholder="Eén zin, in gewone taal"></label></div>
+        <pre class="regel" id="lPre">${esc(JSON.stringify(r, null, 2))}</pre>
+        <p class="msg"></p>
+        <div class="actions" style="margin:0"><button class="btn primary" ${g.gekoppeld ? "" : "disabled"}>${knop}</button>${pr?.status === "open" && g.beheerder ? `<button type="button" class="btn" id="lMerge">Zelf samenvoegen</button>` : ""}</div>
+        ${g.gekoppeld ? "" : `<small class="muted">Koppel eerst GitHub (stap 1).</small>`}</form>`
+      : `<p class="msg err" style="margin:0">${esc(v.dienstFout ?? "")}</p>`}
+    </div>
+    <p class="muted" style="margin:0"><small>Liever met de hand? ${x?.link ? `<button type="button" class="link" id="lHand">Op de lijst in het beheer ↗</button> geeft de hele lijst om te plakken in` : "Plak je regel in"} <a href="${esc(v.editUrl)}" target="_blank" rel="noopener">aanbieders.json op GitHub</a>.</small></p>`;
+  $("#lHand")?.addEventListener("click", () => openBeheer(x.link));
+  const again = (msg) => renderHub("aanbieder/lijst", msg);
+  const gf = $("#ghF");
+  if (gf) gf.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const k = await busy($("button", gf), () => api("/api/github/koppelen", { method: "POST", body: { token: gf.token.value } }));
+      again({ ok: true, text: `GitHub gekoppeld als @${k.login}.` });
+    } catch (err) { formMsg(gf, err.message); }
+  };
+  $("#ghOff")?.addEventListener("click", async () => {
+    if (!confirm("GitHub ontkoppelen?\n\nHet token gaat uit je kluis. Je voorstel en je regel blijven bestaan. Trek het token ook in op GitHub (Settings → Developer settings → Tokens).")) return;
+    try { await api("/api/github/ontkoppelen", { method: "POST" }); again({ ok: true, text: "GitHub ontkoppeld." }); } catch (err) { hubMsg(err.message); }
+  });
+  const lf = $("#lF");
+  if (lf) {
+    lf.oninput = () => { $("#lPre").textContent = JSON.stringify({ ...r, land: lf.land.value.trim().toUpperCase(), omschrijving: lf.omschrijving.value.replace(/\s+/g, " ").trim() }, null, 2); };
+    lf.onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const k = await busy($("button.primary", lf), () => api("/api/aanbieder/lijst/aanmelden", { method: "POST", body: { land: lf.land.value, omschrijving: lf.omschrijving.value } }));
+        again({ ok: true, text: k.bericht });
+      } catch (err) { formMsg(lf, err.message); }
+    };
+  }
+  $("#lMerge")?.addEventListener("click", async (e) => {
+    if (!confirm(`Voorstel #${pr.nummer} zelf samenvoegen?\n\nDe regel staat daarna meteen in de openbare lijst (de app leest hem van GitHub). De CI draait zoals bij elke wijziging op main.`)) return;
+    try { await busy(e.target, () => api("/api/aanbieder/lijst/samenvoegen", { method: "POST", body: { confirm: true } })); again({ ok: true, text: `Voorstel #${pr.nummer} is samengevoegd.` }); }
+    catch (err) { hubMsg(err.message); }
+  });
+}
+
+/** De mail aan deSEC voor een hogere zonelimiet (in het Engels; deSEC vraagt hem vanaf het e-mailadres van het account). */
+function desecMail(z, a, verwacht) {
+  const subject = `Request for a higher domain limit${z.account ? ` (${z.account})` : ""}`;
+  const purpose = z.welke === "adressen"
+    ? `We run the free-address service of Eigen Cloud, an open-source personal cloud (https://github.com/renevanes/own-cloud). Every user gets a free name under ${z.zone} (for example name.${z.zone}) as its own zone in this account, delegated from ${z.zone} with NS and DS records (DNSSEC).`
+    : `We run an Eigen Cloud Dienst at ${a.url} (open source, https://github.com/renevanes/own-cloud). For every customer with their own domain name we create a DNS zone in this account, with DNSSEC.`;
+  const body = ["Hello deSEC team,", "", `We would like to request a higher domain limit for our deSEC account${z.account ? ` ${z.account}` : ""}.`, "", `Purpose: ${purpose}`, "",
+    `Current number of domains: ${z.zones ?? "unknown"}${z.limiet != null ? ` (limit: ${z.limiet})` : ""}`, `Expected number of domains in the next 12 months: ${verwacht}`, "",
+    "Thank you for running deSEC!", "", "Kind regards,", a.company?.name ?? ""].join("\r\n");
+  return `mailto:${z.support}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
+/** In "Adressendienst": hoeveel zones er bij deSEC zijn, de limiet, en een mail om een hogere limiet te vragen. */
+function zoneLimit(pane, a) {
+  const welke = [...(a.adressen ? [["adressen", `Gedeelde zone ${a.adressen.zone}`, "Elk gratis adres is een eigen zone in dit account."]] : []),
+    ...(a.accounts?.desecToken ? [["dienst", "Je eigen deSEC-account", "Elke klant met een eigen domein krijgt een zone in dit account."]] : [])];
+  if (!welke.length) return;
+  pane.insertAdjacentHTML("beforeend", `<h2 class="hubtitle small">Zones bij deSEC</h2>
+    <p class="muted hubsub">deSEC heeft een limiet op het aantal zones per account. Vraag op tijd een hogere aan.</p>
+    ${welke.map(([w, title, why]) => `<div class="panel" data-zone="${w}"><div><b>${esc(title)}</b><br><small class="muted">${esc(why)}</small></div>
+      <ul class="results"><li class="busy" data-zstat>Ophalen…</li></ul>
+      <div class="row"><label>Hoeveel zones verwacht je over een jaar?<input type="number" min="1" step="1" name="verwacht" inputmode="numeric"></label></div>
+      <div><a class="btn" data-zmail href="#">Hogere zonelimiet aanvragen</a></div>
+      <small class="muted" data-zhint>De mail gaat naar deSEC en is in het Engels. Stuur hem vanaf het e-mailadres van je deSEC-account: daar vraagt deSEC om.</small></div>`).join("")}`);
+  for (const [w] of welke) {
+    const box = pane.querySelector(`[data-zone="${w}"]`);
+    const input = box.querySelector("[name=verwacht]"), mail = box.querySelector("[data-zmail]");
+    let z = { welke: w, zone: a.adressen?.zone ?? null, account: null, zones: null, limiet: null, support: "support@desec.io" };
+    const upd = () => { mail.href = desecMail(z, a, Math.max(1, Math.round(Number(input.value) || 0)) || "?"); };
+    input.oninput = upd;
+    upd();
+    api(`/api/aanbieder/zonelimiet?welke=${w}`).then((r) => {
+      z = r;
+      const li = box.querySelector("[data-zstat]");
+      li.className = r.zones != null && r.limiet != null && r.zones >= r.limiet * 0.8 ? "meh" : r.zones == null ? "unknown" : "";
+      li.innerHTML = `${r.zones != null ? `${r.zones} zone${r.zones === 1 ? "" : "s"} in gebruik${r.limiet != null ? ` van de ${r.limiet} die deSEC toestaat` : ""}` : "Aantal zones onbekend"}${r.fout ? `<small>${esc(r.fout)}</small>` : ""}`;
+      if (!input.value) input.value = String(Math.ceil(Math.max(100, (r.zones ?? 0) * 3) / 100) * 100);
+      if (r.account) box.querySelector("[data-zhint]").textContent = `De mail gaat naar deSEC en is in het Engels. Stuur hem vanaf ${r.account}, het e-mailadres van je deSEC-account: daar vraagt deSEC om.`;
+      upd();
+    }).catch((err) => { const li = box.querySelector("[data-zstat]"); li.className = "bad"; li.textContent = err.message; if (!input.value) input.value = "500"; upd(); });
+  }
 }
 
 /** Op het overzicht van je cloud: een korte verwijzing naar "Je dienst" (of: aanbieder worden). */

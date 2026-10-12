@@ -146,6 +146,13 @@ export function openDb(dataDir: string) {
       id TEXT PRIMARY KEY, payment_id TEXT NOT NULL, order_id TEXT NOT NULL, amount TEXT NOT NULL, status TEXT,
       description TEXT, staff_id TEXT, created_at INTEGER NOT NULL);
   `);
+  // Voorwaarden, privacyverklaring en verwerkersovereenkomst (src/broker/juridisch.ts): elke keer opslaan is een nieuwe
+  // versie; de hoogste versie is gepubliceerd. Gaat vanzelf mee in de back-up (zelfde database).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS legal_docs (
+      kind TEXT NOT NULL, version INTEGER NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL,
+      created_by TEXT, announcement_id TEXT, PRIMARY KEY (kind, version));
+  `);
   return db;
 }
 

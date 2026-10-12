@@ -113,19 +113,10 @@ public final class DnsSetup {
         return true;
     }
 
-    /** Current NS records of a domain via DNS-over-HTTPS (lowercase, no trailing dot); empty on failure. */
+    /** Current NS records of a domain via DNS-over-HTTPS ({@link Doh}; lowercase, no trailing dot); empty on failure. */
     public static List<String> resolveNs(String domain) {
-        for (String base : Endpoints.DOH) {
-            try {
-                String url = base + (base.contains("?") ? "&" : "?") + "name=" + Bytes.encodeURIComponent(domain) + "&type=NS";
-                Http.Response r = Http.request("GET", url, Http.headers("accept", "application/dns-json"), null, 8000);
-                if (!r.ok()) continue;
-                return parseDohNs(r.text());
-            } catch (IOException | RuntimeException ignored) {
-                // try the next resolver
-            }
-        }
-        return new ArrayList<>();
+        Doh.Answer a = Doh.lookup(domain, "NS");
+        return a == null ? new ArrayList<>() : new ArrayList<>(a.values);
     }
 
     /** Parses a DNS-over-HTTPS JSON answer and returns the NS (type 2) targets, normalized. */

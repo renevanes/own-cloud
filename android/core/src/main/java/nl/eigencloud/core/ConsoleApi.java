@@ -796,6 +796,71 @@ public final class ConsoleApi {
             // ── Aanbieder worden: je eigen Eigen Cloud Dienst opzetten en bijhouden ──
             case "GET /api/aanbieder":
                 return ok(Aanbieder.view(c, aanbiederDeps()));
+            // ── Wat je nodig hebt om aanbieder te worden, en het regelen ervan (Benodigdheden) ──
+            case "GET /api/aanbieder/benodigdheden":
+                return ok(Benodigdheden.benodigdheden(c, "1".equals(query(path, "fresh")), aanbiederDeps()));
+            case "POST /api/aanbieder/scaleway":
+                try {
+                    return ok(Benodigdheden.scaleway(c, b, aanbiederDeps()));
+                } catch (Benodigdheden.StepsException e) {
+                    save();
+                    return err(400, e.getMessage(), "steps", e.steps);
+                }
+            case "POST /api/aanbieder/mollie":
+                try {
+                    Map<String, Object> r = Benodigdheden.mollie(c, b);
+                    save();
+                    return ok(r);
+                } catch (IOException | RuntimeException e) {
+                    save();
+                    throw e;
+                }
+            case "POST /api/aanbieder/desec/register": {
+                Map<String, Object> r = Benodigdheden.desecRegister(c, b);
+                save();
+                return ok(r);
+            }
+            case "POST /api/aanbieder/desec/finish":
+                try {
+                    Map<String, Object> r = Benodigdheden.desecFinish(c, b);
+                    save();
+                    return ok(r);
+                } catch (IOException | RuntimeException e) {
+                    save();
+                    throw e;
+                }
+            case "POST /api/aanbieder/domein":
+                return ok(Benodigdheden.domein(c, b, aanbiederDeps()));
+            case "POST /api/aanbieder/domein/delegeren":
+                try {
+                    return ok(Benodigdheden.delegeren(c, b, aanbiederDeps()));
+                } catch (Benodigdheden.StepsException e) {
+                    return err(400, e.getMessage(), "steps", e.steps);
+                }
+            case "POST /api/aanbieder/domein/kopen":
+                try {
+                    return ok(Benodigdheden.kopen(c, b, aanbiederDeps()));
+                } catch (Benodigdheden.StepsException e) {
+                    return err(400, e.getMessage(), "steps", e.steps);
+                }
+            case "GET /api/aanbieder/mail":
+                return ok(Benodigdheden.mailStatus(c, aanbiederDeps()));
+            case "POST /api/aanbieder/mail":
+                try {
+                    return ok(Benodigdheden.mail(c, b, aanbiederDeps()));
+                } catch (IOException | RuntimeException e) {
+                    save();
+                    throw e;
+                }
+            case "GET /api/aanbieder/openprovider":
+                return ok(Benodigdheden.openproviderCheck(c, aanbiederDeps()));
+            case "POST /api/aanbieder/openprovider":
+                try {
+                    return ok(Benodigdheden.openprovider(c, b, aanbiederDeps()));
+                } catch (IOException | RuntimeException e) {
+                    save();
+                    throw e;
+                }
             case "POST /api/aanbieder/stap": {
                 Map<String, Object> r = Aanbieder.setStep(c, Json.str(b, "step") == null ? "" : Json.str(b, "step"));
                 save();
@@ -854,6 +919,41 @@ public final class ConsoleApi {
                 }
             case "POST /api/aanbieder/hersteltest":
                 return ok(Aanbieder.hersteltest(c, aanbiederDeps()));
+            // ── Op de lijst via GitHub, voorwaarden en privacy, zonelimiet bij deSEC (GitHub, DienstVoorwaarden, ZoneLimiet) ──
+            case "GET /api/aanbieder/lijst":
+                return ok(GitHub.view(c, this::save));
+            case "POST /api/github/koppelen": {
+                Map<String, Object> r = GitHub.koppelen(c, b);
+                save();
+                return ok(r);
+            }
+            case "POST /api/github/ontkoppelen": {
+                Map<String, Object> r = GitHub.ontkoppelen(c);
+                save();
+                return ok(r);
+            }
+            case "POST /api/aanbieder/lijst/aanmelden":
+                try {
+                    Map<String, Object> r = GitHub.aanmelden(c, b);
+                    save();
+                    return ok(r);
+                } catch (IOException | RuntimeException e) {
+                    save();
+                    throw e;
+                }
+            case "POST /api/aanbieder/lijst/samenvoegen":
+                try {
+                    Map<String, Object> r = GitHub.samenvoegen(c, b);
+                    save();
+                    return ok(r);
+                } catch (IOException | RuntimeException e) {
+                    save();
+                    throw e;
+                }
+            case "GET /api/aanbieder/juridisch":
+                return ok(DienstVoorwaarden.status(c));
+            case "GET /api/aanbieder/zonelimiet":
+                return ok(ZoneLimiet.status(c, query(path, "welke")));
             case "POST /api/setup/cloud": {
                 // Kluis alleen voor een Dienst: er komt toch een eigen cloud bij.
                 if (!Json.truthy(Json.path(c, "console", "alleenDienst"))) return err(409, "Je hebt al een eigen cloud");

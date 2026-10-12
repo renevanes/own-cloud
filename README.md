@@ -71,11 +71,25 @@ Exoscale of OVHcloud, waarbij de console het record zelf zet en bijwerkt, of jij
 Cloud Dienst op een server bij de aanbieder en in de regio die je kiest (Scaleway, Hetzner, UpCloud, Exoscale of
 OVHcloud; de back-ups mogen elders), met elk uur een versleutelde back-up en automatische updates.
 
+Het eerste scherm is **Wat je nodig hebt**: per onderdeel (domein, DNS, server, Scaleway, Mollie, mail, deSEC, en
+optioneel Openprovider en de gratis-adressendienst; plus voorwaarden en *Op de lijst*) of het geregeld is (✓, ! of ○),
+wat het is, wat het ongeveer kost en een knop **Regelen**. Wat via een koppeling kan, doet de app: met één eigen
+Scaleway-sleutel maakt hij een eigen sleutel met alleen de nodige rechten voor je Dienst (en gooit de jouwe weg), hij
+maakt een deSEC-account, leest bij Mollie wat er nog aan moet, zet de mail van je Dienst bij Scaleway op (met de records
+in je DNS), zet nameservers en DNSSEC goed en koopt een domein bij Openprovider (na je bevestiging, met de prijs), en zet
+het IP-adres van je server op de lijst bij Openprovider. Een account openen (met je naam, betaalgegevens of een
+ID-controle) doe je zelf; de app opent de juiste pagina en ziet daarna zelf dat het gelukt is. Dezelfde lijst staat later
+in *Je dienst*, en bij de stap *Accounts* openen dezelfde hulpjes in een venster (bijv. **Nog geen deSEC-account? Laat de
+app er een maken**). Een premium-domein (met een hogere prijs) koopt de app niet; dat doe je in het controlepaneel van
+Openprovider.
+
 Daarna is er één plek voor alles: **Je dienst** (op het startscherm van de app: *ESAPE beheren*, met de naam van je
-Dienst). Overzicht (status, versie, klanten, omzet), Bedrijf, Accounts en sleutels, Adressendienst, Server en back-ups
-(andere plek, DNS, hersteltest, opnieuw opzetten), Kosten en Updates regel je daar; Aanbod en prijzen (ook waar de
-servers van elke bundel staan), Huisstijl, Medewerkers, Klanten, Hulpvragen, Berichten en *Op de lijst* openen het beheer
-van je Dienst meteen op die pagina. Wat je wijzigt en nog niet op je Dienst staat, zie je bovenaan, met **Wijzigingen
+Dienst). Overzicht (status, versie, klanten, omzet), Bedrijf, Accounts en sleutels, Adressendienst (ook de zonelimiet bij
+deSEC), Server en back-ups (andere plek, DNS, hersteltest, opnieuw opzetten), Kosten en Updates regel je daar; Aanbod en
+prijzen (ook waar de servers van elke bundel staan), Huisstijl, Medewerkers, Klanten, Hulpvragen en Berichten openen het
+beheer van je Dienst meteen op die pagina. **Voorwaarden en privacy**: je Dienst host je voorwaarden, privacyverklaring en
+verwerkersovereenkomst zelf; in het beheer maak je met één tik een voorbeeld uit je gegevens (geen juridisch advies: laat
+het nakijken). **Op de lijst**: GitHub koppelen en *Aanmelden voor de lijst*; de app maakt het voorstel op GitHub. Wat je wijzigt en nog niet op je Dienst staat, zie je bovenaan, met **Wijzigingen
 toepassen** (zonder nieuwe server). Een terminal is niet nodig. Beheerders van het project kunnen ook de
 **gratis-adressendienst** laten meedraaien (zelfde server). Zie
 [BROKER.md](BROKER.md#opzetten-vanuit-de-app-zonder-terminal) en [ADRESSEN.md](ADRESSEN.md).

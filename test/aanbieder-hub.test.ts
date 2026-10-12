@@ -178,9 +178,9 @@ test("aanbieder worden zonder eigen cloud: eigen DNS, Je dienst, hersteltest en 
     assert.deepEqual(v.hub.map((x: any) => [x.id, x.waar, x.link]), [
       ["overzicht", "console", null], ["bedrijf", "console", null], ["accounts", "console", null],
       ["aanbod", "dienst", "https://dienst.esape.nl/beheer#/aanbod"], ["huisstijl", "dienst", "https://dienst.esape.nl/beheer#/huisstijl"],
-      ["medewerkers", "dienst", "https://dienst.esape.nl/beheer#/medewerkers"], ["klanten", "dienst", "https://dienst.esape.nl/beheer#/klanten"],
+      ["voorwaarden", "beide", "https://dienst.esape.nl/beheer#/voorwaarden"], ["medewerkers", "dienst", "https://dienst.esape.nl/beheer#/medewerkers"], ["klanten", "dienst", "https://dienst.esape.nl/beheer#/klanten"],
       ["hulpvragen", "dienst", "https://dienst.esape.nl/beheer#/hulpvragen"], ["berichten", "dienst", "https://dienst.esape.nl/beheer#/berichten"],
-      ["adressendienst", "beide", null], ["lijst", "dienst", "https://dienst.esape.nl/beheer#/lijst"],
+      ["adressendienst", "beide", null], ["lijst", "beide", "https://dienst.esape.nl/beheer#/lijst"],
       ["server", "console", null], ["kosten", "beide", "https://dienst.esape.nl/beheer#/kosten"], ["updates", "console", null],
     ]);
     assert.deepEqual([v.wijzigingen, v.pending], ["geen", []]);
@@ -357,7 +357,7 @@ test("Je dienst: onderdelen en links (zonder Dienst geen hub)", async () => {
   const a = await import("../src/console/aanbieder.js");
   assert.equal(a.beheerLink("https://dienst.esape.nl", "klanten"), "https://dienst.esape.nl/beheer#/klanten");
   assert.deepEqual([a.defaultZone("dienst.esape.nl"), a.defaultZone("esape.nl"), a.defaultZone("a.b.esape.nl"), a.defaultZone(null)], ["esape.nl", "esape.nl", "b.esape.nl", null]);
-  assert.deepEqual(a.HUB.map(([id]) => id), ["overzicht", "bedrijf", "accounts", "aanbod", "huisstijl", "medewerkers", "klanten", "hulpvragen", "berichten", "adressendienst", "lijst", "server", "kosten", "updates"]);
+  assert.deepEqual(a.HUB.map(([id]) => id), ["overzicht", "bedrijf", "accounts", "aanbod", "huisstijl", "voorwaarden", "medewerkers", "klanten", "hulpvragen", "berichten", "adressendienst", "lijst", "server", "kosten", "updates"]);
   assert.deepEqual(a.ownDnsWant({ step: "klaar", url: "https://dienst.esape.nl", dns: { provider: "x", zone: "esape.nl", fields: {} }, server: { provider: "p", region: "r", size: "s", serverId: "1", ipv4: "192.0.2.1", createdAt: 1 }, adressen: { zone: "eigencloud.nl", desecToken: "t", host: "esape.nl" } }),
     [{ sub: "dienst", type: "A", value: "192.0.2.1" }, { sub: "dienst", type: "AAAA", value: "" }, { sub: "", type: "A", value: "192.0.2.1" }, { sub: "", type: "AAAA", value: "" }]);
 });

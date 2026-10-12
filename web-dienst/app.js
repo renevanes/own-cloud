@@ -51,6 +51,7 @@ const AUDIT = {
   "announcement-create": "Bericht geplaatst", "announcement-end": "Bericht beëindigd",
   "order-adres": "Gratis adres teruggegeven", "order-afboeken": "Achterstand afgeboekt", bewaker: "Bewaker gedraaid", "costs-change": "Kosten gewijzigd",
   "adres-vrijgeven": "Gratis adres vrijgegeven (adressendienst)",
+  "juridisch-change": "Voorwaarden of privacy gepubliceerd",
 };
 
 // ───────── Sessie en API ─────────
@@ -299,7 +300,7 @@ $("#logoutBtn").onclick = async () => {
   location.hash = "#/overzicht";
   renderLogin();
 };
-const KNOWN_PAGES = ["overzicht", "klanten", "klant", "hulpvragen", "hulpvraag", "berichten", "geld", "kosten", "aanbod", "uitnodigingen", "huisstijl", "medewerkers", "logboek", "account", "lijst", "adressen"];
+const KNOWN_PAGES = ["overzicht", "klanten", "klant", "hulpvragen", "hulpvraag", "berichten", "geld", "kosten", "aanbod", "uitnodigingen", "huisstijl", "voorwaarden", "medewerkers", "logboek", "account", "lijst", "adressen"];
 
 // ───────── Navigatie ─────────
 
@@ -313,6 +314,7 @@ const PAGES = [
   { id: "aanbod", label: "Aanbod", perm: "offering" },
   { id: "uitnodigingen", label: "Uitnodigingen", perm: "invites" },
   { id: "huisstijl", label: "Huisstijl", perm: "brand" },
+  { id: "voorwaarden", label: "Voorwaarden en privacy", perm: "brand" },
   { id: "medewerkers", label: "Medewerkers", perm: "staff" },
   { id: "logboek", label: "Logboek", perm: "audit" },
   { id: "lijst", label: "Op de lijst", perm: "brand" },
@@ -341,7 +343,7 @@ async function route() {
   // "#klanten" (zonder schuine streep) werkt ook: dat maakt de console in de app.
   if (/^#[a-z]/.test(location.hash)) { history.replaceState(null, "", `#/${location.hash.slice(1)}`); }
   const [page = "overzicht", arg] = pageOf(location.hash) ?? [];
-  const known = { overzicht, klanten, klant, hulpvragen, hulpvraag, berichten, geld, kosten, aanbod, uitnodigingen, huisstijl, medewerkers, logboek, account, lijst, adressen };
+  const known = { overzicht, klanten, klant, hulpvragen, hulpvraag, berichten, geld, kosten, aanbod, uitnodigingen, huisstijl, voorwaarden, medewerkers, logboek, account, lijst, adressen };
   const fn = known[page] ?? overzicht;
   renderNav(page);
   loading();
@@ -833,15 +835,17 @@ async function uitnodigingen() {
 // ───────── Huisstijl ─────────
 
 async function huisstijl() {
-  const { brand: b, defaults } = await api("/v1/admin/brand");
+  const { brand: b, defaults, own } = await api("/v1/admin/brand");
+  const ownLink = (k) => (own ? own[k] : b[k]) ?? "";
   root.innerHTML = `<h1>Huisstijl</h1><p class="lead">Zo zien je klanten jou in de app: naam, logo, kleur en hoe ze je bereiken.</p>
     <form class="panel fields" id="f">
       <label>Naam van je bedrijf of dienst<input name="name" value="${esc(b.name)}" maxlength="80" placeholder="${esc(defaults.name)}"></label>
       <label>Accentkleur<span class="row" style="align-items:center"><input type="color" id="pick" value="${esc(b.accentColor ?? "#3f6f4a")}"><input name="accentColor" id="hex" value="${esc(b.accentColor ?? "")}" placeholder="#3f6f4a" maxlength="7" style="flex:1 1 120px"></span><small>Kies een kleur waar witte tekst goed op leesbaar is.</small></label>
       <div class="row"><label>E-mail voor klanten<input name="email" type="email" value="${esc(b.contact.email ?? "")}"></label><label>Telefoon<input name="phone" type="tel" value="${esc(b.contact.phone ?? "")}"></label></div>
       <label>Website<input name="website" type="url" value="${esc(b.contact.website ?? "")}" placeholder="https://"></label>
-      <div class="row"><label>Algemene voorwaarden<input name="termsUrl" type="url" value="${esc(b.termsUrl ?? "")}" placeholder="${esc(defaults.termsUrl ?? "https://")}"></label>
-        <label>Privacyverklaring<input name="privacyUrl" type="url" value="${esc(b.privacyUrl ?? "")}" placeholder="${esc(defaults.privacyUrl ?? "https://")}"></label></div>
+      <div class="row"><label>Algemene voorwaarden<input name="termsUrl" type="url" value="${esc(ownLink("termsUrl"))}" placeholder="${esc(defaults.termsUrl ?? "https://")}"></label>
+        <label>Privacyverklaring<input name="privacyUrl" type="url" value="${esc(ownLink("privacyUrl"))}" placeholder="${esc(defaults.privacyUrl ?? "https://")}"></label></div>
+      <p class="hint" style="margin:0">Alleen als je ze ergens anders hebt. Leeg laten: de pagina's die je bij <a href="#/voorwaarden">Voorwaarden en privacy</a> maakt.</p>
       <div class="row"><button class="btn primary">Opslaan</button></div><p class="msg" id="m"></p></form>
     <h2>Logo</h2><div class="panel fields">
       ${b.logoUrl ? `<img class="logo-preview" alt="Huidig logo" src="${esc(new URL(b.logoUrl).pathname + new URL(b.logoUrl).search)}">` : `<p class="muted">Nog geen logo.</p>`}
@@ -869,6 +873,75 @@ async function huisstijl() {
   };
   const del = $("#dellogo");
   if (del) del.onclick = () => busy(del, async () => { await api("/v1/admin/brand/logo", { method: "DELETE" }); location.reload(); });
+}
+
+// ───────── Voorwaarden en privacy ─────────
+// De Dienst host ze zelf (/voorwaarden, /privacy, /verwerkersovereenkomst); zie src/broker/juridisch.ts.
+
+const DOCS = [["voorwaarden", "Voorwaarden"], ["privacy", "Privacyverklaring"], ["verwerkersovereenkomst", "Verwerkersovereenkomst"]];
+/** Tekst die nog niet is opgeslagen, per document (zolang deze pagina open is). */
+const docDrafts = {};
+
+async function voorwaarden(tab) {
+  const kind = DOCS.some(([k]) => k === tab) ? tab : "voorwaarden";
+  const r = await api("/v1/admin/juridisch");
+  const d = r.documents.find((x) => x.kind === kind);
+  const own = kind === "voorwaarden" ? r.own.termsUrl : kind === "privacy" ? r.own.privacyUrl : false;
+  const ownUrl = kind === "voorwaarden" ? r.termsUrl : r.privacyUrl;
+  const path = new URL(d.url).pathname;
+  const draft = docDrafts[kind] !== undefined && docDrafts[kind] !== d.body ? docDrafts[kind] : null;
+  root.innerHTML = `<h1>Voorwaarden en privacy</h1>
+    <p class="lead">Je algemene voorwaarden, privacyverklaring en verwerkersovereenkomst. Je Dienst zet ze op een eigen pagina; de app en het bestellen linken er vanzelf naartoe.</p>
+    <div class="note warn"><b>Dit is een voorbeeld, geen juridisch advies. Laat het nakijken.</b><br><small>Het voorbeeld komt uit de gegevens van je Dienst: je bedrijf, je bundels en prijzen, en de partijen waar alles echt staat. Lees het na en pas aan wat niet bij jou past.</small></div>
+    <nav class="tabs" aria-label="Document">${DOCS.map(([k, l]) => `<a href="#/voorwaarden/${k}"${k === kind ? ' aria-current="page"' : ""}>${esc(l)}${r.documents.find((x) => x.kind === k)?.published ? "" : " · nog niet"}</a>`).join("")}</nav>
+    <div class="fields"><div class="panel">
+      <div>${d.published ? `<span class="chip ok">Gepubliceerd</span> Versie ${d.version}, laatst gewijzigd op ${day(d.updatedAt)}${d.updatedBy ? ` door ${esc(d.updatedBy)}` : ""}.` : `<span class="chip">Nog niet gepubliceerd</span> Maak een voorbeeld, lees het na en publiceer het.`}</div>
+      <div class="hint">${kind === "verwerkersovereenkomst" ? "Je voorwaarden en je privacyverklaring verwijzen naar deze pagina. Hij geldt voor wat er in de clouds van je klanten staat."
+        : own ? `In de app staat je eigen link uit <a href="#/huisstijl">Huisstijl</a>: ${esc(ownUrl)}. Die gaat voor; maak hem daar leeg om deze pagina te gebruiken.`
+        : d.published ? "Deze pagina staat in de app en bij het bestellen." : "Zodra je publiceert, staat deze pagina in de app en bij het bestellen."}</div>
+      ${d.published ? `<div><a class="btn small" href="${esc(path)}" target="_blank" rel="noopener">Bekijken ↗</a></div>` : ""}
+    </div>
+    <form class="panel fields" id="jf">
+      <div class="row"><button type="button" class="btn" id="gen">Maak een voorbeeld</button><button type="button" class="btn" id="prev">Bekijken zoals klanten het zien</button></div>
+      <label>Tekst<textarea name="body" class="doc" spellcheck="true" placeholder="Kies Maak een voorbeeld, of plak je eigen tekst.">${esc(draft ?? d.body)}</textarea>
+        <small>Opmaak: <code># Kop</code>, <code>## Tussenkop</code>, <code>- opsomming</code>, <code>**vet**</code> en <code>[tekst](https://…)</code>. Een lege regel begint een nieuwe alinea. Plekken met [vul in: …] vul je zelf aan.</small></label>
+      ${d.published ? `<label class="check"><input type="checkbox" name="announce"> Klanten een bericht sturen dat dit is gewijzigd</label>
+      <label id="sumWrap" hidden>Wat er verandert <small>(één zin; komt in het bericht in de app, 30 dagen zichtbaar)</small><input name="summary" maxlength="300"></label>` : ""}
+      <div class="row"><button class="btn primary">${d.published ? "Opslaan en publiceren" : "Publiceren"}</button></div><p class="msg${draft ? " ok" : ""}" id="jm">${draft ? "Je tekst die nog niet is opgeslagen, staat er nog." : ""}</p>
+    </form></div>
+    ${d.history.length > 1 ? `<h2>Eerdere versies</h2><ul class="list">${d.history.slice(1).map((h) => `<li><a href="${esc(path)}?versie=${h.version}" target="_blank" rel="noopener"><span class="title">Versie ${h.version}</span><span class="sub">${day(h.at)}</span></a></li>`).join("")}</ul>` : ""}`;
+  const f = $("#jf");
+  const ta = f.elements.body;
+  const ann = f.elements.announce;
+  ta.oninput = () => { docDrafts[kind] = ta.value; };
+  if (ann) ann.onchange = () => { $("#sumWrap").hidden = !ann.checked; };
+  $("#gen").onclick = () => busy($("#gen"), async () => {
+    const changed = ta.value.trim() && ta.value.trim() !== d.body.trim();
+    if (changed && !(await confirmDlg("Tekst vervangen?", "De tekst in het veld wordt vervangen door een nieuw voorbeeld. Wat je nog niet hebt opgeslagen, gaat verloren.", "Vervangen"))) return;
+    const x = await api(`/v1/admin/juridisch/${kind}/voorbeeld`);
+    ta.value = x.body;
+    docDrafts[kind] = x.body;
+    setMsg($("#jm"), `Voorbeeld gemaakt uit de gegevens van je Dienst${d.published ? "; de gepubliceerde tekst blijft staan tot je opslaat" : ""}. Lees het na en vul aan wat ontbreekt.`, true);
+  });
+  $("#prev").onclick = () => busy($("#prev"), async () => {
+    if (ta.value.trim().length < 20) throw new Error("Er is nog geen tekst om te bekijken");
+    const res = await api(`/v1/admin/juridisch/${kind}/weergave`, { body: { body: ta.value }, raw: true });
+    $("#viewerFrame").title = "Voorbeeld";
+    $("#viewerFrame").srcdoc = await res.text();
+    $("#viewer").showModal();
+  });
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    if (/\[vul in/i.test(ta.value) && !(await confirmDlg("Nog niet alles ingevuld", "Er staan nog plekken met [vul in: …] in de tekst. Toch publiceren?", "Toch publiceren"))) return;
+    await busy(e.submitter, async () => {
+      try {
+        const x = await api(`/v1/admin/juridisch/${kind}`, { method: "PUT", body: { body: ta.value, announce: !!ann?.checked, summary: f.elements.summary?.value ?? "" } });
+        delete docDrafts[kind];
+        toast(!x.changed ? "Niets gewijzigd" : x.announcement ? `Gepubliceerd als versie ${x.document.version}; je klanten krijgen een bericht` : `Gepubliceerd als versie ${x.document.version}`);
+        rerender();
+      } catch (err) { setMsg($("#jm"), err.message); }
+    });
+  };
 }
 
 // ───────── Medewerkers ─────────
@@ -991,6 +1064,8 @@ async function lijst() {
   };
   root.innerHTML = `<h1>Op de lijst van aanbieders</h1>
     <p class="lead">In de app kiezen nieuwe klanten een aanbieder uit een openbare lijst. Die lijst staat in het open-sourceproject op GitHub; je zet jezelf erop met een voorstel dat de beheerders van het project goedkeuren.</p>
+    <div class="note"><b>Sneller in de app:</b> in de Eigen Cloud-app of de beheerconsole doe je dit in één tik, zonder kopiëren en plakken: <b>Je dienst → Op de lijst</b>. De app maakt het voorstel op GitHub voor je en laat zien wanneer je op de lijst staat. Hieronder kan het ook met de hand.</div>
+    ${!r.voorwaarden?.termsUrl || !r.voorwaarden?.privacyUrl ? `<p class="note warn">Zet eerst je <a href="#/voorwaarden">voorwaarden en privacyverklaring</a> klaar: de beheerders van de lijst kijken daarnaar.</p>` : ""}
     ${r.opLijst ? (r.actueel ? `<p class="note">✓ Je staat op de lijst, en je regel klopt.</p>` : `<p class="note warn">Je staat op de lijst, maar je regel is niet meer actueel${r.sleutelKlopt ? "" : " (de sleutel klopt niet: gratis adressen werken dan niet)"}. Werk hem bij zoals hieronder.</p>`) : ""}
     <form class="panel fields" id="lf"><div class="row"><label>Land<input name="land" value="${esc(entry.land ?? "NL")}" maxlength="2" style="max-width:5em"></label>
       <label>Omschrijving <small>(één zin, gewone taal)</small><input name="omschrijving" value="${esc(entry.omschrijving ?? "")}" maxlength="140"></label></div>

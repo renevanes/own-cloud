@@ -31,7 +31,7 @@ async function json(r: Response) {
 }
 
 /** Foutmelding van deSEC leesbaar maken ({"captcha": ["…"]} of {"detail": "…"}). */
-function desecError(j: unknown): string {
+export function desecError(j: unknown): string {
   if (!j || typeof j !== "object") return "onbekende fout";
   const o = j as Record<string, unknown>;
   if (o.captcha) return "De tekens uit het plaatje kloppen niet. Probeer het met een nieuw plaatje.";
@@ -316,7 +316,8 @@ export async function applyKit(c: AdminConfig, kit: Kit, addStore: AddStoreFn) {
 export const SCW_SIGNUP_URL = "https://account.scaleway.com/register";
 export const SCW_KEYS_URL = "https://console.scaleway.com/iam/api-keys";
 
-async function scw(method: string, pathname: string, secretKey: string, body?: unknown) {
+/** Verzoek aan de Scaleway-API met een geheime sleutel; fouten als Nederlandse melding (met `status`). Ook voor aanbieder worden. */
+export async function scw(method: string, pathname: string, secretKey: string, body?: unknown) {
   let r: Response;
   try {
     r = await fetch(`${scwApi()}${pathname}`, { method, headers: { "x-auth-token": secretKey, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20_000) });
@@ -353,18 +354,28 @@ export async function scwProject(accessKey: string, secretKey: string, projectId
 }
 
 /** Mail versturen via Scaleway: maildomein aanmelden, relay instellen, DKIM-record voor de cloud klaarzetten. */
+export const TEM_DOMAINS = "/transactional-email/v1alpha1/regions/fr-par/domains";
+
+/**
+ * Het maildomein `d` bij Scaleway Transactional Email: het bekende (`knownId`), anders een bestaand (niet ingetrokken)
+ * in het project, anders een nieuw. Ook voor de mail van een Dienst (aanbieder worden).
+ */
+export async function temDomain(secretKey: string, projectId: string, d: string, knownId?: string) {
+  let dom: any = knownId ? await scw("GET", `${TEM_DOMAINS}/${knownId}`, secretKey).catch(() => null) : null;
+  if (dom && (dom.name !== d || dom.status === "revoked")) dom = null;
+  if (!dom) {
+    const list = await scw("GET", `${TEM_DOMAINS}?project_id=${encodeURIComponent(projectId)}&name=${encodeURIComponent(d)}`, secretKey);
+    dom = (list?.domains ?? []).find((x: any) => x.name === d && x.status !== "revoked") ?? null;
+  }
+  if (!dom) dom = await scw("POST", TEM_DOMAINS, secretKey, { project_id: projectId, domain_name: d, accept_tos: true });
+  if (!dom?.id) throw new Error("Scaleway gaf geen maildomein terug");
+  return dom;
+}
+
 export async function scwMail(c: AdminConfig, secretKey: string, projectId: string) {
   const d = c.domain;
   if (!d) throw new Error("Nog geen domein");
-  const base = "/transactional-email/v1alpha1/regions/fr-par/domains";
-  let dom: any = c.console.temDomainId ? await scw("GET", `${base}/${c.console.temDomainId}`, secretKey).catch(() => null) : null;
-  if (dom && (dom.name !== d || dom.status === "revoked")) dom = null;
-  if (!dom) {
-    const list = await scw("GET", `${base}?project_id=${encodeURIComponent(projectId)}&name=${encodeURIComponent(d)}`, secretKey);
-    dom = (list?.domains ?? []).find((x: any) => x.name === d && x.status !== "revoked") ?? null;
-  }
-  if (!dom) dom = await scw("POST", base, secretKey, { project_id: projectId, domain_name: d, accept_tos: true });
-  if (!dom?.id) throw new Error("Scaleway gaf geen maildomein terug");
+  const dom = await temDomain(secretKey, projectId, d, c.console.temDomainId);
   const rec = temRecords(dom, projectId);
   c.console.temDomainId = dom.id;
   c.console.mailRelay = `smtp://${encodeURIComponent(projectId)}:${encodeURIComponent(secretKey)}@smtp.tem.scaleway.com:587`;

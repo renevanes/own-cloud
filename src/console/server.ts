@@ -30,6 +30,10 @@ import { rpc } from "../cluster/transport.js";
 import * as extras from "./extras.js";
 import * as aanbieder from "./aanbieder.js";
 import * as overstap from "./overstap.js";
+import * as nodig from "./benodigdheden.js";
+import * as github from "./github.js";
+import * as voorwaarden from "./voorwaarden.js";
+import { zonelimiet } from "./zonelimiet.js";
 import { findAdminConfig } from "../cluster/admin.js";
 import { consoleSettings } from "../cluster/admin.js";
 import { clusterStatus, findLeader, prepareStore, probeCluster, provisionFirstNode, readManifest, recoverAdminConfig, saveAdminCopy, sendJob, adminProof, pushAdminConfig } from "../cluster/admin.js";
@@ -898,6 +902,43 @@ export async function buildConsole() {
     const aDeps = (): aanbieder.Deps => ({ save, serverOffers, storeOffers, dnsOffers });
     const aFail = (reply: FastifyReply, e: unknown) => reply.code(400).send({ error: (e as Error).message, ...((e as { steps?: unknown }).steps ? { steps: (e as { steps?: unknown }).steps } : {}) });
     s.get("/api/aanbieder", async () => aanbieder.view(cfg(), aDeps()));
+    // ── Wat je nodig hebt om aanbieder te worden, en het regelen ervan (benodigdheden.ts) ──
+    s.get<{ Querystring: { fresh?: string } }>("/api/aanbieder/benodigdheden", async (req, reply) => {
+      try { return await nodig.benodigdheden(cfg(), req.query.fresh === "1", { save }); } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: { accessKey?: string; secretKey?: string; verwijderen?: boolean } }>("/api/aanbieder/scaleway", async (req, reply) => {
+      try { return await nodig.scaleway(cfg(), req.body ?? {}, aDeps()); } catch (e) { save(); return aFail(reply, e); }
+    });
+    s.post<{ Body: { key?: string } }>("/api/aanbieder/mollie", async (req, reply) => {
+      try { const r = await nodig.mollie(cfg(), req.body ?? {}); save(); return r; } catch (e) { save(); return aFail(reply, e); }
+    });
+    s.post<{ Body: { captchaId?: string; solution?: string; email?: string } }>("/api/aanbieder/desec/register", async (req, reply) => {
+      try { const r = await nodig.desecRegister(cfg(), req.body ?? {}); save(); return r; } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: { adressen?: boolean } }>("/api/aanbieder/desec/finish", async (req, reply) => {
+      try { const r = await nodig.desecFinish(cfg(), req.body ?? {}); save(); return r; } catch (e) { save(); return aFail(reply, e); }
+    });
+    s.post<{ Body: { voor?: string; zone?: string } }>("/api/aanbieder/domein", async (req, reply) => {
+      try { return await nodig.domein(cfg(), req.body ?? {}); } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: { voor?: string; zone?: string } }>("/api/aanbieder/domein/delegeren", async (req, reply) => {
+      try { return await nodig.delegeren(cfg(), req.body ?? {}, aDeps()); } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: { voor?: string; zone?: string; prijs?: string; akkoord?: boolean; houder?: nodig.Houder } }>("/api/aanbieder/domein/kopen", async (req, reply) => {
+      try { return await nodig.kopen(cfg(), req.body ?? {}, aDeps()); } catch (e) { return aFail(reply, e); }
+    });
+    s.get("/api/aanbieder/mail", async (_req, reply) => {
+      try { return await nodig.mailStatus(cfg(), aDeps()); } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: { manier?: string; smtpUrl?: string; mailFrom?: string } }>("/api/aanbieder/mail", async (req, reply) => {
+      try { return await nodig.mail(cfg(), req.body ?? {}, aDeps()); } catch (e) { save(); return aFail(reply, e); }
+    });
+    s.get("/api/aanbieder/openprovider", async (_req, reply) => {
+      try { return await nodig.openproviderCheck(cfg(), aDeps()); } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: { gebruiker?: string; wachtwoord?: string } }>("/api/aanbieder/openprovider", async (req, reply) => {
+      try { return await nodig.openprovider(cfg(), req.body ?? {}, aDeps()); } catch (e) { save(); return aFail(reply, e); }
+    });
     s.post<{ Body: { step?: string } }>("/api/aanbieder/stap", async (req, reply) => {
       try { const r = aanbieder.setStep(cfg(), req.body?.step ?? ""); save(); return r; } catch (e) { return aFail(reply, e); }
     });
@@ -936,6 +977,26 @@ export async function buildConsole() {
     });
     s.post("/api/aanbieder/hersteltest", async (_req, reply) => {
       try { return await aanbieder.hersteltest(cfg(), aDeps()); } catch (e) { return aFail(reply, e); }
+    });
+    // ── Op de lijst via GitHub, voorwaarden en privacy, zonelimiet bij deSEC (github.ts, voorwaarden.ts, zonelimiet.ts) ──
+    s.get("/api/aanbieder/lijst", async (_req, reply) => {
+      try { return await github.view(cfg(), { save }); } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: { token?: string } }>("/api/github/koppelen", async (req, reply) => {
+      try { const r = await github.koppelen(cfg(), req.body ?? {}); save(); return r; } catch (e) { return aFail(reply, e); }
+    });
+    s.post("/api/github/ontkoppelen", async () => { const r = github.ontkoppelen(cfg()); save(); return r; });
+    s.post<{ Body: { land?: string; omschrijving?: string } }>("/api/aanbieder/lijst/aanmelden", async (req, reply) => {
+      try { const r = await github.aanmelden(cfg(), req.body ?? {}); save(); return r; } catch (e) { save(); return aFail(reply, e); }
+    });
+    s.post<{ Body: { confirm?: boolean } }>("/api/aanbieder/lijst/samenvoegen", async (req, reply) => {
+      try { const r = await github.samenvoegen(cfg(), req.body ?? {}); save(); return r; } catch (e) { save(); return aFail(reply, e); }
+    });
+    s.get("/api/aanbieder/juridisch", async (_req, reply) => {
+      try { return await voorwaarden.status(cfg()); } catch (e) { return aFail(reply, e); }
+    });
+    s.get<{ Querystring: { welke?: string } }>("/api/aanbieder/zonelimiet", async (req, reply) => {
+      try { return await zonelimiet(cfg(), req.query.welke ?? ""); } catch (e) { return aFail(reply, e); }
     });
     // Kluis alleen voor een Dienst: er komt toch een eigen cloud bij (de stap "Jij en je adres", zonder nieuwe kluis).
     s.post<{ Body: CloudInput }>("/api/setup/cloud", async (req, reply) => {

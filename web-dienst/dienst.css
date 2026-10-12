@@ -169,3 +169,5 @@ ol.steps { padding-left: 22px; display: grid; gap: 8px; }
 .placement .prow { align-items: end; }
 .placement .prow > label { flex: 1 1 120px; }
 .placement .prow > label:nth-child(3) { flex: 2 1 220px; }
+textarea.doc { min-height: 460px; font-size: 15px; line-height: 1.55; tab-size: 2; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; background: var(--sunk); padding: 0 4px; border-radius: 4px; }

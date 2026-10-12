@@ -86,6 +86,11 @@ export interface BrokerConfig {
   /** Eigen back-up van de Dienst (BROKER_BACKUP_*), alleen samen met BROKER_SECRET; null = uit. */
   backup: BackupTarget | null;
   backupEveryMs: number;
+  /**
+   * Waar de server van deze Dienst staat (BROKER_HOSTING, "<aanbieder> <regio>", bijv. "scaleway nl-ams-1"; de console
+   * zet het). Alleen voor de subverwerkers in de voorbeeldteksten (src/broker/juridisch.ts); null = onbekend.
+   */
+  hosting: { provider: string; region: string } | null;
 }
 
 export const NAMESERVERS = ["ns1.desec.io", "ns2.desec.org"];
@@ -276,7 +281,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BrokerConfig {
     },
     backup: backupTarget(env),
     backupEveryMs: Number(env.BROKER_BACKUP_EVERY_MS || 3_600_000),
+    hosting: parseHosting(env.BROKER_HOSTING),
   };
+}
+
+/** "scaleway nl-ams-1" → {provider, region}; leeg of onleesbaar → null. */
+function parseHosting(v: string | undefined) {
+  const m = /^\s*([a-z0-9-]{1,40})\s+([A-Za-z0-9._-]{1,60})\s*$/.exec(v ?? "");
+  return m ? { provider: m[1], region: m[2] } : null;
 }
 
 /**

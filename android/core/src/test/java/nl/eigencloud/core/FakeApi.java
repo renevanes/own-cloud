@@ -32,11 +32,21 @@ final class FakeApi implements AutoCloseable {
         final int status;
         final String body;
         final String contentType;
+        /** Binary body (e.g. a DNS message); when set, {@code body} is ignored. */
+        final byte[] bytes;
 
         Reply(int status, String body, String contentType) {
             this.status = status;
             this.body = body;
             this.contentType = contentType;
+            this.bytes = null;
+        }
+
+        Reply(int status, byte[] bytes, String contentType) {
+            this.status = status;
+            this.body = "";
+            this.contentType = contentType;
+            this.bytes = bytes;
         }
     }
 
@@ -88,7 +98,7 @@ final class FakeApi implements AutoCloseable {
         for (Object[] route : routes) {
             if (((Pattern) route[0]).matcher(c.method + " " + c.url()).find()) { r = ((Handler) route[1]).handle(c); break; }
         }
-        byte[] body = Bytes.utf8(r.body);
+        byte[] body = r.bytes != null ? r.bytes : Bytes.utf8(r.body);
         ex.getResponseHeaders().set("content-type", r.contentType);
         boolean empty = r.status == 204 || body.length == 0;
         ex.sendResponseHeaders(r.status, empty ? -1 : body.length);

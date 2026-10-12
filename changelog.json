@@ -1,5 +1,17 @@
 [
   {
+    "version": "1.16",
+    "date": "2026-10-12",
+    "changes": [
+      "Nieuw voor aanbieders: 'Wat je nodig hebt', één lijst met alles wat nodig is om aanbieder te worden, met per onderdeel of het al geregeld is",
+      "Scaleway regelen met één sleutel: de app maakt zelf een eigen sleutel met precies de juiste rechten",
+      "Mollie-sleutel controleren: de app zegt welke betaalmethoden nog aan moeten; deSEC-account en mail via Scaleway regelt de app zelf",
+      "Domein kopen, nameservers en DNS instellen via Openprovider vanuit de app; DNS kan nu ook bij Openprovider",
+      "Voorwaarden, privacyverklaring en verwerkersovereenkomst: de app maakt een voorbeeld dat je aanpast en dat je Dienst publiceert",
+      "Op de lijst van aanbieders komen vanuit de app, via GitHub; zonelimiet bij deSEC zien en verhogen"
+    ]
+  },
+  {
     "version": "1.15",
     "date": "2026-10-12",
     "changes": [

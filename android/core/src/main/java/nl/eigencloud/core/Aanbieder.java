@@ -128,9 +128,9 @@ public final class Aanbieder {
         return a;
     }
 
-    private static Map<String, Object> existing(Map<String, Object> c) { return migrate(Json.map(c, "console", "aanbieder")); }
+    static Map<String, Object> existing(Map<String, Object> c) { return migrate(Json.map(c, "console", "aanbieder")); }
 
-    private static Map<String, Object> state(Map<String, Object> c) {
+    static Map<String, Object> state(Map<String, Object> c) {
         Map<String, Object> con = Json.map(c, "console");
         Map<String, Object> a = Json.map(con, "aanbieder");
         if (a == null) {
@@ -152,7 +152,7 @@ public final class Aanbieder {
 
     private static String mask(String v) { return v == null || v.isEmpty() ? "" : "••••••••" + v.substring(Math.max(0, v.length() - 4)); }
 
-    private static String smtpOf(Map<String, Object> c, Map<String, Object> a) {
+    static String smtpOf(Map<String, Object> c, Map<String, Object> a) {
         String own = Json.str(a, "accounts", "smtpUrl");
         if (nonEmpty(own)) return own;
         String relay = Json.str(c, "console", "mailRelay");
@@ -366,12 +366,13 @@ public final class Aanbieder {
             {"accounts", "Accounts en sleutels", "console", null},
             {"aanbod", "Aanbod en prijzen", "dienst", "aanbod"},
             {"huisstijl", "Huisstijl", "dienst", "huisstijl"},
+            {"voorwaarden", "Voorwaarden en privacy", "beide", "voorwaarden"},
             {"medewerkers", "Medewerkers", "dienst", "medewerkers"},
             {"klanten", "Klanten", "dienst", "klanten"},
             {"hulpvragen", "Hulpvragen", "dienst", "hulpvragen"},
             {"berichten", "Berichten", "dienst", "berichten"},
             {"adressendienst", "Adressendienst", "beide", "adressen"},
-            {"lijst", "Op de lijst", "dienst", "lijst"},
+            {"lijst", "Op de lijst", "beide", "lijst"},
             {"server", "Server en back-ups", "console", null},
             {"kosten", "Kosten", "beide", "kosten"},
             {"updates", "Updates", "console", null},
@@ -549,7 +550,7 @@ public final class Aanbieder {
         return Json.obj("id", id, "label", label, "ok", ok, "detail", detail);
     }
 
-    private static Map<String, Object> checkScaleway(String key, String org) {
+    static Map<String, Object> checkScaleway(String key, String org) {
         String id = "scaleway", label = "Scaleway";
         if (!UUID.matcher(key).matches() || !UUID.matcher(org).matches()) return check(id, label, false, "Vul de geheime sleutel en het organisatie-ID in (allebei 8-4-4-4-12 tekens)");
         try {
@@ -576,7 +577,7 @@ public final class Aanbieder {
         }
     }
 
-    private static Map<String, Object> checkDesec(String token) {
+    static Map<String, Object> checkDesec(String token) {
         String id = "desec", label = "deSEC";
         if (token.isEmpty()) return check(id, label, false, "Vul je deSEC-token in");
         try {
@@ -589,7 +590,7 @@ public final class Aanbieder {
         }
     }
 
-    private static Map<String, Object> checkSmtp(String url) {
+    static Map<String, Object> checkSmtp(String url) {
         String id = "smtp", label = "Mail versturen";
         if (url.isEmpty()) return check(id, label, false, "Vul een mailserver in, bijv. smtp://gebruiker:wachtwoord@smtp.tem.scaleway.com:587");
         SmtpCheck.Relay r = SmtpCheck.parseRelayUrl(url);
@@ -712,7 +713,8 @@ public final class Aanbieder {
         String zone = (b.get("zone") != null ? Json.jsString(b.get("zone")) : cur != null ? nz(Json.str(cur, "zone")) : "").trim().toLowerCase(Locale.ROOT).replaceAll("^\\.+|\\.+$", "");
         if (!ZONE.matcher(zone).matches()) throw new IllegalArgumentException("Vul de gedeelde zone in, zoals eigencloud.nl");
         String token = b.get("desecToken") == null ? "" : Json.jsString(b.get("desecToken")).trim();
-        if (token.isEmpty() || token.startsWith("••")) token = cur != null ? nz(Json.str(cur, "desecToken")) : "";
+        // Leeg: het bewaarde token, of het token dat de app bij deSEC maakte (Benodigdheden.desecFinish met adressen).
+        if (token.isEmpty() || token.startsWith("••")) token = cur != null ? nz(Json.str(cur, "desecToken")) : nz(Json.str(a, "desecAccount", "adressenToken"));
         if (token.isEmpty()) throw new IllegalArgumentException("Vul het deSEC-token voor deze zone in");
         if (token.matches("(?s).*\\s.*")) throw new IllegalArgumentException("Een token past op één regel, zonder spaties");
         String rawHost = b.get("host") == null ? "" : Json.jsString(b.get("host")).trim();
@@ -920,6 +922,9 @@ public final class Aanbieder {
             env.add(new String[] {"BROKER_ADRES_PUBLIEK", "https://" + Json.str(a, "adressen", "host")});
             env.add(new String[] {"BROKER_BACKUP_ADRESSEN", "/adressen/adressen.sqlite"});
         } else if (nonEmpty(Json.str(acc, "adresUrl"))) env.add(new String[] {"BROKER_ADRES_URL", Json.str(acc, "adresUrl")});
+        // Waar de server van de Dienst staat: alleen voor de subverwerkers in de voorbeeldteksten (src/broker/juridisch.ts).
+        Map<String, Object> hosting = Json.map(a, "hosting");
+        if (hosting != null) env.add(new String[] {"BROKER_HOSTING", Json.str(hosting, "provider") + " " + Json.str(hosting, "region")});
         env.add(new String[] {"BROKER_BACKUP_ENDPOINT", Json.str(bk, "endpoint")});
         env.add(new String[] {"BROKER_BACKUP_REGION", Json.str(bk, "region")});
         env.add(new String[] {"BROKER_BACKUP_BUCKET", Json.str(bk, "bucket")});
@@ -974,7 +979,7 @@ public final class Aanbieder {
         }
     }
 
-    private static String ensureProject(Map<String, Object> a, String key, String org) throws IOException {
+    static String ensureProject(Map<String, Object> a, String key, String org) throws IOException {
         if (nonEmpty(Json.str(a, "projectId"))) return Json.str(a, "projectId");
         Object list = scw("GET", "/account/v3/projects?organization_id=" + Bytes.encodeURIComponent(org) + "&name=" + PROJECT_NAME, key, null);
         String id = null;
@@ -1005,7 +1010,11 @@ public final class Aanbieder {
             deps.save();
         }
         if (!nonEmpty(Json.str(bk, "policyId"))) {
-            String id = s(Json.path(scw("GET", "/iam/v1alpha1/policies?organization_id=" + orgQ + "&application_id=" + Json.str(bk, "applicationId"), key, null), "policies", 0, "id"));
+            // De API filtert op application_ids (scaleway-sdk-go iam/v1alpha1 ListPolicies); zelf nog eens op de applicatie.
+            String id = null;
+            for (Object x : Json.listAt(scw("GET", "/iam/v1alpha1/policies?organization_id=" + orgQ + "&application_ids=" + Json.str(bk, "applicationId"), key, null), "policies")) {
+                if (Json.str(bk, "applicationId").equals(Json.str(x, "application_id"))) { id = s(Json.path(x, "id")); break; }
+            }
             if (id == null) id = s(Json.path(scw("POST", "/iam/v1alpha1/policies", key, Json.obj("name", name, "organization_id", org, "application_id", bk.get("applicationId"),
                     "description", "Alleen opslag in project " + Json.str(a, "projectId"), "rules", Json.list(Json.obj("permission_set_names", Json.list("ObjectStorageFullAccess"), "project_ids", Json.list(a.get("projectId")))))), "id"));
             if (id == null) throw new IOException("Scaleway gaf geen policy-id terug");
@@ -1150,7 +1159,7 @@ public final class Aanbieder {
     }
 
     /** "deSEC" instead of "deSEC (gratis, open source, Berlijn)": the name from the DNS offers. */
-    private static String dnsName(String id, Offers deps) {
+    static String dnsName(String id, Offers deps) {
         if (id == null) return "";
         for (Map<String, Object> o : deps.dnsOffers()) if (id.equals(o.get("id"))) return Json.str(o, "name").replaceFirst(" \\(.*\\)$", "");
         return id;
@@ -1448,27 +1457,10 @@ public final class Aanbieder {
 
     // ───────── 6. Klaar: status, verwijderen ─────────
 
-    /** A-records via DNS-over-HTTPS (zoals DnsSetup.resolveNs). */
+    /** A-records via DNS-over-HTTPS ({@link Doh}, zoals DnsSetup.resolveNs). */
     static List<String> resolve4Doh(String host) {
-        for (String base : Endpoints.DOH) {
-            try {
-                String url = base + (base.contains("?") ? "&" : "?") + "name=" + Bytes.encodeURIComponent(host) + "&type=A";
-                Http.Response r = Http.request("GET", url, Http.headers("accept", "application/dns-json"), null, 8000);
-                if (!r.ok()) continue;
-                List<String> out = new ArrayList<>();
-                Object j = Json.parse(r.text());
-                Number st = Json.num(j, "Status");
-                if (st != null && st.intValue() != 0) return out;
-                for (Object x : Json.listAt(j, "Answer")) {
-                    Number type = Json.num(x, "type");
-                    if (type != null && type.intValue() == 1 && Json.str(x, "data") != null) out.add(Json.str(x, "data").trim());
-                }
-                return out;
-            } catch (IOException | RuntimeException ignored) {
-                // volgende resolver
-            }
-        }
-        return new ArrayList<>();
+        Doh.Answer a = Doh.lookup(host, "A");
+        return a == null ? new ArrayList<>() : new ArrayList<>(a.values);
     }
 
     public static Map<String, Object> status(Map<String, Object> c, Deps deps) throws IOException {

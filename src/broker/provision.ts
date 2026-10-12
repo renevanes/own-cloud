@@ -293,8 +293,10 @@ const STEPS: [string, StepFn][] = [
       st = patchState(ctx.db, o.id, { applicationId: id });
     }
     if (!st.policyId) {
-      const list = await scw.req("GET", `/iam/v1alpha1/policies?organization_id=${org}&application_id=${encodeURIComponent(st.applicationId)}`);
-      let id = (list?.policies ?? [])[0]?.id;
+      // De API filtert op application_ids (scaleway-sdk-go iam/v1alpha1 ListPolicies); zelf nog eens op de applicatie,
+      // anders zou een policy van een andere klant (of van de Dienst) gekozen kunnen worden.
+      const list = await scw.req("GET", `/iam/v1alpha1/policies?organization_id=${org}&application_ids=${encodeURIComponent(st.applicationId)}`);
+      let id = (list?.policies ?? []).find((p: any) => p.application_id === st.applicationId)?.id;
       if (!id) id = (await scw.req("POST", "/iam/v1alpha1/policies", {
         name, organization_id: scw.organizationId, application_id: st.applicationId,
         description: `Alleen project ${st.projectId}`,

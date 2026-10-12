@@ -125,7 +125,7 @@ public class AdaptersTest {
         st.records.add(obj("{\"id\":\"r-1\",\"name\":\"cloud\",\"type\":\"A\",\"content\":\"1.1.1.1\",\"ttl\":300}"));
         st.records.add(obj("{\"id\":\"r-2\",\"name\":\"cloud\",\"type\":\"A\",\"content\":\"2.2.2.2\",\"ttl\":300}"));
         final Pattern route = Pattern.compile("^/exo/([a-z0-9-]+)/v2(/.*)$");
-        api.on("^GET /doh", c -> new FakeApi.Reply(200, "{\"Status\":0,\"Answer\":[]}", "application/dns-json"));
+        api.on("^GET /doh", c -> DohFake.reply(c, java.util.Collections.emptyMap()));
         api.on("^[A-Z]+ /exo/", c -> {
             try {
                 Matcher rm = route.matcher(c.path);
@@ -351,7 +351,7 @@ public class AdaptersTest {
         st.records.add(obj("{\"id\":2,\"subDomain\":\"\",\"fieldType\":\"TXT\",\"target\":\"\\\"oud\\\"\",\"ttl\":3600}"));
         st.records.add(obj("{\"id\":3,\"subDomain\":\"www\",\"fieldType\":\"TXT\",\"target\":\"\\\"blijft\\\"\",\"ttl\":3600}"));
         final Set<String> zones = new HashSet<>(Arrays.asList("vanes.nl", "vanes.test"));
-        api.on("^GET /doh", c -> new FakeApi.Reply(200, "{\"Status\":0,\"Answer\":[]}", "application/dns-json"));
+        api.on("^GET /doh", c -> DohFake.reply(c, java.util.Collections.emptyMap()));
         api.on("^[A-Z]+ /1\\.0/", c -> {
             try {
                 String p = c.path.substring(4), k = c.method + " " + p;
@@ -623,7 +623,7 @@ public class AdaptersTest {
         for (Map<String, Object> o : cat.dnsOffers()) dns.add(Json.str(o, "id") + ":" + Json.str(o, "sharesKeyWith"));
         for (Map<String, Object> o : cat.storeOffers()) stores.add(Json.str(o, "id"));
         T.eq("[scaleway, hetzner, upcloud, exoscale, ovh]", servers.toString(), "server offers");
-        T.eq("[desec:null, scaleway:scaleway, hetzner:hetzner, exoscale:exoscale, ovh:ovh]", dns.toString(), "DNS offers");
+        T.eq("[desec:null, scaleway:scaleway, hetzner:hetzner, exoscale:exoscale, ovh:ovh, openprovider:null]", dns.toString(), "DNS offers");
         T.eq("[scaleway, hetzner, upcloud, exoscale, ovh, custom]", stores.toString(), "store offers");
         T.eq("API-sleutel (begint met EXO)", Catalog.fields(cat.serverOffer("exoscale")).get(0).label, "field label");
         T.check(Catalog.fields(cat.serverOffer("ovh")).get(2).secret, "OVH consumer key is secret");
@@ -730,7 +730,7 @@ public class AdaptersTest {
             Map<String, Object> state = call(console, 200, "GET", "/api/state", null);
             List<String> dnsIds = new ArrayList<>();
             for (Object o : Json.listAt(state, "offers", "dns")) dnsIds.add(Json.str(o, "id"));
-            T.eq("[desec, scaleway, hetzner, exoscale, ovh, voorbeeld]", dnsIds.toString(), "DNS step offers (from the registry)");
+            T.eq("[desec, scaleway, hetzner, exoscale, ovh, openprovider, voorbeeld]", dnsIds.toString(), "DNS step offers (from the registry)");
             boolean srv = false;
             for (Object o : Json.listAt(state, "offers", "servers")) if ("voorbeeld".equals(Json.str(o, "id"))) srv = true;
             T.check(srv, "servers step offers voorbeeld");

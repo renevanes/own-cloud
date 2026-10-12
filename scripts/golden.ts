@@ -16,6 +16,7 @@ import { S3Store } from "../src/cluster/stores.js";
 import { userData, caddyfile, dienstUserData, dienstCheckScript, updaterScript } from "../src/cluster/cloudinit.js";
 import { adminProof, consoleSettings } from "../src/cluster/admin.js";
 import * as aanbieder from "../src/console/aanbieder.js";
+import * as github from "../src/console/github.js";
 import * as costs from "../src/console/costs.js";
 import { parseBudget } from "../src/cluster/costs.js";
 import { getAdapter } from "../src/cluster/adapters.js";
@@ -425,6 +426,17 @@ const bedrijfCases = [
 });
 const smtpCases = ["smtp://user%40x.nl:geheim@smtp.example.org:587", "smtps://mail.example.org", "smtp://127.0.0.1:2525", "", "geen url"].map((input) => ({ input, out: aanbieder.smtpDisplay(input) }));
 
+// ───────── Op de lijst: aanbieders.json samenvoegen zoals src/console/github.ts (Java: GitHub.mergeLijst) ─────────
+const lijstIn = JSON.parse(fs.readFileSync(new URL("../aanbieders.json", import.meta.url), "utf8"));
+const lijstCases = [
+  { lijst: lijstIn, entry: { naam: "Ünïcode € B.V.", url: "https://Dienst.Elders.example/", land: "DE", contact: "", omschrijving: "a \"b\" \\ c\n\t\u0001", sleutel: "MCow", standaard: true } },
+  { lijst: [...lijstIn, { naam: "Oud", url: "https://dienst.elders.example", opmerking: "x", getal: 1.5, groot: 12345678901, lijst: [1, { a: null }, []], leeg: {} }],
+    entry: { naam: "Nieuw", url: "https://dienst.elders.example/", land: "NL", contact: "x@y.z", omschrijving: "😀 \u2028", sleutel: "S2", adressen: "https://adr.example" } },
+  { lijst: [], entry: { naam: "Leeg", url: "https://a.example", adressen: "" } },
+  { lijst: [null, "x", 3, { url: "https://A.example//", standaard: true, adressen: "https://oud.example" }], entry: { naam: "A", url: "https://a.example", standaard: false } },
+].map((x) => ({ ...x, out: github.mergeLijst(x.lijst, x.entry) }));
+const branchCases = ["https://dienst.esape.nl", "https://Dienst.Vanes.test:8443/x", "https://d.example:443", "http://d.example:80", "geen url", "https://xn--bcher-kva.example"].map((url) => ({ url, out: github.branchFor(url) }));
+
 // ───────── Kosten en budget (src/cluster/costs.ts, src/console/costs.ts) ─────────
 const costCatalog = {
   scaleway: { "nl-ams-1": { data: { size: "DEV1-S", label: "2 vCPU, 2 GB", ramGb: 2, cpus: 2, monthly: 6.42 }, witness: { size: "STARDUST1-S", label: "1 vCPU, 1 GB", ramGb: 1, cpus: 1, monthly: 0.1 } } },
@@ -478,7 +490,7 @@ const out = {
   json, presign, sign, userData: userDataOut, caddyfile: caddyOut,
   pickSize: pickCases, presets, apiResponses, fetchSizes: fetchSizesOut, dnsFormat, scalewayDns, signatures, secretFields,
   sheets, sheetDateText: dateText, dates, checklists, pbkdf2, passwords, proofs, sampleConfig,
-  aanbieder: aanbiederOut, costs: costsOut, dienstUserData: dienstUserDataOut, dienstCheckScript: dienstCheckScript(), updaterScript: updaterScript(), cleanUrl: urlCases, smtpDisplay: smtpCases, bedrijf: bedrijfCases,
+  aanbieder: aanbiederOut, lijstMerge: lijstCases, branchFor: branchCases, costs: costsOut, dienstUserData: dienstUserDataOut, dienstCheckScript: dienstCheckScript(), updaterScript: updaterScript(), cleanUrl: urlCases, smtpDisplay: smtpCases, bedrijf: bedrijfCases,
 };
 fs.mkdirSync(path.dirname(outFile), { recursive: true });
 fs.writeFileSync(outFile, JSON.stringify(out, null, 1));

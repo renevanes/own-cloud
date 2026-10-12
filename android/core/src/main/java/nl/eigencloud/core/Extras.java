@@ -405,14 +405,15 @@ public final class Extras {
 
     public static final String SCW_SIGNUP_URL = "https://account.scaleway.com/register";
     public static final String SCW_KEYS_URL = "https://console.scaleway.com/iam/api-keys";
-    private static final String TEM = "/transactional-email/v1alpha1/regions/fr-par/domains";
+    static final String TEM = "/transactional-email/v1alpha1/regions/fr-par/domains";
 
     private static String jsMessage(Object j, String fallback) {
         Object m = Json.path(j, "message");
         return m != null ? Json.jsString(m) : fallback;
     }
 
-    private static Object scw(String method, String path, String secretKey, Object body) throws IOException {
+    /** Request to the Scaleway API with a secret key; Dutch errors (HttpException with the status). Also for aanbieder worden. */
+    static Object scw(String method, String path, String secretKey, Object body) throws IOException {
         Http.Response r;
         try {
             r = Http.request(method, Endpoints.SCALEWAY.replaceAll("/+$", "") + path, Http.headers("x-auth-token", secretKey, "content-type", "application/json"),
@@ -493,15 +494,14 @@ public final class Extras {
         return Json.obj("name", m.get("name") == null ? "" : Json.jsString(m.get("name")), "value", Json.jsString(m.get("value")));
     }
 
-    /** Mail versturen via Scaleway: maildomein aanmelden, relay instellen, DKIM-record voor de cloud klaarzetten. */
-    public static Map<String, Object> scwMail(Map<String, Object> c, String secretKey, String projectId) throws IOException {
-        String d = Json.truthy(c.get("domain")) ? Json.jsString(c.get("domain")) : null;
-        if (d == null) throw new IOException("Nog geen domein");
-        Map<String, Object> con = console(c);
+    /**
+     * Het maildomein {@code d} bij Scaleway Transactional Email: het bekende ({@code knownId}), anders een bestaand (niet
+     * ingetrokken) in het project, anders een nieuw (temDomain in extras.ts). Ook voor de mail van een Dienst.
+     */
+    static Object temDomain(String secretKey, String projectId, String d, String knownId) throws IOException {
         Object dom = null;
-        String known = Json.str(con, "temDomainId");
-        if (known != null && !known.isEmpty()) {
-            try { dom = scw("GET", TEM + "/" + known, secretKey, null); } catch (IOException e) { dom = null; }
+        if (knownId != null && !knownId.isEmpty()) {
+            try { dom = scw("GET", TEM + "/" + knownId, secretKey, null); } catch (IOException e) { dom = null; }
         }
         if (dom != null && (!d.equals(Json.path(dom, "name")) || "revoked".equals(Json.path(dom, "status")))) dom = null;
         if (dom == null) {
@@ -512,6 +512,15 @@ public final class Extras {
         }
         if (dom == null) dom = scw("POST", TEM, secretKey, Json.obj("project_id", projectId, "domain_name", d, "accept_tos", true));
         if (!Json.truthy(Json.path(dom, "id"))) throw new IOException("Scaleway gaf geen maildomein terug");
+        return dom;
+    }
+
+    /** Mail versturen via Scaleway: maildomein aanmelden, relay instellen, DKIM-record voor de cloud klaarzetten. */
+    public static Map<String, Object> scwMail(Map<String, Object> c, String secretKey, String projectId) throws IOException {
+        String d = Json.truthy(c.get("domain")) ? Json.jsString(c.get("domain")) : null;
+        if (d == null) throw new IOException("Nog geen domein");
+        Map<String, Object> con = console(c);
+        Object dom = temDomain(secretKey, projectId, d, Json.str(con, "temDomainId"));
         Map<String, Object> rec = temRecords(dom, projectId);
         Map<String, Object> dkim = Json.asMap(rec.get("dkim"));
         con.put("temDomainId", Json.jsString(Json.path(dom, "id")));

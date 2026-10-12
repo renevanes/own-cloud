@@ -55,8 +55,8 @@ Open-source project (GitHub: renevanes/own-cloud)
 
 - **Ingang**: *Aanbieder worden* op het startscherm van de app en van de console, en bovenaan elk scherm van de console.
   Een eigen cloud is niet nodig (kluis alleen voor de Dienst). Daarna heet de ingang *<naam> beheren*.
-- **Eén navigatie, Je dienst**: Overzicht, Bedrijf, Accounts en sleutels, Aanbod en prijzen, Huisstijl, Medewerkers,
-  Klanten, Hulpvragen, Berichten, Adressendienst, Op de lijst, Server en back-ups, Kosten, Updates. Wat in de kluis staat
+- **Eén navigatie, Je dienst**: Overzicht, Bedrijf, Accounts en sleutels, Aanbod en prijzen, Huisstijl, Voorwaarden en
+  privacy, Medewerkers, Klanten, Hulpvragen, Berichten, Adressendienst, Op de lijst, Server en back-ups, Kosten, Updates. Wat in de kluis staat
   (server, sleutels, plek, DNS) regelt de console; wat in de database van de Dienst staat, opent het beheer meteen op die
   pagina. Wijzigingen die nog naar de Dienst moeten, staan bovenaan.
 - **DNS**: zonder cloud zet de console het adres van de Dienst zelf bij een DNS-aanbieder naar keuze.
@@ -81,6 +81,8 @@ Open-source project (GitHub: renevanes/own-cloud)
 
 ## Nog te regelen (buiten de code)
 
-- Een domein voor de gedeelde gratis adressen, bij deSEC, met een hogere zonelimiet.
-- Een bijdragegids (CONTRIBUTING.md) en regels voor de lijst van aanbieders (bijv. KvK, contact, voorwaarden).
-- Juridisch per aanbieder: eigen voorwaarden en verwerkersovereenkomst met consumenten.
+- Een domein voor de gedeelde gratis adressen, bij deSEC, met een hogere zonelimiet (de mail daarvoor maakt de app:
+  Je dienst → Adressendienst → Hogere zonelimiet aanvragen).
+- Regels voor de lijst van aanbieders (bijv. KvK, contact, voorwaarden); aanmelden gaat vanuit de app (CONTRIBUTING.md).
+- Juridisch per aanbieder: de Dienst host voorwaarden, privacyverklaring en verwerkersovereenkomst en maakt een voorbeeld
+  uit de gegevens van de aanbieder; die moet het nog laten nakijken.

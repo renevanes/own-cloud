@@ -104,7 +104,7 @@ public final class Adapters {
     /** Order = order in the console (same as BUILTIN in src/cluster/adapters.ts, without the test provider "local"). */
     private static final List<Adapter> BUILTIN = Arrays.asList(
             Desec.ADAPTER, ScalewayProvider.ADAPTER, HetznerProvider.ADAPTER, UpCloudProvider.ADAPTER,
-            ExoscaleProvider.ADAPTER, OvhProvider.ADAPTER, CUSTOM);
+            ExoscaleProvider.ADAPTER, OvhProvider.ADAPTER, Openprovider.ADAPTER, CUSTOM);
 
     private static final List<Adapter> registry = new ArrayList<>(BUILTIN);
 

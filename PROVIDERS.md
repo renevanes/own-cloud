@@ -14,6 +14,7 @@ Standaard zitten erin:
 | Exoscale | 🇨🇭 | ✓ Genève, Zürich, Frankfurt, München, Wenen, Sofia | ✓ (SOS) | ✓ | ✓ | — (geen prijs-API) |
 | OVHcloud | 🇫🇷 | ✓ Gravelines, Straatsburg, Frankfurt, Warschau, Londen | ✓ | ✓ | — | ✓ (openbare catalogus) |
 | deSEC | 🇩🇪 | — | — | ✓ (gratis) | — | — |
+| Openprovider | 🇳🇱 | — | — | ✓ (voor domeinen die daar staan) | — | — |
 | Eigen opslag | — | — | ✓ (NAS, MinIO, Garage) | — | — | — |
 
 Een cloud mag aanbieders mengen: servers bij de een, de back-up bij een ander, de DNS bij een derde. Hoe meer
@@ -316,9 +317,39 @@ Wat elke controle gebruikt (allemaal GET):
   plakt een token van <https://desec.io> (Token Management). De console zet de zone klaar.
 - Minimale TTL van een uur; dat is geen probleem, want failover hangt niet van DNS af.
 
+### Openprovider (Nederland, alleen DNS)
+
+- Voor domeinen die bij Openprovider (registrar) staan: de DNS hoeft dan niet te verhuizen. Velden: gebruikersnaam en
+  wachtwoord van een contactpersoon met API-toegang (controlepaneel → Account → Contactpersonen → API). Staat er bij
+  die gebruiker een lijst met IP-adressen, dan moet ook het adres van het apparaat (en van je servers) erop.
+- API (`src/cluster/adapters/openprovider.ts`, Java `Openprovider.java`): `POST /auth/login` → token (Bearer), daarna
+  `GET/POST /dns/zones`, `GET /dns/zones/{zone}/records` en `PUT /dns/zones/{zone}` met `records: {remove, add}`.
+  Een `code` ≠ 0 in het antwoord is een fout (ook bij HTTP 200). Basisadres `https://api.openprovider.eu/v1`
+  (`EIGEN_OPENPROVIDER_URL`; developer.openprovider.com, get-started), met de paden uit de swagger van `/v1beta` (branch `v1beta`,
+  swagger.json in github.com/openprovider/api-documentation).
+- `connect` maakt de zone aan als die er nog niet is; de nameservers zijn `ns1.openprovider.nl`, `ns2.openprovider.be`
+  en `ns3.openprovider.eu`. Minimale TTL 900 seconden. Geen Caddy-module: certificaten via HTTP-01.
+- **Niet tegen een echt account getest** (staat niet in de documentatie): of recordnamen relatief (`www`, leeg voor
+  het domein zelf) geschreven moeten worden (zo doet de adapter het; bij lezen telt relatief én volledig), of TXT-waarden
+  zonder aanhalingstekens goed zijn, en de minimale TTL.
+- Dezelfde client gebruikt "Aanbieder worden" voor domeinen kopen, nameservers en DNSSEC zetten en de IP-lijst van
+  de API-gebruiker (zie BROKER.md, *Wat je nodig hebt*).
+
 ### Eigen opslag
 
 - Elke S3-compatibele opslag met een eigen endpoint (NAS thuis, MinIO, Garage). Ideaal als extra back-up.
+
+## Waar staat de DNS van een domein? (DNS-over-HTTPS)
+
+Om te zien of een domein al naar de juiste nameservers wijst (en of DNSSEC aan staat), zoeken de console en de app
+NS-, A- en DS-records op via **DNS-over-HTTPS** (RFC 8484, het gewone binaire DNS-bericht, `GET …?dns=`), bij
+Europese resolvers die geen IP-adressen van gebruikers bewaren en niets wegfilteren: eerst Quad9 zonder blokkeerlijst
+(`https://dns10.quad9.net/dns-query`, stichting in Zwitserland; docs.quad9.net/services, quad9.net/support/faq), anders
+DNS4EU zonder filter (`https://unfiltered.joindns4.eu/dns-query`, EU; IP-adres geanonimiseerd vóór het loggen,
+joindns4.eu/for-public). Zonder filter, zodat een domein op een blokkeerlijst niet als "bestaat niet" telt. JSON
+(`application/dns-json`) gebruiken we niet: Quad9 documenteert dat niet. Code: `src/console/doh.ts` en
+`android/core Doh.java` (precies hetzelfde, ook de herkenning van bekende DNS-aanbieders aan hun nameservers);
+andere resolvers in tests met `EIGEN_DOH_URLS` (desktop) of `Endpoints.DOH` (app).
 
 ## Certificaten en DNS (Caddy)
 

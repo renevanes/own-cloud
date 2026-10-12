@@ -31,7 +31,8 @@ import { INSTELBAAR } from "../broker/instellingen.js";
 import { latestBackup } from "../broker/backup.js";
 
 export const MOLLIE_URL = () => (process.env.EIGEN_MOLLIE_URL ?? "https://api.mollie.com/v2").replace(/\/+$/, "");
-export const OPENPROVIDER_URL = () => (process.env.EIGEN_OPENPROVIDER_URL ?? "https://api.openprovider.eu/v1beta").replace(/\/+$/, "");
+/** Basisadres /v1 volgens developer.openprovider.com (get-started); de paden zijn die van de swagger van /v1beta. */
+export const OPENPROVIDER_URL = () => (process.env.EIGEN_OPENPROVIDER_URL ?? "https://api.openprovider.eu/v1").replace(/\/+$/, "");
 
 export const PROJECT_NAME = "eigen-cloud-dienst";
 /** Waar een Dienst van vóór de keuze van aanbieder staat (alleen Scaleway kon toen). */
@@ -284,12 +285,13 @@ export const HUB: [string, string, "console" | "dienst" | "beide", string | null
   ["accounts", "Accounts en sleutels", "console", null],
   ["aanbod", "Aanbod en prijzen", "dienst", "aanbod"],
   ["huisstijl", "Huisstijl", "dienst", "huisstijl"],
+  ["voorwaarden", "Voorwaarden en privacy", "beide", "voorwaarden"],
   ["medewerkers", "Medewerkers", "dienst", "medewerkers"],
   ["klanten", "Klanten", "dienst", "klanten"],
   ["hulpvragen", "Hulpvragen", "dienst", "hulpvragen"],
   ["berichten", "Berichten", "dienst", "berichten"],
   ["adressendienst", "Adressendienst", "beide", "adressen"],
-  ["lijst", "Op de lijst", "dienst", "lijst"],
+  ["lijst", "Op de lijst", "beide", "lijst"],
   ["server", "Server en back-ups", "console", null],
   ["kosten", "Kosten", "beide", "kosten"],
   ["updates", "Updates", "console", null],
@@ -554,7 +556,8 @@ export async function saveAdressen(c: AdminConfig, b: { aan?: boolean; zone?: st
   const zone = String(b.zone ?? a.adressen?.zone ?? "").trim().toLowerCase().replace(/^\.+|\.+$/g, "");
   if (!ZONE.test(zone)) throw new Error("Vul de gedeelde zone in, zoals eigencloud.nl");
   let token = String(b.desecToken ?? "").trim();
-  if (!token || token.startsWith("••")) token = a.adressen?.desecToken ?? "";
+  // Leeg: het bewaarde token, of het token dat de app bij deSEC maakte (benodigdheden.ts, desecFinish met adressen).
+  if (!token || token.startsWith("••")) token = a.adressen?.desecToken ?? (a as { desecAccount?: { adressenToken?: string } }).desecAccount?.adressenToken ?? "";
   if (!token) throw new Error("Vul het deSEC-token voor deze zone in");
   if (/[\r\n\s]/.test(token)) throw new Error("Een token past op één regel, zonder spaties");
   const rawHost = String(b.host ?? "").trim() || a.adressen?.host || defaultAdressenHost(c, a) || "";
@@ -706,6 +709,8 @@ export function dienstEnv(c: AdminConfig, a: AanbiederState): [string, string][]
   // De adressendienst op deze server gaat voor een ingevuld adres: de Dienst praat er rechtstreeks mee.
   if (a.adressen) env.push(["BROKER_ADRES_URL", ADRESSEN_LOCAL], ["BROKER_ADRES_PUBLIEK", `https://${a.adressen.host}`], ["BROKER_BACKUP_ADRESSEN", "/adressen/adressen.sqlite"]);
   else if (acc.adresUrl) env.push(["BROKER_ADRES_URL", acc.adresUrl]);
+  // Waar de server van de Dienst staat: alleen voor de subverwerkers in de voorbeeldteksten (src/broker/juridisch.ts).
+  if (a.hosting) env.push(["BROKER_HOSTING", `${a.hosting.provider} ${a.hosting.region}`]);
   const bk = a.backup!;
   env.push(["BROKER_BACKUP_ENDPOINT", bk.endpoint], ["BROKER_BACKUP_REGION", bk.region], ["BROKER_BACKUP_BUCKET", bk.bucket!], ["BROKER_BACKUP_ACCESS_KEY", bk.accessKey!], ["BROKER_BACKUP_SECRET_KEY", bk.secretKey!]);
   if (a.envAt) env.push(["BROKER_ENV_AT", String(a.envAt)]);
@@ -775,8 +780,9 @@ async function ensureBackupKey(a: AanbiederState, key: string, org: string, deps
     deps.save();
   }
   if (!bk.policyId) {
-    const list = await scw("GET", `/iam/v1alpha1/policies?organization_id=${encodeURIComponent(org)}&application_id=${bk.applicationId}`, key);
-    bk.policyId = (list?.policies ?? [])[0]?.id
+    // De API filtert op application_ids (scaleway-sdk-go iam/v1alpha1 ListPolicies); zelf nog eens op de applicatie.
+    const list = await scw("GET", `/iam/v1alpha1/policies?organization_id=${encodeURIComponent(org)}&application_ids=${bk.applicationId}`, key);
+    bk.policyId = (list?.policies ?? []).find((x: { application_id?: string }) => x.application_id === bk.applicationId)?.id
       ?? (await scw("POST", "/iam/v1alpha1/policies", key, { name, organization_id: org, application_id: bk.applicationId, description: `Alleen opslag in project ${a.projectId}`, rules: [{ permission_set_names: ["ObjectStorageFullAccess"], project_ids: [a.projectId] }] }))?.id;
     if (!bk.policyId) throw new Error("Scaleway gaf geen policy-id terug");
     deps.save();
@@ -1214,3 +1220,6 @@ export async function verwijderen(c: AdminConfig, b: { confirm?: string }, deps:
   void cleanupRetired(c, deps);
   return { ok: true, finalBackup: h.ok, detail: h.detail, bucket: a.backup?.bucket ?? null, pending: (a.retired ?? []).length, dns: dns ? dns.ok : null };
 }
+
+/** Voor "Wat je nodig hebt" (benodigdheden.ts): de toestand en de controles van de stappen hierboven. */
+export const intern = { state, existing, checkScaleway, checkDesec, checkSmtp, ensureProject, dnsName, smtpOf };

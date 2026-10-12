@@ -16,8 +16,9 @@ import { type LijstRegel, fetchLijst } from "./adres.js";
 import { DEFAULT_LIST_URL } from "./config.js";
 import { type InvoiceRow, readInvoice, renderInvoiceHtml, toCents, fromCents, vatSplit } from "./invoice.js";
 import { readKit } from "./provision.js";
-import { getBrand, updateBrand, saveLogo, getLogo, putBundle, deleteBundle, publicBundle, saveCosts, LOGO_MAX } from "./brand.js";
+import { getBrand, updateBrand, saveLogo, getLogo, putBundle, deleteBundle, publicBundle, saveCosts, LOGO_MAX, hostedDoc, ownLinks } from "./brand.js";
 import { placementOptions, placementSizes, checkPlacement, checkStorage, fillCosts } from "./placement.js";
+import { registerJuridisch } from "./juridisch.js";
 import {
   type Perm, type Role, type StaffRow, ROLES, ROLE_LABELS, PERMISSIONS, can, StaffError, staffFromRequest, staffView, audit,
   addStaff, setRole, removeStaff, resetSecondFactor, getStaff, mailInvite,
@@ -131,6 +132,36 @@ export function dienstOverzicht(ctx: Ctx) {
   };
 }
 
+/**
+ * De regel van deze Dienst voor de openbare lijst van aanbieders (aanbieders.json), met zijn sleutel. Bestaat de lijst al,
+ * dan neemt de regel land, omschrijving en (voor de beheerders) "standaard" daaruit over, en komt de hele nieuwe lijst mee
+ * om in één keer op GitHub te plakken. Plus de links naar voorwaarden en privacy (de beheerders kijken daarnaar).
+ * Voor het beheer (GET /v1/admin/lijst) en de console die deze Dienst opzette (GET /v1/status/lijst, beheertoken), die
+ * er met GitHub een voorstel van maakt (src/console/github.ts).
+ */
+export async function lijstView(ctx: Ctx) {
+  const b = getBrand(ctx);
+  const norm = (u: unknown) => String(u ?? "").trim().replace(/\/+$/, "").toLowerCase();
+  let lijst: LijstRegel[] | null = null;
+  try { lijst = await fetchLijst(process.env.EIGEN_AANBIEDERS_URL || ctx.cfg.listUrl || DEFAULT_LIST_URL); } catch { /* lijst niet bereikbaar */ }
+  const cur = lijst?.find((a) => norm(a.url) === norm(ctx.cfg.publicUrl)) ?? null;
+  const adressen = ctx.cfg.adressenPubliek ?? (typeof cur?.adressen === "string" ? cur.adressen : null);
+  const entry: LijstRegel = {
+    naam: b.name, url: ctx.cfg.publicUrl, land: typeof cur?.land === "string" ? cur.land : "NL", contact: b.contact.email ?? (typeof cur?.contact === "string" ? cur.contact : ""),
+    omschrijving: typeof cur?.omschrijving === "string" ? cur.omschrijving : "", sleutel: ctx.cfg.providerPublicKey,
+    ...(cur?.standaard === true ? { standaard: true } : {}), ...(adressen ? { adressen } : {}),
+  };
+  const nieuweLijst = lijst ? (cur ? lijst.map((a) => (a === cur ? entry : a)) : [...lijst, entry]) : null;
+  const same = !!cur && JSON.stringify(cur) === JSON.stringify(entry);
+  return {
+    entry, opLijst: !!cur, actueel: same, sleutelKlopt: !!cur && cur.sleutel === ctx.cfg.providerPublicKey,
+    nieuweLijst: nieuweLijst ? `${JSON.stringify(nieuweLijst, null, 2)}\n` : null,
+    adressendienst: ctx.cfg.adressenPubliek, adresUrl: ctx.cfg.adresUrl,
+    voorwaarden: { termsUrl: b.termsUrl, privacyUrl: b.privacyUrl },
+    editUrl: "https://github.com/renevanes/own-cloud/edit/main/aanbieders.json",
+  };
+}
+
 // ───────── Routes ─────────
 
 export function registerAdmin(app: FastifyInstance, ctx: Ctx, httpError: HttpError) {
@@ -165,30 +196,10 @@ export function registerAdmin(app: FastifyInstance, ctx: Ctx, httpError: HttpErr
   });
 
   // ── Overzicht ──
-  // Aanmelden voor de openbare lijst van aanbieders: de regel voor aanbieders.json, met de sleutel van deze dienst.
-  // Bestaat de lijst al, dan neemt de regel land, omschrijving en (voor de beheerders) "standaard" daaruit over, en
-  // krijg je ook de hele nieuwe lijst om in één keer op GitHub te plakken.
-  app.get("/v1/admin/lijst", admin("brand", async () => {
-    const b = getBrand(ctx);
-    const norm = (u: unknown) => String(u ?? "").trim().replace(/\/+$/, "").toLowerCase();
-    let lijst: LijstRegel[] | null = null;
-    try { lijst = await fetchLijst(process.env.EIGEN_AANBIEDERS_URL || ctx.cfg.listUrl || DEFAULT_LIST_URL); } catch { /* lijst niet bereikbaar */ }
-    const cur = lijst?.find((a) => norm(a.url) === norm(ctx.cfg.publicUrl)) ?? null;
-    const adressen = ctx.cfg.adressenPubliek ?? (typeof cur?.adressen === "string" ? cur.adressen : null);
-    const entry: LijstRegel = {
-      naam: b.name, url: ctx.cfg.publicUrl, land: typeof cur?.land === "string" ? cur.land : "NL", contact: b.contact.email ?? (typeof cur?.contact === "string" ? cur.contact : ""),
-      omschrijving: typeof cur?.omschrijving === "string" ? cur.omschrijving : "", sleutel: ctx.cfg.providerPublicKey,
-      ...(cur?.standaard === true ? { standaard: true } : {}), ...(adressen ? { adressen } : {}),
-    };
-    const nieuweLijst = lijst ? (cur ? lijst.map((a) => (a === cur ? entry : a)) : [...lijst, entry]) : null;
-    const same = !!cur && JSON.stringify(cur) === JSON.stringify(entry);
-    return {
-      entry, opLijst: !!cur, actueel: same, sleutelKlopt: !!cur && cur.sleutel === ctx.cfg.providerPublicKey,
-      nieuweLijst: nieuweLijst ? `${JSON.stringify(nieuweLijst, null, 2)}\n` : null,
-      adressendienst: ctx.cfg.adressenPubliek, adresUrl: ctx.cfg.adresUrl,
-      editUrl: "https://github.com/renevanes/own-cloud/edit/main/aanbieders.json",
-    };
-  }));
+  // Aanmelden voor de openbare lijst van aanbieders (zie lijstView); de console doet hetzelfde via /v1/status/lijst.
+  app.get("/v1/admin/lijst", admin("brand", async () => lijstView(ctx)));
+  // Voorwaarden, privacyverklaring en verwerkersovereenkomst (openbaar en in het beheer), zie juridisch.ts.
+  registerJuridisch(app, ctx, admin);
 
   // ── Adressendienst op deze server (alleen als de console hem hier opzette; zie ADRESSEN.md) ──
   const adresBeheer = () => {
@@ -472,7 +483,11 @@ export function registerAdmin(app: FastifyInstance, ctx: Ctx, httpError: HttpErr
     return { costs: c };
   }));
 
-  app.get("/v1/admin/brand", admin("brand", async () => ({ brand: getBrand(ctx), defaults: { name: ctx.cfg.brandName, termsUrl: ctx.cfg.termsUrl, privacyUrl: ctx.cfg.privacyUrl } })));
+  // brand = wat klanten zien; own = de eigen links uit Huisstijl (leeg = de standaard of de pagina's van de Dienst zelf).
+  app.get("/v1/admin/brand", admin("brand", async () => ({
+    brand: getBrand(ctx), own: ownLinks(ctx),
+    defaults: { name: ctx.cfg.brandName, termsUrl: ctx.cfg.termsUrl ?? hostedDoc(ctx, "voorwaarden"), privacyUrl: ctx.cfg.privacyUrl ?? hostedDoc(ctx, "privacy") },
+  })));
   app.put<{ Body: any }>("/v1/admin/brand", admin("brand", async (s, req) => {
     const brand = input(() => updateBrand(ctx, req.body ?? {}));
     audit(ctx, s, "brand-change", null, req.body);

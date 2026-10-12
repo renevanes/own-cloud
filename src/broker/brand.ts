@@ -23,10 +23,23 @@ export function getBrand(ctx: Ctx): Brand & { logoUrl: string | null } {
     name: s.name || ctx.cfg.brandName,
     accentColor: s.accentColor ?? null,
     contact: { email: s.contact?.email ?? null, phone: s.contact?.phone ?? null, website: s.contact?.website ?? null },
-    termsUrl: s.termsUrl !== undefined ? s.termsUrl : ctx.cfg.termsUrl,
-    privacyUrl: s.privacyUrl !== undefined ? s.privacyUrl : ctx.cfg.privacyUrl,
+    // Eigen links (beheer → Huisstijl, of BROKER_TERMS_URL/BROKER_PRIVACY_URL) gaan voor; anders de pagina's die de
+    // Dienst zelf host (beheer → Voorwaarden en privacy, zie juridisch.ts), zodra die gepubliceerd zijn.
+    termsUrl: s.termsUrl !== undefined ? s.termsUrl : ctx.cfg.termsUrl ?? hostedDoc(ctx, "voorwaarden"),
+    privacyUrl: s.privacyUrl !== undefined ? s.privacyUrl : ctx.cfg.privacyUrl ?? hostedDoc(ctx, "privacy"),
     logoUrl: logo ? `${ctx.cfg.publicUrl}/v1/brand/logo?v=${logo.updated_at}` : null,
   };
+}
+
+/** De links die in Huisstijl zijn ingevuld (null = niet ingevuld). */
+export function ownLinks(ctx: Ctx) {
+  const s = getSetting<StoredBrand>(ctx.db, "brand") ?? {};
+  return { termsUrl: s.termsUrl ?? null, privacyUrl: s.privacyUrl ?? null };
+}
+
+/** Het adres van een gepubliceerd document van de Dienst zelf (bijv. https://dienst.x.nl/voorwaarden), of null. */
+export function hostedDoc(ctx: Ctx, kind: "voorwaarden" | "privacy" | "verwerkersovereenkomst"): string | null {
+  return ctx.db.prepare("SELECT 1 FROM legal_docs WHERE kind = ? LIMIT 1").get(kind) ? `${ctx.cfg.publicUrl}/${kind}` : null;
 }
 
 const URL_RE = /^https?:\/\/[^\s<>"']{3,500}$/;

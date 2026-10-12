@@ -187,8 +187,8 @@ public class AanbiederHubTest {
                 List<String> hub = new ArrayList<>();
                 for (Object x : Json.listAt(v, "hub")) hub.add(Json.str(x, "id") + " " + Json.str(x, "waar") + " " + Json.str(x, "link"));
                 T.eq("[overzicht console null, bedrijf console null, accounts console null, aanbod dienst https://dienst.esape.nl/beheer#/aanbod, huisstijl dienst https://dienst.esape.nl/beheer#/huisstijl, "
-                        + "medewerkers dienst https://dienst.esape.nl/beheer#/medewerkers, klanten dienst https://dienst.esape.nl/beheer#/klanten, hulpvragen dienst https://dienst.esape.nl/beheer#/hulpvragen, "
-                        + "berichten dienst https://dienst.esape.nl/beheer#/berichten, adressendienst beide null, lijst dienst https://dienst.esape.nl/beheer#/lijst, server console null, "
+                        + "voorwaarden beide https://dienst.esape.nl/beheer#/voorwaarden, medewerkers dienst https://dienst.esape.nl/beheer#/medewerkers, klanten dienst https://dienst.esape.nl/beheer#/klanten, hulpvragen dienst https://dienst.esape.nl/beheer#/hulpvragen, "
+                        + "berichten dienst https://dienst.esape.nl/beheer#/berichten, adressendienst beide null, lijst beide https://dienst.esape.nl/beheer#/lijst, server console null, "
                         + "kosten beide https://dienst.esape.nl/beheer#/kosten, updates console null]", hub.toString(), "hub sections and links");
                 T.eq("[\"geen\",[]]", Json.stringify(Json.list(v.get("wijzigingen"), v.get("pending"))), "nothing pending");
 

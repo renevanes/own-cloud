@@ -20,15 +20,27 @@ de app werkt zichzelf bij en clouds en diensten volgen met de rollende updates.
 
 ## Op de lijst van aanbieders
 
-Draai je een Eigen Cloud Dienst (opgezet in de app met **Aanbieder worden**), dan zet je jezelf zo op de lijst:
+Draai je een Eigen Cloud Dienst (opgezet in de app met **Aanbieder worden**), dan zet je jezelf op de lijst vanuit de app:
 
-1. Open in de app je Dienst (**Beheer openen**) en kies **Op de lijst**. Vul land en omschrijving aan; naam en contact
-   komen uit je huisstijl, de sleutel van je Dienst staat er al in.
-2. Tik **Hele lijst kopiëren** (de huidige lijst met jouw regel erin, of bijgewerkt) en **aanbieders.json openen op
-   GitHub**. Kies het potlood, selecteer alles, plak, en kies *Propose changes*. Je hebt alleen een gratis GitHub-account
-   nodig; installeren hoeft niet.
-3. De beheerders kijken of de dienst bereikbaar is, of je contactgegevens, voorwaarden en privacyverklaring kloppen,
-   en voegen het voorstel samen. De app leest de lijst rechtstreeks van GitHub: zonder nieuwe versie sta je erin.
+1. Zet eerst je voorwaarden en privacyverklaring klaar: **Je dienst → Voorwaarden en privacy**. In het beheer maak je met
+   één tik een voorbeeld uit je bedrijfsgegevens; lees het na (het is geen juridisch advies) en publiceer het.
+2. Open **Je dienst → Op de lijst** en koppel GitHub: de app geeft een link waar GitHub een token klaarzet met het vinkje
+   *public_repo* (een klassiek token; je hebt alleen een gratis GitHub-account nodig). Plak het token in de app; het staat
+   daarna alleen in je kluis.
+3. Vul land en omschrijving in en tik **Aanmelden voor de lijst**. Naam en contact komen uit je huisstijl, de sleutel van
+   je Dienst staat er al in. De app maakt een fork van `renevanes/own-cloud`, zet je regel in `aanbieders.json` (een
+   bestaande regel met jouw adres wordt vervangen, de rest blijft staan) en opent een voorstel (pull request).
+4. De app laat zien of het voorstel open, samengevoegd of gesloten is, en wanneer je in de openbare lijst staat. Iets
+   gewijzigd (omschrijving, nieuwe sleutel)? Tik **Regel bijwerken**: dat is hetzelfde, en een open voorstel wordt
+   bijgewerkt.
+
+De beheerders kijken of de dienst bereikbaar is en of je contactgegevens, voorwaarden en privacyverklaring kloppen, en
+voegen het voorstel samen. Hebben zij de app gekoppeld (met schrijfrechten op de repository), dan maakt de app geen fork
+maar een branch, en kunnen ze een voorstel in de app **Zelf samenvoegen**. De app leest de lijst rechtstreeks van GitHub:
+zonder nieuwe versie sta je erin.
+
+Liever met de hand? In het beheer van je Dienst (**Beheer openen**) onder **Op de lijst**: tik **Hele lijst kopiëren** en
+**aanbieders.json openen op GitHub**, kies het potlood, selecteer alles, plak, en kies *Propose changes*.
 
 Velden: `naam`, `url` (het https-adres van je dienst), `land`, `contact`, `omschrijving`, `sleutel` (publieke
 Ed25519-sleutel van je dienst, voor de gedeelde adressendienst). Daarnaast twee velden die **alleen de beheerders** zetten:
