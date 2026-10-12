@@ -282,6 +282,9 @@ export const exoscale: ProviderAdapter = {
     name: "Exoscale SOS",
     regions: EXO_ZONES.map((z) => ({ id: z, label: city[z][0], country: city[z][1], endpoint: `https://sos-${z}.exo.io` })),
     keyHelp: "Portal → IAM → API-sleutel met rechten op Object Storage (SOS).",
+    // De prijs per GB staat op de prijslijst niet leesbaar (wordt met JavaScript geladen); daarom onbekend.
+    pricePerGbMonth: null,
+    priceInfo: { vat: "excl", checked: "2026-10-12", source: "https://www.exoscale.com/pricing/", note: "Prijs per GB niet nagekeken" },
   },
   dns: {
     name: "Exoscale DNS",

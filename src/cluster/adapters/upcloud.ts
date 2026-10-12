@@ -120,6 +120,9 @@ export const upcloud: ProviderAdapter = {
     regions: [{ id: "europe-1", label: "Eigen endpoint (zie UpCloud-console)", country: "FI", endpoint: "" }],
     customEndpoint: true,
     keyHelp: "Maak een Object Storage-instantie; kopieer de endpoint-URL en een toegangssleutel.",
+    // Afgerekend per instantie in stappen van 250 GB; de prijslijst was op 12-10-2026 niet op te halen: onbekend.
+    pricePerGbMonth: null,
+    priceInfo: { stepGb: 250, vat: "onbekend", checked: "2026-10-12", source: "https://upcloud.com/pricing/", note: "Per 250 GB; prijs niet nagekeken" },
   },
   // UpCloud heeft geen DNS-dienst.
 };

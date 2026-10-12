@@ -1,5 +1,13 @@
 [
   {
+    "version": "1.12",
+    "date": "2026-10-12",
+    "changes": [
+      "Je eigen Dienst kun je nu opzetten bij Scaleway, Hetzner, UpCloud, Exoscale of OVHcloud, met back-ups bij een aanbieder naar keuze",
+      "Nieuw: Kosten. Zie per aanbieder wat je cloud per maand kost, stel een budget in en krijg een melding als je erover gaat"
+    ]
+  },
+  {
     "version": "1.11",
     "date": "2026-10-11",
     "changes": [

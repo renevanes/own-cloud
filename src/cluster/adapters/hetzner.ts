@@ -144,6 +144,10 @@ export const hetzner: ProviderAdapter = {
       { id: "hel1", label: "Helsinki", country: "FI", endpoint: "https://hel1.your-objectstorage.com" },
     ],
     keyHelp: "Cloud Console → je project → Object Storage → S3-sleutels aanmaken.",
+    // Hetzner rekent een vast basisbedrag per account (met 1 TB opslag en 1 TB verkeer) en daarboven per TB-uur.
+    // Het bedrag stond op 12-10-2026 niet leesbaar op de prijslijst (wordt met JavaScript geladen); daarom onbekend.
+    pricePerGbMonth: null,
+    priceInfo: { vat: "excl", checked: "2026-10-12", source: "https://www.hetzner.com/storage/object-storage/", note: "Vast basisbedrag per maand met 1 TB opslag en 1 TB verkeer, daarboven per TB-uur; bedrag niet nagekeken" },
   },
   dns: {
     name: "Hetzner DNS",

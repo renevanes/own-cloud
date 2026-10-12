@@ -10,7 +10,7 @@ Je eigen vervanger voor Gmail, Google Agenda en Google Foto's, op servers die ji
 | **Overstappen** | Sleep je Google Takeout-zips in de browser: mail (met labels), agenda's en foto's (met Google's metadata en albums) komen er in één keer in. Hervat vanzelf na een verbroken verbinding. |
 | **Gezondheid** | Controleert elk kwartier je DNS, mailbeveiliging (SPF, DKIM, DMARC, reverse DNS), certificaat, back-ups en servers. Repareert wat kan zelf, en mailt je anders wat er moet gebeuren. |
 | **Tijdmachine** | Kies een moment in het verleden en zet per ongeluk verwijderde of veranderde mails, afspraken en foto's terug. |
-| **Beheerconsole** | Installatie-assistent op je eigen computer of je telefoon: kluis met je sleutels, opslag en servers koppelen (met live prijzen), domein, mail, en daarna een overzicht met kaart, wekken, slapen en herstellen. |
+| **Beheerconsole** | Installatie-assistent op je eigen computer of je telefoon: kluis met je sleutels, opslag en servers koppelen (met live prijzen), domein, mail, en daarna een overzicht met kaart, wekken, slapen en herstellen, en *Kosten*: een schatting per aanbieder en in totaal per maand (servers en opslag; slapend alleen opslag), met een budget waarboven je een melding per mail krijgt. |
 | **Naast Gmail** | Proefperiode *naast Gmail* (je mail komt nog bij Gmail binnen en wordt elke paar minuten opgehaald) of *Gmail als vangnet* na het overstappen. Instellingen → Gmail. |
 | **Bijwerken** | Servers werken zichzelf 's nachts bij naar de nieuwste versie, één voor één, en zetten zichzelf terug als de nieuwe versie niet goed opstart. Zie [CLUSTER.md](CLUSTER.md#bijwerken-naar-een-nieuwe-versie). |
 | **Android-app** | Alles van de webapp, plus automatische foto-back-up, je agenda in de agenda-app van je telefoon, meldingen bij nieuwe mail of problemen, *Delen → Eigen Cloud*, en de beheerconsole met vingerafdruk-ontgrendeling. Zonder Google-diensten. Zie [android/README.md](android/README.md). |
@@ -65,7 +65,8 @@ verder waar het was. Een gratis adres dat alleen bij je oude aanbieder hoort (`B
 
 **Zelf aanbieder worden?** Op het overzicht van de console staat **Aanbieder worden**: vul je bedrijfsgegevens in,
 koppel je accounts (Scaleway, Mollie, deSEC, mail) en de console zet je eigen Eigen Cloud Dienst op een server bij
-Scaleway, op `dienst.<jouw domein>`, met elk uur een versleutelde back-up en automatische updates. Zie
+de aanbieder en in de regio die je kiest (Scaleway, Hetzner, UpCloud, Exoscale of OVHcloud; de back-ups mogen elders),
+op `dienst.<jouw domein>`, met elk uur een versleutelde back-up en automatische updates. Zie
 [BROKER.md](BROKER.md#opzetten-vanuit-de-app-zonder-terminal).
 
 **Bijwerken gaat vanzelf**: servers werken zichzelf rollend bij (zie [CLUSTER.md](CLUSTER.md)) en de Android-app haalt nieuwe versies op van ghcr.io, of van je eigen cloud als dat niet lukt.

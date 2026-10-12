@@ -6,6 +6,7 @@ import tls from "node:tls";
 import { config } from "./config.js";
 import { db, getSetting, setSetting } from "./db.js";
 import { mailSettings, ownAddress } from "./mail/send.js";
+import { costCheck } from "./cluster/costs.js";
 
 /** Gmail-koppeling: "naast" = proefperiode, mail komt nog bij Google binnen. */
 export function gmailMode(): "uit" | "naast" | "vangnet" {
@@ -21,7 +22,7 @@ export function gmailMode(): "uit" | "naast" | "vangnet" {
 export type Status = "ok" | "warn" | "fail" | "skip";
 export interface Check {
   id: string;
-  group: "Mail" | "Domein" | "Back-up" | "Servers" | "Meldingen";
+  group: "Mail" | "Domein" | "Back-up" | "Servers" | "Meldingen" | "Kosten";
   title: string;
   status: Status;
   detail: string;
@@ -67,6 +68,8 @@ export interface ClusterInfo {
   autoHeal: boolean;
   unreachable: string[];
   update?: { available: string | null; mode: string; failed: { version: string; node: string; error: string } | null; running: boolean; checkError: string | null };
+  /** Geschatte kosten per maand tegen het budget (alleen als er een budget is ingesteld; zie cluster/costs.ts). */
+  costs?: { total: number; complete: boolean; budget: number } | null;
 }
 
 export function domain(): string | null {
@@ -307,6 +310,7 @@ export async function runChecks(cluster: ClusterInfo | null): Promise<Check[]> {
     else if (u.checkError && u.mode !== "uit") checks.push({ ...base, status: "warn", detail: `Kon niet kijken of er een nieuwe versie is: ${u.checkError}` });
     else checks.push({ ...base, status: "ok", detail: u.mode === "uit" ? "Automatisch bijwerken staat uit" : "Je servers draaien de nieuwste versie" });
   }
+  if (cluster.costs) checks.push(costCheck(cluster.costs));
   return checks;
 }
 

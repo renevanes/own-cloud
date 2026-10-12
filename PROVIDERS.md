@@ -60,6 +60,8 @@ interface ProviderAdapter {
     customEndpoint?: boolean;                                // gebruiker vult zelf het endpoint in
     keyHelp: string;
     signupUrl?: string;
+    pricePerGbMonth?: number | null;                         // lijstprijs in euro per GB (10^9 bytes) per maand; null = onbekend
+    priceInfo?: { stepGb?, vat: "excl" | "onbekend", checked: "JJJJ-MM-DD", source: url, note? };
   };
   dns?: {
     name?: string;
@@ -106,6 +108,42 @@ Afspraken waar een adapter zich aan houdt:
   controleren", route `POST /api/check`) en na een mislukte koppeling. Zonder `servers.check` gebruikt de console
   een algemene controle (`list` en `fetchSizes`). Opslag is voor elke aanbieder S3 en wordt generiek gecontroleerd
   (ListBuckets, HeadBucket, één bestandsnaam opvragen).
+
+### Kosten en budget
+
+Het overzicht van de console toont bij **Kosten** wat de cloud ongeveer per maand kost, per aanbieder en in totaal
+(`GET /api/costs`; het budget zet je met `POST /api/costs/budget`). Zo wordt het berekend (`src/cluster/costs.ts`,
+in de app `Costs.java`):
+
+- **Servers**: per draaiende server de maandprijs die de aanbieder bij het aanmaken gaf (`ServerInfo.monthlyCost`,
+  nu alleen Hetzner), anders de prijs van dat formaat uit `fetchSizes` zoals de console die bij het koppelen heeft
+  opgehaald. Geen prijs (UpCloud, Exoscale): "onbekend". Slaapt de cloud, dan zijn er geen servers en kosten die
+  niets; is hij onbereikbaar, dan tellen de servers uit het manifest nog mee.
+- **Opslag**: de bytes in elke bucket (de console telt ze hooguit eens per uur, het cluster eens per 6 uur) maal
+  `storage.pricePerGbMonth` van de aanbieder van die opslag (herkend aan de naam `<id>-<regio>`). Oude versies bij
+  versiebeheer en het basisbedrag van een abonnement (Hetzner, UpCloud) tellen niet mee.
+- **Niet meegeteld**: uitgaand verkeer (bij gewoon gebruik klein en vaak inbegrepen), btw-verschillen (Hetzner geeft
+  serverprijzen inclusief btw, de rest exclusief), DNS en mail-relay.
+- **Bron**: altijd `"geschat"`. Een rekening-API van een aanbieder (`"aanbieder"`) gebruiken we pas als die
+  nagekeken en alleen-lezen is; dat is nu bij geen enkele aanbieder zo.
+
+Het budget gaat met de andere instellingen naar het cluster (`budget_month`, en `cost_servers` met de maandprijs per
+`aanbieder/regio/formaat`). De leider rekent elk kwartier hetzelfde uit en zet de controle **Kosten** op "let op" als
+de schatting boven het budget komt; dan krijg je één melding per mail (zoals bij elke controle die slechter wordt).
+Oudere servers bewaren die instellingen alleen en doen er niets mee.
+
+Lijstprijzen voor opslag (`pricePerGbMonth`), nagekeken op 12-10-2026:
+
+| Aanbieder | Prijs per GB per maand | Bron |
+|---|---|---|
+| Scaleway | € 0,01606 excl. btw (Standard Multi-AZ, € 0,000022 per GB per uur; prijslijst toont Parijs) | [scaleway.com/en/pricing/storage](https://www.scaleway.com/en/pricing/storage/) |
+| Hetzner | onbekend: vast basisbedrag per maand met 1 TB opslag en 1 TB verkeer, daarboven per TB-uur; het bedrag staat niet leesbaar op de pagina | [hetzner.com/storage/object-storage](https://www.hetzner.com/storage/object-storage/) |
+| Exoscale | onbekend: de prijs wordt op de pagina met JavaScript geladen (prijzen zijn excl. btw) | [exoscale.com/pricing](https://www.exoscale.com/pricing/) |
+| OVHcloud | onbekend: prijslijst niet op te halen | [ovhcloud.com/nl/public-cloud/prices](https://www.ovhcloud.com/nl/public-cloud/prices/) |
+| UpCloud | onbekend: per instantie in stappen van 250 GB; prijslijst niet op te halen | [upcloud.com/pricing](https://upcloud.com/pricing/) |
+| Eigen opslag | onbekend (geen aanbieder) | |
+
+Weet je een prijs zeker, zet hem dan in de adapter (`pricePerGbMonth` en `priceInfo` met datum en bron).
 
 ## Een aanbieder toevoegen
 

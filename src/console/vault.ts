@@ -30,6 +30,8 @@ export interface ConsoleState {
   firstLaunch?: { at: number; nodeId: string; provider: string; region: string; clusterUrl?: string; apiUrl?: string };
   appPasswordHash?: string;
   alertEmail?: string;
+  /** Budget in euro per maand voor de kostenschatting (Kosten op het overzicht); weg = geen budget. */
+  budget?: number;
   mailRelay?: string;
   spfExtra?: string;
   /** Extra DNS-records die de cloud zelf beheert (bijv. de DKIM-sleutel van de mail-relay van Scaleway). */

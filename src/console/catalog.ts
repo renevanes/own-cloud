@@ -18,6 +18,8 @@ export interface StoreOffer {
   customEndpoint?: boolean;
   help: string;
   signupUrl: string;
+  /** Lijstprijs in euro per GB per maand (StorageCapability.pricePerGbMonth), null = onbekend. Voor de kostenschatting. */
+  pricePerGbMonth?: number | null;
 }
 
 export interface ServerOffer {
@@ -52,6 +54,7 @@ export function storeOfferOf(a: ProviderAdapter): StoreOffer {
   return {
     id: a.id, name: s.name, owner: a.owner, home: a.home, regions: s.regions.map((r) => ({ ...r })),
     ...(s.customEndpoint ? { customEndpoint: true } : {}), help: s.keyHelp, signupUrl: s.signupUrl ?? a.signupUrl,
+    pricePerGbMonth: s.pricePerGbMonth ?? null,
   };
 }
 

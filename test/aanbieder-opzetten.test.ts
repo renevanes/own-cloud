@@ -1,8 +1,10 @@
 /**
  * Aanbieder worden vanuit de console: bedrijf, accounts (live gecontroleerd tegen nep-Scaleway/-Mollie/-deSEC/-SMTP),
- * adres (je cloud publiceert het A-record), opzetten (project, back-upsleutel, bucket, server met user-data), status
- * (tegen een echte Dienst met back-ups naar een nep-S3), opnieuw opzetten (laatste back-up, terugzetten, oude server
- * weg) en verwijderen. Plus het opstartscript zelf (bash -n), de dagelijkse versiecontrole en de updater.
+ * adres (je cloud publiceert het A-record), server en back-ups (aanbieder en regio met live prijzen, back-ups elders),
+ * opzetten (project, back-upsleutel, bucket, server met user-data), status (tegen een echte Dienst met back-ups naar
+ * een nep-S3), opnieuw opzetten bij een andere aanbieder (Scaleway → Hetzner: laatste back-up, terugzetten, oude
+ * server weg) en verwijderen. Ook: een oude kluis (alleen Scaleway) en back-ups in een gekoppelde opslag. Plus het
+ * opstartscript zelf (bash -n), de dagelijkse versiecontrole en de updater.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -33,6 +35,48 @@ function client(app: { inject: (o: object) => Promise<{ statusCode: number; head
   };
 }
 
+const HZ_TOKEN = "hetzner-dienst-token";
+
+/**
+ * Nep-Hetzner Cloud (servers, formaten) via globalThis.fetch; alle andere adressen gaan gewoon door. De adapter
+ * praat met het vaste adres api.hetzner.cloud.
+ */
+function fakeHetzner(token: string) {
+  const st = { servers: [] as any[], n: 100, calls: [] as string[] };
+  const real = globalThis.fetch;
+  const price = (loc: string, eur: string) => ({ location: loc, price_monthly: { gross: eur } });
+  globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (!url.startsWith("https://api.hetzner.cloud/v1/")) return real(input, init);
+    const u = new URL(url), method = init.method ?? "GET", p = u.pathname.slice(3);
+    st.calls.push(`${method} ${p}`);
+    const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (new Headers(init.headers).get("authorization") !== `Bearer ${token}`) return json(401, { error: { code: "unauthorized", message: "unable to authenticate" } });
+    let m: RegExpExecArray | null;
+    if (p === "/servers" && method === "GET") return json(200, { servers: st.servers.filter((x) => `cluster=${x.labels.cluster}` === u.searchParams.get("label_selector")), meta: { pagination: { next_page: null } } });
+    if (p === "/servers" && method === "POST") {
+      const id = ++st.n, b = JSON.parse(String(init.body));
+      const x = { id, ...b, public_net: { ipv4: { ip: `198.51.100.${id - 100}` }, ipv6: { ip: `2001:db8:${id}::/64` } } };
+      st.servers.push(x);
+      return json(201, { server: x });
+    }
+    if ((m = /^\/servers\/(\d+)$/.exec(p)) && method === "DELETE") {
+      const i = st.servers.findIndex((x) => String(x.id) === m![1]);
+      if (i < 0) return json(404, { error: { code: "not_found" } });
+      st.servers.splice(i, 1);
+      return json(200, { action: { id: 1 } });
+    }
+    if (p === "/server_types") return json(200, { server_types: [
+      { name: "cx11", cores: 1, memory: 1, architecture: "x86", prices: [price("fsn1", "3.0000"), price("nbg1", "3.0000")] },
+      { name: "cax11", cores: 2, memory: 4, architecture: "arm", prices: [price("fsn1", "3.9900")] },
+      { name: "cx23", cores: 2, memory: 4, architecture: "x86", prices: [price("fsn1", "4.5100"), price("nbg1", "4.5100")] },
+      { name: "cx33", cores: 4, memory: 8, architecture: "x86", prices: [price("fsn1", "7.0000"), price("hel1", "7.2000")] },
+    ] });
+    return json(599, { error: `nep-Hetzner kent ${method} ${p} niet` });
+  }) as typeof fetch;
+  return { st, restore: () => { globalThis.fetch = real; } };
+}
+
 /** dienst.env uit de user-data halen (zoals de server hem schrijft). */
 function envFromUserData(ud: string): Record<string, string> {
   const m = /cat > \/srv\/dienst\/dienst\.env <<'EOF'\n([\s\S]*?)\nEOF\n/.exec(ud);
@@ -41,7 +85,7 @@ function envFromUserData(ud: string): Record<string, string> {
 }
 
 test("aanbieder worden: van bedrijfsgegevens tot een draaiende Dienst, vervangen en verwijderen", { timeout: 120_000 }, async (t) => {
-  const s3 = fakeS3(), up = fakeUpstream(), smtp = await smtpSink();
+  const s3 = fakeS3(), up = fakeUpstream(), smtp = await smtpSink(), hz = fakeHetzner(HZ_TOKEN);
   const U = `http://127.0.0.1:${await up.listening}`;
   up.st.scw.keys.add(SCW_KEY);
   process.env.EIGEN_TEST_S3 = `http://127.0.0.1:${await s3.listening}`;
@@ -60,7 +104,7 @@ test("aanbieder worden: van bedrijfsgegevens tot een draaiende Dienst, vervangen
   const brokers: { close: () => Promise<void> }[] = [];
   t.after(async () => {
     for (const b of brokers) await b.close().catch(() => {});
-    await app.close(); await s3.close(); await up.close(); await smtp.close();
+    await app.close(); await s3.close(); await up.close(); await smtp.close(); hz.restore();
     for (const k of ["EIGEN_TEST_S3", "EIGEN_SCW_API", "EIGEN_MOLLIE_URL", "EIGEN_DESEC_URL", "EIGEN_OPENPROVIDER_URL"]) delete process.env[k];
   });
   /** De kluis zoals de console hem bewaart. */
@@ -80,7 +124,7 @@ test("aanbieder worden: van bedrijfsgegevens tot een draaiende Dienst, vervangen
   }
   const secrets = () => {
     const a = (vaultConfig().console as any).aanbieder;
-    return [a?.accounts?.mollieKey, a?.accounts?.desecToken, a?.accounts?.scalewaySecretKey, a?.backup?.secretKey, a?.secret, "geheim@smtp"].filter(Boolean) as string[];
+    return [a?.accounts?.mollieKey, a?.accounts?.desecToken, a?.accounts?.scalewaySecretKey, a?.backup?.secretKey, a?.secret, "geheim@smtp", HZ_TOKEN].filter(Boolean) as string[];
   };
   const noSecrets = (text: string, what: string) => { for (const s of secrets()) assert.ok(!text.includes(s), `${what} bevat geen geheim (${s.slice(0, 6)}…)`); };
 
@@ -141,12 +185,58 @@ test("aanbieder worden: van bedrijfsgegevens tot een draaiende Dienst, vervangen
     assert.equal(r.status, 200, r.text);
     assert.equal(r.json.url, "https://dienst.vanes.nl");
     assert.deepEqual(r.json.dns, { host: "dienst.vanes.nl", sub: "dienst", managed: true, value: null });
-    assert.equal(r.json.step, "opzetten");
+    assert.equal(r.json.step, "server");
     assert.deepEqual(JSON.parse(consoleSettings(vaultConfig()).extra_dns), [], "nog geen record zonder server");
   });
 
+  await t.test("4. server en back-ups: aanbieder, regio met prijs, back-ups elders", async () => {
+    r = await c("POST", "/api/aanbieder/server", { provider: "nergens" });
+    assert.match(r.json.error, /Kies een aanbieder/);
+    r = await c("POST", "/api/aanbieder/server", { provider: "hetzner" });
+    assert.match(r.json.error, /Vul in: API-token/);
+    r = await c("POST", "/api/aanbieder/server", { provider: "hetzner", fields: { token: "fout" } });
+    assert.match(r.json.error, /Inloggen bij Hetzner Cloud lukt niet/);
+    r = await c("POST", "/api/aanbieder/server", { provider: "hetzner", fields: { token: ` ${HZ_TOKEN} ` } });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.json.regions, [
+      { region: "fsn1", label: "Falkenstein", city: "Falkenstein", country: "DE", size: "cx23", sizeLabel: "2 vCPU, 4 GB", monthly: 4.51 },
+      { region: "nbg1", label: "Neurenberg", city: "Neurenberg", country: "DE", size: "cx23", sizeLabel: "2 vCPU, 4 GB", monthly: 4.51 },
+      { region: "hel1", label: "Helsinki", city: "Helsinki", country: "FI", size: "cx33", sizeLabel: "4 vCPU, 8 GB", monthly: 7.2 },
+    ], "kleinste geschikte formaat per regio (≥ 2 GB, x86)");
+    assert.ok(!hz.st.calls.some((x) => x.startsWith("POST")), "alleen gekeken");
+    // Bewaard token: zonder invullen nog eens.
+    r = await c("POST", "/api/aanbieder/server", { provider: "hetzner", fields: { token: "••••••••oken" } });
+    assert.equal(r.json.regions.length, 3);
+    r = await c("POST", "/api/aanbieder/server", { provider: "scaleway" });
+    assert.ok(r.json.regions.every((x: any) => x.size === "DEV1-S" && x.monthly === 6.42), JSON.stringify(r.json.regions));
+    r = await c("POST", "/api/aanbieder/server", { provider: "scaleway", region: "nl-ams-9" });
+    assert.match(r.json.error, /Kies een regio/);
+    r = await c("POST", "/api/aanbieder/server", { provider: "scaleway", region: "nl-ams-1" });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.json.hosting, { provider: "scaleway", name: "Scaleway", region: "nl-ams-1", regionLabel: "Amsterdam 1", city: "Amsterdam", country: "NL", size: "DEV1-S", monthly: 6.42 });
+    r = await c("POST", "/api/aanbieder/opzetten");
+    assert.match(r.json.error, /Kies eerst waar de back-ups komen/);
+    r = await c("POST", "/api/aanbieder/backup", { provider: "hetzner", region: "fsn1" });
+    assert.match(r.json.error, /toegangssleutel en geheime sleutel/);
+    r = await c("POST", "/api/aanbieder/backup", { store: "bestaat-niet" });
+    assert.match(r.json.error, /gekoppelde opslag/);
+    r = await c("POST", "/api/aanbieder/backup", { provider: "custom", region: "eigen", endpoint: "ftp://x", accessKey: "a", secretKey: "b" });
+    assert.match(r.json.error, /endpoint-URL/);
+    r = await c("POST", "/api/aanbieder/backup", { provider: "hetzner", region: "nbg1", accessKey: "HZAK", secretKey: "hz-s3-geheim" });
+    assert.equal(r.json.backup.provider, "hetzner");
+    r = await c("POST", "/api/aanbieder/backup", { provider: "scaleway", region: "fr-par" });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.json.backup, { provider: "scaleway", name: "Scaleway Object Storage", region: "fr-par", regionLabel: "Parijs", country: "FR", bucket: null, auto: true });
+    const v = (await c("GET", "/api/aanbieder")).json;
+    assert.equal(v.ready.server, true);
+    assert.deepEqual(v.hostingKeys, ["scaleway", "hetzner"]);
+    noSecrets(JSON.stringify(v), "GET /api/aanbieder");
+    noSecrets((await c("GET", "/api/config")).text, "GET /api/config");
+    assert.equal((await c("POST", "/api/aanbieder/stap", { step: "opzetten" })).json.step, "opzetten");
+  });
+
   let userData = "", env: Record<string, string> = {};
-  await t.test("4. opzetten: project, back-upsleutel, bucket en server", async () => {
+  await t.test("5. opzetten: project, back-upsleutel, bucket en server", async () => {
     up.st.scw.failNext.add("/account/v3/projects");
     r = await c("POST", "/api/aanbieder/opzetten");
     assert.equal(r.status, 400);
@@ -154,6 +244,8 @@ test("aanbieder worden: van bedrijfsgegevens tot een draaiende Dienst, vervangen
     r = await c("POST", "/api/aanbieder/opzetten");
     assert.equal(r.status, 200, r.text);
     assert.deepEqual(r.json.steps.map((x: any) => x.ok), r.json.steps.map(() => true));
+    assert.deepEqual(r.json.steps.slice(0, 4).map((x: any) => x.label), ["Project eigen-cloud-dienst bij Scaleway", "Sleutel voor de back-ups (werkt alleen in dit project)",
+      "Back-upopslag bij Scaleway Object Storage (Parijs), 30 dagen niet te wissen", "Server bij Scaleway in Amsterdam (DEV1-S)"]);
     assert.equal(up.st.scw.projects.filter((p) => p.name === "eigen-cloud-dienst").length, 1, "één project");
     const project = up.st.scw.projects.find((p) => p.name === "eigen-cloud-dienst")!;
     const pol = up.st.scw.policies.find((p) => p.name === "eigen-cloud-dienst-backup")!;
@@ -196,7 +288,10 @@ test("aanbieder worden: van bedrijfsgegevens tot een draaiende Dienst, vervangen
     assert.equal(v.step, "klaar");
     assert.equal(v.server.ipv4, r.json.server.ipv4);
     assert.equal(v.backup.bucket, bucket[0]);
+    assert.equal(v.server.provider, "scaleway");
     assert.equal(v.beheerUrl, "https://dienst.vanes.nl/beheer");
+    r = await c("POST", "/api/aanbieder/backup", { provider: "hetzner", region: "fsn1", accessKey: "a", secretKey: "b" });
+    assert.match(r.json.error, /staan al in vanes-dienst-backup-/, "de back-upplek ligt vast");
   });
 
   await t.test("DNS: de cloud publiceert dienst.vanes.nl (A) naast zijn eigen records", async () => {
@@ -229,7 +324,7 @@ test("aanbieder worden: van bedrijfsgegevens tot een draaiende Dienst, vervangen
   };
   let first: Awaited<ReturnType<typeof startDienst>>;
 
-  await t.test("5. klaar: status van de Dienst, user-data weg bij Scaleway", async () => {
+  await t.test("6. klaar: status van de Dienst, user-data weg bij Scaleway", async () => {
     first = await startDienst(path.join(base, "dienst-1"));
     assert.equal(first.restored, null, "eerste start: niets terug te zetten");
     first.b.startLoops();
@@ -254,14 +349,20 @@ test("aanbieder worden: van bedrijfsgegevens tot een draaiende Dienst, vervangen
     assert.equal(bad.status, 401);
   });
 
-  await t.test("opnieuw opzetten: laatste back-up, nieuwe server zet hem terug, oude weg", async () => {
+  await t.test("opnieuw opzetten bij Hetzner: laatste back-up, nieuwe server zet hem terug, oude weg bij Scaleway", async () => {
     const before = (await c("GET", "/api/aanbieder")).json.server;
+    r = await c("POST", "/api/aanbieder/server", { provider: "hetzner", region: "fsn1" });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.pending, true, "gaat pas in bij opnieuw opzetten");
+    assert.deepEqual(r.json.hosting, { provider: "hetzner", name: "Hetzner Cloud", region: "fsn1", regionLabel: "Falkenstein", city: "Falkenstein", country: "DE", size: "cx23", monthly: 4.51 });
     const owner = first.b.ctx.db.prepare("SELECT email, role FROM staff").all();
     assert.deepEqual(owner, [{ email: "rene@elders.example", role: "eigenaar" }]);
     r = await c("POST", "/api/aanbieder/opzetten");
     assert.equal(r.status, 200, r.text);
     assert.equal(r.json.replaced, true);
     assert.equal(r.json.steps.find((x: any) => /Laatste back-up/.test(x.label)).ok, true, JSON.stringify(r.json.steps));
+    assert.ok(r.json.steps.some((x: any) => x.label === "Server bij Hetzner Cloud in Falkenstein (cx23)"), JSON.stringify(r.json.steps));
+    assert.ok(!r.json.steps.some((x: any) => /Project|Sleutel voor/.test(x.label)), "geen nieuw project of nieuwe sleutel nodig");
     // De oude server schrijft niets meer.
     const blocked = await fetch(`http://127.0.0.1:${first.cfg.port}/v1/info`);
     assert.equal(blocked.status, 503);
@@ -269,13 +370,19 @@ test("aanbieder worden: van bedrijfsgegevens tot een draaiende Dienst, vervangen
     const after = (await c("GET", "/api/aanbieder")).json;
     assert.notEqual(after.server.serverId, before.serverId);
     assert.notEqual(after.server.ipv4, before.ipv4);
-    // Oude server opgeruimd (op de achtergrond).
+    assert.equal(after.server.provider, "hetzner");
+    // Oude server opgeruimd bij Scaleway (op de achtergrond).
     for (let i = 0; i < 50 && (await c("GET", "/api/aanbieder")).json.retired; i++) await new Promise((res) => setTimeout(res, 50));
-    assert.equal(up.st.scw.servers.length, 1);
-    assert.equal(up.st.scw.servers[0].id, after.server.serverId.split("/")[1]);
-    assert.deepEqual(JSON.parse(consoleSettings(vaultConfig()).extra_dns)[0], { sub: "dienst", type: "A", value: after.server.ipv4 });
-    // Nieuwe server met lege datamap: zet de laatste back-up terug, met dezelfde sleutel van de aanbieder.
-    env = envFromUserData(up.st.scw.userData.get(up.st.scw.servers[0].id)!);
+    assert.equal(up.st.scw.servers.length, 0, "Scaleway-server weg");
+    assert.equal(hz.st.servers.length, 1);
+    const srv = hz.st.servers[0];
+    assert.equal(String(srv.id), after.server.serverId);
+    assert.deepEqual([srv.location, srv.server_type, srv.labels.cluster], ["fsn1", "cx23", "eigen-cloud-dienst"]);
+    assert.equal(after.server.ipv6, "2001:db8:101::1");
+    assert.deepEqual(JSON.parse(consoleSettings(vaultConfig()).extra_dns).slice(0, 2), [{ sub: "dienst", type: "A", value: after.server.ipv4 }, { sub: "dienst", type: "AAAA", value: after.server.ipv6 }]);
+    // Nieuwe server met lege datamap: zet de laatste back-up terug (nog steeds bij Scaleway), met dezelfde sleutel van de aanbieder.
+    env = envFromUserData(srv.user_data);
+    assert.equal(env.SCW_SECRET_KEY, SCW_KEY, "de Scaleway-sleutel blijft voor de clouds van klanten");
     const second = await startDienst(path.join(base, "dienst-2"));
     assert.ok(second.restored, "back-up teruggezet");
     assert.equal(second.cfg.providerPublicKey, first.cfg.providerPublicKey, "zelfde sleutel (aanbieders.json blijft kloppen)");
@@ -288,13 +395,14 @@ test("aanbieder worden: van bedrijfsgegevens tot een draaiende Dienst, vervangen
   await t.test("verwijderen: met bevestiging; back-ups blijven, record weg", async () => {
     r = await c("POST", "/api/aanbieder/verwijderen", { confirm: "ja" });
     assert.match(r.json.error, /Typ dienst\.vanes\.nl/);
-    assert.equal(up.st.scw.servers.length, 1);
+    assert.equal(hz.st.servers.length, 1);
     r = await c("POST", "/api/aanbieder/verwijderen", { confirm: " Dienst.Vanes.nl " });
     assert.equal(r.status, 200, r.text);
     assert.equal(r.json.finalBackup, true);
     assert.ok(r.json.bucket);
-    for (let i = 0; i < 50 && up.st.scw.servers.length; i++) await new Promise((res) => setTimeout(res, 50));
-    assert.equal(up.st.scw.servers.length, 0, "server weg");
+    for (let i = 0; i < 50 && hz.st.servers.length; i++) await new Promise((res) => setTimeout(res, 50));
+    assert.equal(hz.st.servers.length, 0, "server weg bij Hetzner");
+    assert.ok(hz.st.calls.includes(`DELETE /servers/${String(101)}`));
     assert.ok(s3.buckets.has(r.json.bucket), "back-ups blijven");
     const v = (await c("GET", "/api/aanbieder")).json;
     assert.equal(v.removed, true);
@@ -303,6 +411,68 @@ test("aanbieder worden: van bedrijfsgegevens tot een draaiende Dienst, vervangen
     r = await c("GET", "/api/aanbieder/status");
     assert.deepEqual(r.json, { reachable: false, server: false, removed: true });
   });
+});
+
+test("oude kluis (alleen Scaleway) werkt nog; Dienst bij Hetzner met back-ups in een gekoppelde opslag", { timeout: 60_000 }, async (t) => {
+  const s3 = fakeS3(), up = fakeUpstream(), hz = fakeHetzner(HZ_TOKEN);
+  const U = `http://127.0.0.1:${await up.listening}`, S3 = `http://127.0.0.1:${await s3.listening}`;
+  up.st.scw.keys.add(SCW_KEY);
+  process.env.EIGEN_SCW_API = `${U}/scw`;
+  t.after(async () => { await s3.close(); await up.close(); hz.restore(); delete process.env.EIGEN_SCW_API; });
+  const aanbieder = await import("../src/console/aanbieder.js");
+  const { serverOffers, storeOffers } = await import("../src/console/catalog.js");
+  const deps = { save: () => {}, sleep: async () => {}, serverOffers: () => serverOffers(), storeOffers: () => storeOffers() };
+  aanbieder.aanbiederNet.reach = () => "http://127.0.0.1:9";
+  const company = { name: "Van Es", address: ["Blaak 10"], kvk: "", vat: "", email: "rene@elders.example" };
+  const base = { url: "https://dienst.vanes.nl", company, accounts: { scalewaySecretKey: SCW_KEY, scalewayOrgId: ORG, mollieKey: "test_x", desecToken: "d" }, checked: { scaleway: true, mollie: true, desec: true, smtp: true }, secret: "ab".repeat(32) };
+
+  // Een Dienst van vóór de keuze van aanbieder: alles bij Scaleway, vervangen servers als losse id's.
+  up.st.scw.servers.push({ id: "srv-oud", zone: "nl-ams-1", tags: [], public_ips: [{ id: "ip-oud" }] });
+  up.st.scw.ips.push({ id: "ip-oud", address: "192.0.2.99", zone: "nl-ams-1" });
+  const c1: any = { cluster: "vanes", domain: "vanes.nl", providers: {}, stores: [], dns: [], image: {}, console: { done: true, aanbieder: { ...base, step: "klaar", projectId: "proj-1",
+    backup: { endpoint: S3, region: "fr-par", bucket: "vanes-dienst-backup-oud", accessKey: "SCWAK", secretKey: "s", applicationId: "app-1", policyId: "pol-1" },
+    server: { provider: "scaleway", region: "nl-ams-1", size: "DEV1-S", serverId: "nl-ams-1/srv-nu/ip-nu", ipv4: "192.0.2.10", createdAt: 1 },
+    retired: ["nl-ams-1/srv-oud/ip-oud"] } } };
+  const v = aanbieder.view(c1, deps) as any;
+  assert.deepEqual(v.hosting, { provider: "scaleway", name: "Scaleway", region: "nl-ams-1", regionLabel: "Amsterdam 1", city: "Amsterdam", country: "NL", size: "DEV1-S", monthly: null });
+  assert.deepEqual(v.backup, { provider: "scaleway", name: "Scaleway Object Storage", region: "fr-par", regionLabel: "Parijs", country: "FR", bucket: "vanes-dienst-backup-oud", auto: true });
+  assert.equal(v.server.provider, "scaleway");
+  assert.equal(v.ready.server, true);
+  assert.deepEqual(c1.console.aanbieder.retired, [{ provider: "scaleway", serverId: "nl-ams-1/srv-oud/ip-oud" }]);
+  await aanbieder.cleanupRetired(c1, deps);
+  assert.equal(c1.console.aanbieder.retired, undefined);
+  assert.ok(!up.st.scw.servers.some((x) => x.id === "srv-oud"), "oude server weg via de Provider van Scaleway");
+  assert.throws(() => aanbieder.saveBackup(c1, { provider: "hetzner", region: "fsn1", accessKey: "a", secretKey: "b" }, deps), /staan al in vanes-dienst-backup-oud/);
+
+  // Nieuw: de server bij Hetzner met de sleutel die de cloud al heeft, de back-ups in een gekoppelde opslag elders.
+  const c2: any = { cluster: "vanes", domain: "vanes.nl", providers: { hetzner: { token: HZ_TOKEN } }, dns: [], image: {}, console: { done: true, aanbieder: { ...base, step: "server" } },
+    stores: [{ name: "eigen-backup", type: "s3", purpose: "backup", country: "DE", endpoint: S3, region: "de-fra-1", bucket: "vanes-backup-x", accessKey: "EIGENAK", secretKey: "eigen-geheim" }] };
+  await assert.rejects(aanbieder.opzetten(c2, deps), /Kies eerst waar de server/);
+  const r = await aanbieder.saveServer(c2, { provider: "hetzner", region: "nbg1" }, deps);
+  assert.deepEqual(r.hosting, { provider: "hetzner", name: "Hetzner Cloud", region: "nbg1", regionLabel: "Neurenberg", city: "Neurenberg", country: "DE", size: "cx23", monthly: 4.51 });
+  assert.deepEqual(c2.console.aanbieder.keys, { hetzner: { token: HZ_TOKEN } }, "sleutel van de cloud overgenomen");
+  const b = aanbieder.saveBackup(c2, { store: "eigen-backup" }, deps);
+  assert.deepEqual(b.backup, { provider: "custom", name: "Eigen opslag (NAS, MinIO, Garage)", region: "de-fra-1", regionLabel: "127.0.0.1", country: "DE", bucket: null, auto: false });
+  const before = up.calls.length;
+  const o = await aanbieder.opzetten(c2, deps);
+  assert.deepEqual(o.steps.slice(0, 2).map((x: any) => x.label), ["Back-upopslag bij Eigen opslag (NAS, MinIO, Garage) (127.0.0.1), 30 dagen niet te wissen", "Server bij Hetzner Cloud in Neurenberg (cx23)"]);
+  assert.ok(!up.calls.slice(before).some((x) => x.path.startsWith("/scw/")), "niets bij Scaleway voor de server of de back-ups");
+  assert.equal(c2.console.aanbieder.projectId, undefined);
+  const srv = hz.st.servers.at(-1);
+  assert.deepEqual([srv.location, srv.server_type], ["nbg1", "cx23"]);
+  assert.ok(srv.user_data.length < 32 * 1024, "user-data past bij Hetzner (32 KiB)");
+  const env = envFromUserData(srv.user_data);
+  assert.deepEqual([env.BROKER_BACKUP_ENDPOINT, env.BROKER_BACKUP_REGION, env.BROKER_BACKUP_ACCESS_KEY, env.BROKER_BACKUP_SECRET_KEY], [S3, "de-fra-1", "EIGENAK", "eigen-geheim"]);
+  assert.match(env.BROKER_BACKUP_BUCKET, /^vanes-dienst-backup-/, "eigen bucket, niet die van de cloud");
+  assert.ok(s3.buckets.get(env.BROKER_BACKUP_BUCKET)?.lock, "bucket klaargezet met onveranderbare back-ups");
+  assert.equal(env.SCW_SECRET_KEY, SCW_KEY, "Scaleway-sleutel blijft voor de clouds van klanten");
+  const vv = aanbieder.view(c2, deps) as any;
+  assert.deepEqual([vv.server.provider, vv.server.ipv4], ["hetzner", srv.public_net.ipv4.ip]);
+  assert.ok(!JSON.stringify(vv).includes(HZ_TOKEN) && !JSON.stringify(vv).includes("eigen-geheim"), "geen geheimen in de weergave");
+  const d = await aanbieder.verwijderen(c2, { confirm: "dienst.vanes.nl" }, deps);
+  assert.equal(d.finalBackup, false, "server onbereikbaar: de vorige back-up blijft");
+  for (let i = 0; i < 50 && hz.st.servers.length; i++) await new Promise((res) => setTimeout(res, 20));
+  assert.equal(hz.st.servers.length, 0, "server weg bij Hetzner");
 });
 
 test("back-ups van de Dienst: bewaren en opruimen", async () => {

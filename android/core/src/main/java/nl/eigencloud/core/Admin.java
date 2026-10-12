@@ -452,8 +452,9 @@ public final class Admin {
 
     /**
      * Settings the console passes to the cloud (at launch and after every change), like consoleSettings in
-     * src/cluster/admin.ts: mail_relay, spf_extra, extra_dns, alert_email (if set), max_users and dienst_report
-     * (JSON {url, orderId, token} for health reports to the provider, or "").
+     * src/cluster/admin.ts: mail_relay, spf_extra, extra_dns, alert_email (if set), max_users, dienst_report
+     * (JSON {url, orderId, token} for health reports to the provider, or ""), budget_month ("" = none) and
+     * cost_servers (JSON "provider/region/size" → monthly price, for the cluster's "Kosten" health check).
      */
     public static Map<String, Object> consoleSettings(Map<String, Object> c, String defaultDienst) {
         Map<String, Object> settings = Json.obj();
@@ -473,6 +474,11 @@ public final class Admin {
         Object orderId = Json.path(con, "dienst", "orderId");
         settings.put("dienst_report", Json.truthy(orderId) && Json.truthy(Json.path(con, "dienst", "applied")) && Json.truthy(token) && !url.isEmpty()
                 ? Json.stringify(Json.obj("url", url, "orderId", orderId, "token", token)) : "");
+        // Kosten en budget (Costs): budget per maand ("" = geen) en de maandprijzen van de formaten uit de catalogus.
+        // Oudere servers bewaren onbekende instellingen alleen en doen er niets mee.
+        Double budget = Costs.parseBudget(con.get("budget"));
+        settings.put("budget_month", budget == null ? "" : Json.jsString(budget));
+        settings.put("cost_servers", Json.stringify(Costs.serverPrices(Json.map(con, "catalog"))));
         return settings;
     }
 

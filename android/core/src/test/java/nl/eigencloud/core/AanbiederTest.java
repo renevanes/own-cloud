@@ -9,8 +9,10 @@ import java.util.Map;
 
 /**
  * Aanbieder worden vanuit de telefoonconsole (zelfde routes en JSON als src/console/aanbieder.ts): bedrijf, accounts
- * (live gecontroleerd tegen nep-Scaleway/-Mollie/-deSEC/-Openprovider en een lokale SMTP-server), adres, opzetten
- * (project, back-upsleutel, bucket op moto_server, server met user-data), status, opnieuw opzetten en verwijderen.
+ * (live gecontroleerd tegen nep-Scaleway/-Mollie/-deSEC/-Openprovider en een lokale SMTP-server), adres, server en
+ * back-ups (aanbieder en regio met prijzen), opzetten (project, back-upsleutel, bucket op moto_server, server met
+ * user-data), status, opnieuw opzetten bij Hetzner (oude Scaleway-server weg) en verwijderen. Daarna: een oude kluis
+ * (alleen Scaleway) en een Dienst bij Hetzner met back-ups in een gekoppelde opslag.
  */
 public class AanbiederTest {
     private static ConsoleApi api;
@@ -31,6 +33,50 @@ public class AanbiederTest {
     }
 
     static final String KEY = "12345678-aaaa-bbbb-cccc-1234567890ab", ORG = "87654321-dddd-eeee-ffff-ba0987654321";
+    static final String HZ = "hetzner-dienst-token";
+
+    private static Map<String, Object> price(String loc, String eur) { return Json.obj("location", loc, "price_monthly", Json.obj("gross", eur)); }
+
+    /** Nep-Hetzner Cloud (servers en formaten) onder /hz. */
+    private static void hetzner(FakeApi f, final List<Map<String, Object>> hz) {
+        FakeApi.Handler types = c -> new FakeApi.Reply(200, Json.stringify(Json.obj("server_types", Json.list(
+                Json.obj("name", "cx11", "cores", 1, "memory", 1, "architecture", "x86", "prices", Json.list(price("fsn1", "3.0000"), price("nbg1", "3.0000"))),
+                Json.obj("name", "cax11", "cores", 2, "memory", 4, "architecture", "arm", "prices", Json.list(price("fsn1", "3.9900"))),
+                Json.obj("name", "cx23", "cores", 2, "memory", 4, "architecture", "x86", "prices", Json.list(price("fsn1", "4.5100"), price("nbg1", "4.5100"))),
+                Json.obj("name", "cx33", "cores", 4, "memory", 8, "architecture", "x86", "prices", Json.list(price("fsn1", "7.0000"), price("hel1", "7.2000")))))), "application/json");
+        f.on("^GET /hz/server_types", hzAuth(types));
+        f.on("^GET /hz/servers\\?label_selector=", hzAuth(c -> {
+            List<Object> out = new ArrayList<>();
+            synchronized (hz) { for (Map<String, Object> x : hz) if (c.query.contains("cluster%3D" + Json.str(x, "labels", "cluster"))) out.add(x); }
+            return new FakeApi.Reply(200, Json.stringify(Json.obj("servers", out, "meta", Json.obj("pagination", Json.obj("next_page", null)))), "application/json");
+        }));
+        f.on("^POST /hz/servers$", hzAuth(c -> {
+            Map<String, Object> x = Json.copy(Json.asMap(c.json));
+            synchronized (hz) {
+                long id = 101 + hz.size() + hzCount[0]++;
+                x.put("id", id);
+                x.put("public_net", Json.obj("ipv4", Json.obj("ip", "198.51.100." + (id - 100)), "ipv6", Json.obj("ip", "2001:db8:" + id + "::/64")));
+                hz.add(x);
+            }
+            return new FakeApi.Reply(201, Json.stringify(Json.obj("server", x)), "application/json");
+        }));
+        f.on("^DELETE /hz/servers/(\\d+)$", hzAuth(c -> {
+            String id = c.path.substring(c.path.lastIndexOf('/') + 1);
+            synchronized (hz) { if (!hz.removeIf(x -> id.equals(Json.jsString(x.get("id"))))) return new FakeApi.Reply(404, "{\"error\":{\"code\":\"not_found\"}}", "application/json"); }
+            return new FakeApi.Reply(200, "{\"action\":{}}", "application/json");
+        }));
+    }
+
+    private static final int[] hzCount = {0};
+
+    private static FakeApi.Handler hzAuth(FakeApi.Handler h) {
+        return c -> ("Bearer " + HZ).equals(c.headers.get("authorization")) ? h.handle(c) : new FakeApi.Reply(401, "{\"error\":{\"code\":\"unauthorized\",\"message\":\"unable to authenticate\"}}", "application/json");
+    }
+
+    private static String envOf(String ud, String k) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\n" + k + "=([^\n]*)\n").matcher(ud);
+        return m.find() ? m.group(1) : null;
+    }
 
     public static void main(String[] args) {
         T.main("AanbiederTest", () -> {
@@ -40,12 +86,13 @@ public class AanbiederTest {
             String catText;
             try (FileInputStream in = new FileInputStream(System.getProperty("catalog.file"))) { catText = Bytes.utf8(Bytes.readAll(in)); }
             Map<String, Object> catJson = Json.parseObject(catText);
-            for (Object o : Json.listAt(catJson, "stores")) if ("scaleway".equals(Json.str(o, "id"))) for (Object r : Json.listAt(o, "regions")) Json.asMap(r).put("endpoint", moto);
+            for (Object o : Json.listAt(catJson, "stores")) for (Object r : Json.listAt(o, "regions")) if (!Json.str(r, "endpoint").isEmpty()) Json.asMap(r).put("endpoint", moto);
             Catalog cat = new Catalog(Json.stringify(catJson));
             File dir = Files.createTempDirectory("aanbieder").toFile();
             api = new ConsoleApi(new File(dir, "kluis.json"), cat, null);
 
             final List<Map<String, Object>> servers = new ArrayList<>();
+            final List<Map<String, Object>> hz = new ArrayList<>();
             final Map<String, String> userData = new java.util.HashMap<>();
             final boolean[] closing = {false};
             final String[] dienstSecret = {null};
@@ -73,6 +120,10 @@ public class AanbiederTest {
                     return new FakeApi.Reply(202, "{}", "application/json");
                 }));
                 f.on("^DELETE /scw/instance/v1/zones/nl-ams-1/ips/", auth(c -> new FakeApi.Reply(204, "", "text/plain")));
+                f.on("^GET /scw/instance/v1/zones/[^/]+/products/servers", auth(c -> new FakeApi.Reply(200, Json.stringify(Json.obj("servers", Json.obj(
+                        "DEV1-S", Json.obj("ncpus", 2, "ram", 2147483648L, "arch", "x86_64", "monthly_price", 6.42),
+                        "STARDUST1-S", Json.obj("ncpus", 1, "ram", 1073741824L, "arch", "x86_64", "monthly_price", 0.5)))), "application/json")));
+                hetzner(f, hz);
                 f.on("^GET /mollie/methods$", c -> "Bearer test_mollie".equals(c.headers.get("authorization")) ? new FakeApi.Reply(200, "{\"count\":1}", "application/json") : new FakeApi.Reply(401, "{}", "application/json"));
                 f.on("^GET /desec/domains/$", c -> "Token desec-dienst".equals(c.headers.get("authorization")) ? new FakeApi.Reply(200, "[]", "application/json") : new FakeApi.Reply(401, "{\"detail\":\"Invalid token.\"}", "application/json"));
                 f.on("^POST /op/auth/login$", c -> "op-geheim".equals(Json.str(c.json, "password")) ? new FakeApi.Reply(200, "{\"code\":0,\"data\":{\"token\":\"t\"}}", "application/json") : new FakeApi.Reply(401, "{\"code\":196}", "application/json"));
@@ -84,6 +135,7 @@ public class AanbiederTest {
                 });
                 f.on("^GET /doh\\?name=dienst\\.vanes\\.nl&type=A$", c -> new FakeApi.Reply(200, Json.stringify(Json.obj("Status", 0, "Answer", servers.isEmpty() ? Json.list() : Json.list(Json.obj("type", 1, "data", "192.0.2." + (10 + servers.size() - 1))))), "application/json"));
                 Endpoints.SCALEWAY = f.base() + "/scw";
+                Endpoints.HETZNER = f.base() + "/hz";
                 Endpoints.MOLLIE = f.base() + "/mollie";
                 Endpoints.DESEC = f.base() + "/desec";
                 Endpoints.OPENPROVIDER = f.base() + "/op";
@@ -138,10 +190,40 @@ public class AanbiederTest {
                 r = call(200, "POST", "/api/aanbieder/adres", Json.obj());
                 T.eq("https://dienst.vanes.nl", r.get("url"), "default url used");
                 T.eq("{\"host\":\"dienst.vanes.nl\",\"sub\":\"dienst\",\"managed\":true,\"value\":null}", Json.stringify(r.get("dns")), "dns managed by the cloud");
+                T.eq("server", r.get("step"), "next step server");
 
-                // 4. Opzetten
+                // 4. Server en back-ups
+                T.check(Json.str(call(400, "POST", "/api/aanbieder/server", Json.obj("provider", "hetzner")), "error").contains("Vul in: API-token"), "token needed");
+                T.check(Json.str(call(400, "POST", "/api/aanbieder/server", Json.obj("provider", "hetzner", "fields", Json.obj("token", "fout"))), "error").contains("Inloggen bij Hetzner Cloud lukt niet"), "wrong token");
+                r = call(200, "POST", "/api/aanbieder/server", Json.obj("provider", "hetzner", "fields", Json.obj("token", " " + HZ + " ")));
+                T.eq("[{\"region\":\"fsn1\",\"label\":\"Falkenstein\",\"city\":\"Falkenstein\",\"country\":\"DE\",\"size\":\"cx23\",\"sizeLabel\":\"2 vCPU, 4 GB\",\"monthly\":4.51},"
+                        + "{\"region\":\"nbg1\",\"label\":\"Neurenberg\",\"city\":\"Neurenberg\",\"country\":\"DE\",\"size\":\"cx23\",\"sizeLabel\":\"2 vCPU, 4 GB\",\"monthly\":4.51},"
+                        + "{\"region\":\"hel1\",\"label\":\"Helsinki\",\"city\":\"Helsinki\",\"country\":\"FI\",\"size\":\"cx33\",\"sizeLabel\":\"4 vCPU, 8 GB\",\"monthly\":7.2}]",
+                        Json.stringify(r.get("regions")), "smallest suitable size per region with price");
+                T.eq(null, f.find("^POST /hz/"), "only looked");
+                r = call(200, "POST", "/api/aanbieder/server", Json.obj("provider", "scaleway"));
+                for (Object x : Json.listAt(r, "regions")) T.eq("DEV1-S 6.42", Json.str(x, "size") + " " + Json.stringify(Json.path(x, "monthly")), "scaleway size " + Json.str(x, "region"));
+                call(400, "POST", "/api/aanbieder/server", Json.obj("provider", "scaleway", "region", "nl-ams-9"));
+                r = call(200, "POST", "/api/aanbieder/server", Json.obj("provider", "scaleway", "region", "nl-ams-1"));
+                T.eq("{\"provider\":\"scaleway\",\"name\":\"Scaleway\",\"region\":\"nl-ams-1\",\"regionLabel\":\"Amsterdam 1\",\"city\":\"Amsterdam\",\"country\":\"NL\",\"size\":\"DEV1-S\",\"monthly\":6.42}",
+                        Json.stringify(r.get("hosting")), "hosting chosen");
+                T.check(Json.str(call(400, "POST", "/api/aanbieder/opzetten", null), "error").contains("Kies eerst waar de back-ups komen"), "backup needed");
+                T.check(Json.str(call(400, "POST", "/api/aanbieder/backup", Json.obj("provider", "hetzner", "region", "fsn1")), "error").contains("toegangssleutel en geheime sleutel"), "keys needed");
+                T.check(Json.str(call(400, "POST", "/api/aanbieder/backup", Json.obj("store", "bestaat-niet")), "error").contains("gekoppelde opslag"), "unknown store");
+                r = call(200, "POST", "/api/aanbieder/backup", Json.obj("provider", "scaleway", "region", "fr-par"));
+                T.eq("{\"provider\":\"scaleway\",\"name\":\"Scaleway Object Storage\",\"region\":\"fr-par\",\"regionLabel\":\"Parijs\",\"country\":\"FR\",\"bucket\":null,\"auto\":true}",
+                        Json.stringify(r.get("backup")), "backup at Scaleway, key made by the console");
+                v = call(200, "GET", "/api/aanbieder", null);
+                T.eq(true, Json.path(v, "ready", "server"), "ready server");
+                T.eq("[\"scaleway\",\"hetzner\"]", Json.stringify(v.get("hostingKeys")), "hosting keys");
+                T.check(!Json.stringify(v).contains(HZ), "no hetzner token in the view");
+                call(200, "POST", "/api/aanbieder/stap", Json.obj("step", "opzetten"));
+
+                // 5. Opzetten
                 r = call(200, "POST", "/api/aanbieder/opzetten", null);
                 for (Object st : Json.listAt(r, "steps")) T.eq(true, Json.path(st, "ok"), "step " + Json.str(st, "label"));
+                T.eq("Back-upopslag bij Scaleway Object Storage (Parijs), 30 dagen niet te wissen", Json.str(r, "steps", 2, "label"), "backup step label");
+                T.eq("Server bij Scaleway in Amsterdam (DEV1-S)", Json.str(r, "steps", 3, "label"), "server step label");
                 T.eq(1, servers.size(), "one server");
                 T.eq("proj-1", servers.get(0).get("project"), "server in the dienst project");
                 T.eq("DEV1-S", servers.get(0).get("commercial_type"), "size");
@@ -154,7 +236,7 @@ public class AanbiederTest {
                 dienstSecret[0] = sm.group(1);
                 Map<String, Object> raw = api.vault.config();
                 T.eq(Aanbieder.serverUserData(raw, Json.map(raw, "console", "aanbieder")), ud, "user-data as generated");
-                for (String secret : new String[] {"test_mollie", "desec-dienst", KEY, "aaaaaaaa-bbbb-cccc-dddd-000000000001", dienstSecret[0], "op-geheim"}) {
+                for (String secret : new String[] {"test_mollie", "desec-dienst", KEY, "aaaaaaaa-bbbb-cccc-dddd-000000000001", dienstSecret[0], "op-geheim", HZ}) {
                     T.check(!Json.stringify(r).contains(secret), "no secret in the reply");
                     T.check(!text("GET", "/api/aanbieder").contains(secret), "no secret in GET /api/aanbieder");
                     T.check(!text("GET", "/api/config").contains(secret), "no secret in GET /api/config");
@@ -165,6 +247,8 @@ public class AanbiederTest {
                 T.eq("klaar", v.get("step"), "step klaar");
                 T.check(Json.str(v, "backup", "bucket").startsWith("vanes-dienst-backup-"), "backup bucket");
                 T.check(new S3Store(Json.obj("name", "b", "type", "s3", "purpose", "backup", "endpoint", moto, "region", "fr-par", "bucket", Json.str(v, "backup", "bucket"), "accessKey", "x", "secretKey", "y")).bucketExists(), "bucket exists on moto");
+                T.eq("scaleway", Json.str(v, "server", "provider"), "server provider");
+                T.check(Json.str(call(400, "POST", "/api/aanbieder/backup", Json.obj("provider", "hetzner", "region", "fsn1", "accessKey", "a", "secretKey", "b")), "error").contains("staan al in vanes-dienst-backup-"), "backup place fixed");
 
                 // 5. Status
                 r = call(200, "GET", "/api/aanbieder/status", null);
@@ -173,27 +257,106 @@ public class AanbiederTest {
                 T.eq("{\"host\":\"dienst.vanes.nl\",\"want\":\"192.0.2.10\",\"have\":[\"192.0.2.10\"],\"ok\":true}", Json.stringify(r.get("dns")), "dns ok");
                 T.check(!userData.containsKey("srv-0"), "user-data removed at Scaleway");
 
-                // Opnieuw opzetten: laatste back-up, nieuwe server, oude weg
+                // Opnieuw opzetten bij Hetzner: laatste back-up, nieuwe server, oude weg bij Scaleway
+                r = call(200, "POST", "/api/aanbieder/server", Json.obj("provider", "hetzner", "region", "fsn1"));
+                T.eq(true, r.get("pending"), "pending until redeploy");
                 r = call(200, "POST", "/api/aanbieder/opzetten", null);
                 T.eq(true, r.get("replaced"), "replaced");
                 T.eq(true, closing[0], "handover called with the right token");
-                for (int i = 0; i < 100 && servers.size() > 1; i++) Thread.sleep(20);
-                T.eq(1, servers.size(), "old server gone");
-                T.eq("srv-1", servers.get(0).get("id"), "new server stays");
-                T.eq("192.0.2.11", Json.str(call(200, "GET", "/api/aanbieder", null), "server", "ipv4"), "new address");
+                boolean server = false, project = false;
+                for (Object st : Json.listAt(r, "steps")) {
+                    server |= "Server bij Hetzner Cloud in Falkenstein (cx23)".equals(Json.str(st, "label"));
+                    project |= Json.str(st, "label").startsWith("Project") || Json.str(st, "label").startsWith("Sleutel voor");
+                }
+                T.check(server && !project, "server at Hetzner, no new project or key: " + Json.stringify(r.get("steps")));
+                for (int i = 0; i < 100 && !servers.isEmpty(); i++) Thread.sleep(20);
+                T.eq(0, servers.size(), "old Scaleway server gone");
+                T.eq(1, hz.size(), "one Hetzner server");
+                T.eq("fsn1 cx23 eigen-cloud-dienst", Json.str(hz.get(0), "location") + " " + Json.str(hz.get(0), "server_type") + " " + Json.str(hz.get(0), "labels", "cluster"), "Hetzner server");
+                T.eq(KEY, envOf(Json.str(hz.get(0), "user_data"), "SCW_SECRET_KEY"), "Scaleway key stays for customer clouds");
+                T.eq(Json.str(v, "backup", "bucket"), envOf(Json.str(hz.get(0), "user_data"), "BROKER_BACKUP_BUCKET"), "same backups (still at Scaleway)");
+                v = call(200, "GET", "/api/aanbieder", null);
+                T.eq("hetzner 198.51.100.1 2001:db8:101::1", Json.str(v, "server", "provider") + " " + Json.str(v, "server", "ipv4") + " " + Json.str(v, "server", "ipv6"), "new address");
 
                 // Verwijderen
                 e = call(400, "POST", "/api/aanbieder/verwijderen", Json.obj("confirm", "ja"));
                 T.check(Json.str(e, "error").contains("Typ dienst.vanes.nl"), "confirmation needed");
                 r = call(200, "POST", "/api/aanbieder/verwijderen", Json.obj("confirm", " Dienst.Vanes.nl "));
                 T.eq(true, r.get("finalBackup"), "final backup");
-                for (int i = 0; i < 100 && !servers.isEmpty(); i++) Thread.sleep(20);
-                T.eq(0, servers.size(), "server removed");
+                for (int i = 0; i < 100 && !hz.isEmpty(); i++) Thread.sleep(20);
+                T.eq(0, hz.size(), "server removed at Hetzner");
                 v = call(200, "GET", "/api/aanbieder", null);
                 T.eq(true, v.get("removed"), "removed");
                 T.eq("[{\"sub\":\"dienst\",\"type\":\"A\",\"value\":\"\"},{\"sub\":\"dienst\",\"type\":\"AAAA\",\"value\":\"\"}]",
                         Json.str(Admin.consoleSettings(api.vault.config(), ""), "extra_dns"), "record removed");
                 T.eq("{\"reachable\":false,\"server\":false,\"removed\":true}", Json.stringify(call(200, "GET", "/api/aanbieder/status", null)), "status after removal");
+
+                // Een oude kluis (alleen Scaleway): bijgewerkt bij het lezen, oude server weg via de Provider van Scaleway.
+                Aanbieder.Offers offers = Aanbieder.offers(cat);
+                Aanbieder.Deps deps = new Aanbieder.Deps() {
+                    @Override public List<Map<String, Object>> serverOffers() { return offers.serverOffers(); }
+
+                    @Override public List<Map<String, Object>> storeOffers() { return offers.storeOffers(); }
+
+                    @Override public void save() {}
+                };
+                Map<String, Object> base = Json.obj("url", "https://dienst.vanes.nl", "company", Json.obj("name", "Van Es", "address", Json.list("Blaak 10"), "kvk", "", "vat", "", "email", "rene@elders.example"),
+                        "accounts", Json.obj("scalewaySecretKey", KEY, "scalewayOrgId", ORG, "mollieKey", "test_x", "desecToken", "d"),
+                        "checked", Json.obj("scaleway", true, "mollie", true, "desec", true, "smtp", true), "secret", "ab".repeat(32));
+                servers.add(Json.obj("id", "srv-oud"));
+                Map<String, Object> legacy = Json.copy(base);
+                legacy.putAll(Json.obj("step", "klaar", "projectId", "proj-1",
+                        "backup", Json.obj("endpoint", moto, "region", "fr-par", "bucket", "vanes-dienst-backup-oud", "accessKey", "SCWAK", "secretKey", "s", "applicationId", "app-1", "policyId", "pol-1"),
+                        "server", Json.obj("provider", "scaleway", "region", "nl-ams-1", "size", "DEV1-S", "serverId", "nl-ams-1/srv-nu/ip-nu", "ipv4", "192.0.2.10", "createdAt", 1),
+                        "retired", Json.list("nl-ams-1/srv-oud/ip-oud")));
+                Map<String, Object> c1 = Json.obj("cluster", "vanes", "domain", "vanes.nl", "providers", Json.obj(), "stores", Json.list(), "dns", Json.list(), "image", Json.obj(), "console", Json.obj("done", true, "aanbieder", legacy));
+                v = Aanbieder.view(c1, offers);
+                T.eq("{\"provider\":\"scaleway\",\"name\":\"Scaleway\",\"region\":\"nl-ams-1\",\"regionLabel\":\"Amsterdam 1\",\"city\":\"Amsterdam\",\"country\":\"NL\",\"size\":\"DEV1-S\",\"monthly\":null}", Json.stringify(v.get("hosting")), "legacy hosting");
+                T.eq("[{\"provider\":\"scaleway\",\"serverId\":\"nl-ams-1/srv-oud/ip-oud\"}]", Json.stringify(legacy.get("retired")), "legacy retired migrated");
+                Aanbieder.cleanupRetired(c1, deps);
+                T.eq(null, legacy.get("retired"), "legacy retired cleaned");
+                T.check(servers.stream().noneMatch(x -> "srv-oud".equals(x.get("id"))), "old Scaleway server destroyed");
+
+                // Nieuw: server bij Hetzner met de sleutel van de cloud, back-ups in een gekoppelde opslag (eigen endpoint).
+                Map<String, Object> st2 = Json.copy(base);
+                st2.put("step", "server");
+                Map<String, Object> c2 = Json.obj("cluster", "vanes", "domain", "vanes.nl", "providers", Json.obj("hetzner", Json.obj("token", HZ)), "dns", Json.list(), "image", Json.obj(),
+                        "stores", Json.list(Json.obj("name", "eigen-backup", "type", "s3", "purpose", "backup", "country", "DE", "endpoint", moto, "region", "de-fra-1", "bucket", "vanes-backup-x", "accessKey", "EIGENAK", "secretKey", "eigen-geheim")),
+                        "console", Json.obj("done", true, "aanbieder", st2));
+                Aanbieder.Offers real = Aanbieder.offers(new Catalog(catText));
+                Aanbieder.Deps deps2 = new Aanbieder.Deps() {
+                    @Override public List<Map<String, Object>> serverOffers() { return real.serverOffers(); }
+
+                    @Override public List<Map<String, Object>> storeOffers() { return real.storeOffers(); }
+
+                    @Override public void save() {}
+                };
+                r = Aanbieder.saveServer(c2, Json.obj("provider", "hetzner", "region", "nbg1"), deps2);
+                T.eq("{\"provider\":\"hetzner\",\"name\":\"Hetzner Cloud\",\"region\":\"nbg1\",\"regionLabel\":\"Neurenberg\",\"city\":\"Neurenberg\",\"country\":\"DE\",\"size\":\"cx23\",\"monthly\":4.51}", Json.stringify(r.get("hosting")), "hosting at Hetzner");
+                T.eq("{\"hetzner\":{\"token\":\"" + HZ + "\"}}", Json.stringify(st2.get("keys")), "cloud key copied");
+                r = Aanbieder.saveBackup(c2, Json.obj("store", "eigen-backup"), deps2);
+                String motoHost = new java.net.URI(moto).getHost();
+                T.eq("{\"provider\":\"custom\",\"name\":\"Eigen opslag (NAS, MinIO, Garage)\",\"region\":\"de-fra-1\",\"regionLabel\":\"" + motoHost + "\",\"country\":\"DE\",\"bucket\":null,\"auto\":false}", Json.stringify(r.get("backup")), "backup in a linked store");
+                int callsBefore = f.calls.size();
+                r = Aanbieder.opzetten(c2, deps2);
+                T.eq("Back-upopslag bij Eigen opslag (NAS, MinIO, Garage) (" + motoHost + "), 30 dagen niet te wissen", Json.str(r, "steps", 0, "label"), "first step: bucket");
+                T.eq("Server bij Hetzner Cloud in Neurenberg (cx23)", Json.str(r, "steps", 1, "label"), "server step");
+                boolean scw = false;
+                synchronized (f.calls) { for (FakeApi.Call x : f.calls.subList(callsBefore, f.calls.size())) scw |= x.path.startsWith("/scw/"); }
+                T.check(!scw, "nothing at Scaleway for server or backups");
+                T.eq(null, st2.get("projectId"), "no Scaleway project");
+                Map<String, Object> hsrv = hz.get(hz.size() - 1);
+                String ud2 = Json.str(hsrv, "user_data");
+                T.eq("nbg1 cx23", Json.str(hsrv, "location") + " " + Json.str(hsrv, "server_type"), "Hetzner server nbg1");
+                T.eq(moto + " de-fra-1 EIGENAK eigen-geheim", envOf(ud2, "BROKER_BACKUP_ENDPOINT") + " " + envOf(ud2, "BROKER_BACKUP_REGION") + " " + envOf(ud2, "BROKER_BACKUP_ACCESS_KEY") + " " + envOf(ud2, "BROKER_BACKUP_SECRET_KEY"), "backup env");
+                String bucket2 = envOf(ud2, "BROKER_BACKUP_BUCKET");
+                T.check(bucket2.startsWith("vanes-dienst-backup-"), "own bucket");
+                T.check(new S3Store(Json.obj("name", "b", "type", "s3", "purpose", "backup", "endpoint", moto, "region", "de-fra-1", "bucket", bucket2, "accessKey", "x", "secretKey", "y")).bucketExists(), "bucket on moto");
+                v = Aanbieder.view(c2, deps2);
+                T.check(!Json.stringify(v).contains(HZ) && !Json.stringify(v).contains("eigen-geheim"), "no secrets in the view");
+                Aanbieder.verwijderen(c2, Json.obj("confirm", "dienst.vanes.nl"), deps2);
+                for (int i = 0; i < 100 && !hz.isEmpty(); i++) Thread.sleep(20);
+                T.eq(0, hz.size(), "server removed at Hetzner");
             } finally {
                 Endpoints.reset();
             }

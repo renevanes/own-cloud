@@ -226,36 +226,59 @@ en bewaar `BROKER_SECRET` / `geheim.key` en `aanbieder.key` apart. Of laat de Di
 ## Opzetten vanuit de app (zonder terminal)
 
 Wie al een Eigen Cloud heeft, kan in de beheerconsole (computer of app, op het overzicht: **Aanbieder worden**) zijn
-eigen Dienst laten opzetten. De console doet dan wat hierboven met de hand staat. Vier stappen, met Vorige/Volgende:
+eigen Dienst laten opzetten. De console doet dan wat hierboven met de hand staat. Vijf stappen, met Vorige/Volgende:
 
 1. **Bedrijf**: naam, adres, KvK, btw-nummer (voor de facturen, `BROKER_COMPANY_*`) en het e-mailadres van de eigenaar
    (`BROKER_OWNER_EMAIL`; die krijgt de eerste inlogcode voor `/beheer`).
-2. **Accounts**, elk meteen gecontroleerd: Scaleway (geheime sleutel + organisatie-ID; `GET /account/v3/projects`),
+2. **Accounts**, elk meteen gecontroleerd: Scaleway (geheime sleutel + organisatie-ID; `GET /account/v3/projects`;
+   daarmee zet de Dienst de clouds van klanten op, `SCW_*` in `src/broker/provision.ts`; de server van de Dienst zelf
+   hoeft niet bij Scaleway),
    Mollie (`GET /v2/methods`), deSEC (`GET /domains/`), de mailserver (SMTP: inloggen; leeg = de relay van je eigen
    cloud, afzender `noreply@<je domein>`), en optioneel Openprovider (inloggen; houdt niet tegen, want Openprovider kijkt
    ook naar het IP-adres) en de adressendienst (`BROKER_ADRES_URL`).
 3. **Adres**: standaard `https://dienst.<je domein>`. Je cloud zet het A-record zelf in je DNS (instelling `extra_dns`,
    nu ook met A/AAAA; een lege waarde haalt een record weg). Een adres onder een ander domein kan ook; dan zet je het
    record zelf.
-4. **Opzetten**: bij Scaleway een project `eigen-cloud-dienst` met
-   - een **eigen sleutel voor de back-ups**: IAM-applicatie `eigen-cloud-dienst-backup` met alleen
-     `ObjectStorageFullAccess` in dat project (net als de projectsleutels van klanten). De organisatiesleutel zelf gaat
-     ook naar de server (de Dienst heeft hem nodig om klantprojecten te maken), maar de back-ups hangen er niet van af;
-   - een **bucket in Parijs** (`<cluster>-dienst-backup-<willekeurig>`) met versiebeheer en 30 dagen object-lock;
-   - een **server** DEV1-S in Amsterdam met cloud-init (`dienstUserData` in `src/cluster/cloudinit.ts`): Docker, het
+4. **Server en back-ups**: de **server** bij elke aanbieder met servers uit de registry (Scaleway, Hetzner, UpCloud,
+   Exoscale, OVHcloud; `src/cluster/adapters`). Na *Regio's en prijzen ophalen* (alleen lezen: inloggen met
+   `Provider.list`, formaten met `fetchSizes`) zie je per regio het kleinste geschikte formaat (minstens 2 GB, zoals bij
+   een cloud) met de live prijs. Inloggegevens: bij Scaleway de sleutel van stap 2; bij een andere aanbieder wat je cloud
+   al heeft gekoppeld, of wat je hier invult (bewaard onder `console.aanbieder.keys`). De **back-ups** mogen bij een
+   andere aanbieder: een gekoppelde S3-opslag van je cloud (met diens sleutels, een eigen bucket), of elke opslag uit de
+   registry (regio en S3-sleutels; bij *Eigen opslag* ook het endpoint). Bij Scaleway zonder sleutels maakt de console
+   er zelf een (zie hieronder). Zodra er back-ups zijn, ligt die plek vast; de server kan later wel naar een andere
+   aanbieder of regio (*Opnieuw opzetten*).
+5. **Opzetten**:
+   - alleen als de server of de back-ups (zonder eigen sleutels) bij Scaleway komen: een project `eigen-cloud-dienst`;
+   - back-ups bij Scaleway zonder eigen sleutels: een **eigen sleutel voor de back-ups**, IAM-applicatie
+     `eigen-cloud-dienst-backup` met alleen `ObjectStorageFullAccess` in dat project (net als de projectsleutels van
+     klanten). De organisatiesleutel zelf gaat ook naar de server (de Dienst heeft hem nodig om klantprojecten te maken),
+     maar de back-ups hangen er niet van af;
+   - een **bucket** op de gekozen plek (`<cluster>-dienst-backup-<willekeurig>`) met versiebeheer en 30 dagen object-lock;
+   - een **server** in de gekozen regio (`Provider.create` van de adapter, cluster-label `eigen-cloud-dienst`) met
+     cloud-init (`dienstUserData` in `src/cluster/cloudinit.ts`): Docker, het
      image van je cloud met `node dist/broker/main.js`, `/srv/dienst/dienst.env` (0600) met alle instellingen
      (`BROKER_*`, `MOLLIE_API_KEY`, `DESEC_TOKEN`, `SCW_*`, `OPENPROVIDER_*`, `BROKER_BACKUP_*`, `BROKER_SECRET`),
      de datamap `/srv/dienst/data`, en Caddy (het `eigen-caddy`-image) met HTTPS via HTTP-01.
 
    De console maakt `BROKER_SECRET` (64 hex) zelf en bewaart hem in je kluis (en dus versleuteld in de herstelkopie in je
    opslag). Let op: anders dan bij een cloud staan de geheimen hier wél in de user-data. De server is alleen van jou,
-   en zodra de Dienst bereikbaar is haalt de console de user-data weg bij Scaleway (`DELETE …/user_data/cloud-init`).
+   en zodra de Dienst bereikbaar is haalt de console de user-data weg als de aanbieder dat via de API kan
+   (`Provider.clearUserData`; nu alleen Scaleway: `DELETE …/user_data/cloud-init`). Bij de andere aanbieders blijft het
+   script bij de aanbieder staan (⚠️ niet nagegaan of hun API het later nog teruggeeft).
+
+   DNS voor `dienst.<je domein>` loopt via de DNS-koppeling van je cloud (elke DNS-adapter, of je zet het record zelf);
+   mail versturen via de mailserver van stap 2 (standaard de relay van je cloud). Geen van beide hangt af van waar de
+   server staat.
 
 Daarna (**Je dienst**): status (bereikbaar, versie, laatste back-up, DNS), **Beheer openen** (in de app: het
 beheerscherm met vingerafdruk), **Instellingen wijzigen** (de stappen opnieuw) en **Opnieuw opzetten**: de huidige
 server maakt een laatste back-up en schrijft daarna niets meer, er komt een nieuwe server met de nieuwe instellingen die
 die back-up bij de eerste start terugzet, het A-record gaat naar de nieuwe server en de oude wordt verwijderd. Door de
-DNS (deSEC: minstens een uur) kan een deel van de bezoekers de Dienst daarna even niet bereiken. **Dienst verwijderen**
+DNS (deSEC: minstens een uur) kan een deel van de bezoekers de Dienst daarna even niet bereiken. Zo verhuis je de
+server ook naar een andere aanbieder of regio: kies die bij *Server en back-ups* en zet opnieuw op. Oude servers ruimt
+de console op met `Provider.destroy` van de aanbieder waar ze stonden (`retired: [{provider, serverId}]`).
+**Dienst verwijderen**
 (typ het adres ter bevestiging): laatste back-up, server weg, A-record weg; de bucket met back-ups en de sleutel blijven,
 zodat *Opnieuw opzetten* alles terugzet.
 
@@ -267,9 +290,13 @@ opnieuw geprobeerd.
 
 Routes van de console (ook in de app, zelfde JSON): `GET /api/aanbieder`, `POST /api/aanbieder/stap {step}`
 (`uit` = stoppen zolang er geen Dienst is), `POST /api/aanbieder/bedrijf`, `POST /api/aanbieder/accounts`,
-`POST /api/aanbieder/adres`, `POST /api/aanbieder/opzetten` (ook voor opnieuw opzetten), `GET /api/aanbieder/status`,
+`POST /api/aanbieder/adres`, `POST /api/aanbieder/server {provider, fields?, region?}` (zonder regio: regio's met
+formaat en prijs; met regio: bewaren), `POST /api/aanbieder/backup {store}` of `{provider, region, endpoint?, accessKey?,
+secretKey?}`, `POST /api/aanbieder/opzetten` (ook voor opnieuw opzetten), `GET /api/aanbieder/status`,
 `POST /api/aanbieder/verwijderen {confirm}`. De toestand staat in de kluis onder `console.aanbieder`; antwoorden bevatten
-nooit sleutels (alleen de laatste 4 tekens).
+nooit sleutels (alleen de laatste 4 tekens). Een kluis van vóór de keuze van aanbieder (alles bij Scaleway) wordt bij
+het lezen bijgewerkt: `hosting` (Scaleway, regio en formaat van de server), `backup.provider` en `server.provider`
+`scaleway`, en `retired` van losse id's naar `{provider, serverId}`.
 
 ## Back-up van de Dienst (`BROKER_BACKUP_*`)
 

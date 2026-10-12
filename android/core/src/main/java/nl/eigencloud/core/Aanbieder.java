@@ -13,17 +13,19 @@ import java.util.regex.Pattern;
 
 /**
  * Aanbieder worden: je eigen Eigen Cloud Dienst opzetten en bijhouden vanuit de console (port of
- * src/console/aanbieder.ts; the console routes /api/aanbieder… return the same JSON). State lives in the vault under
- * console.aanbieder. Blocking; call off the UI thread.
+ * src/console/aanbieder.ts; the console routes /api/aanbieder… return the same JSON). The Dienst's server can be at any
+ * provider with servers ({@link Adapters}), its backups at any S3 storage. State lives in the vault under
+ * console.aanbieder (older Scaleway-only states are migrated on read). Blocking; call off the UI thread.
  */
 public final class Aanbieder {
     private Aanbieder() {}
 
     public static final String PROJECT_NAME = "eigen-cloud-dienst";
+    /** Where a Dienst from before the provider choice runs (only Scaleway was possible then). */
     public static final String SERVER_REGION = "nl-ams-1";
     public static final String SERVER_SIZE = "DEV1-S";
     public static final String BACKUP_REGION = "fr-par";
-    private static final List<String> STEPS = java.util.Arrays.asList("bedrijf", "accounts", "adres", "opzetten", "klaar");
+    private static final List<String> STEPS = java.util.Arrays.asList("bedrijf", "accounts", "adres", "server", "opzetten", "klaar");
     private static final String[] ACCOUNT_FIELDS = {"scalewaySecretKey", "scalewayOrgId", "mollieKey", "desecToken", "smtpUrl", "openproviderUser", "openproviderPass", "adresUrl", "mailFrom"};
 
     private static final Pattern EMAIL = Pattern.compile("^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$", Pattern.CASE_INSENSITIVE);
@@ -44,11 +46,24 @@ public final class Aanbieder {
     /** Wait between bucket attempts (a new Scaleway key can take a few seconds to work). */
     public static volatile long retryDelayMs = 4000;
 
-    /** What the console needs from its surroundings. */
-    public interface Deps {
-        /** Scaleway Object Storage endpoint of a region. */
-        String storeEndpoint(String region);
+    /** Server and storage offers from the catalog (the console passes them; tests point storage at a fake S3). */
+    public interface Offers {
+        List<Map<String, Object>> serverOffers();
 
+        List<Map<String, Object>> storeOffers();
+    }
+
+    /** Offers straight from a catalog. */
+    public static Offers offers(final Catalog cat) {
+        return new Offers() {
+            @Override public List<Map<String, Object>> serverOffers() { return cat.serverOffers(); }
+
+            @Override public List<Map<String, Object>> storeOffers() { return cat.storeOffers(); }
+        };
+    }
+
+    /** What the console needs from its surroundings. */
+    public interface Deps extends Offers {
         void save() throws IOException;
     }
 
@@ -65,7 +80,36 @@ public final class Aanbieder {
 
     // ───────── Toestand ─────────
 
-    private static Map<String, Object> existing(Map<String, Object> c) { return Json.map(c, "console", "aanbieder"); }
+    /**
+     * Older (Scaleway-only) states to the current shape: server and backup get their provider, retired servers become
+     * {provider, serverId}, and a Dienst that exists (or existed) gets the place where it ran (migrate in TS).
+     */
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> migrate(Map<String, Object> a) {
+        if (a == null) return null;
+        Object ret = a.get("retired");
+        if (ret instanceof List) {
+            List<Object> out = new ArrayList<>();
+            for (Object x : (List<Object>) ret) out.add(x instanceof String ? Json.obj("provider", "scaleway", "serverId", x) : x);
+            a.put("retired", out);
+        }
+        Map<String, Object> server = Json.map(a, "server");
+        if (server != null && !Json.truthy(server.get("provider"))) server.put("provider", "scaleway");
+        Map<String, Object> bk = Json.map(a, "backup");
+        if (bk != null && !Json.truthy(bk.get("provider"))) {
+            bk.put("provider", "scaleway");
+            bk.put("country", bk.get("country") != null ? bk.get("country") : "FR");
+        }
+        if (a.get("hosting") == null && (server != null || Json.truthy(a.get("removed")) || Json.truthy(Json.path(a, "backup", "bucket")))) {
+            a.put("hosting", Json.obj("provider", server != null && server.get("provider") != null ? server.get("provider") : "scaleway",
+                    "region", server != null && server.get("region") != null ? server.get("region") : SERVER_REGION,
+                    "size", server != null && server.get("size") != null ? server.get("size") : SERVER_SIZE, "monthly", null));
+        }
+        if ("opzetten".equals(a.get("step")) && (a.get("hosting") == null || a.get("backup") == null)) a.put("step", "server");
+        return a;
+    }
+
+    private static Map<String, Object> existing(Map<String, Object> c) { return migrate(Json.map(c, "console", "aanbieder")); }
 
     private static Map<String, Object> state(Map<String, Object> c) {
         Map<String, Object> con = Json.map(c, "console");
@@ -74,7 +118,7 @@ public final class Aanbieder {
             a = Json.obj("step", "bedrijf");
             con.put("aanbieder", a);
         }
-        return a;
+        return migrate(a);
     }
 
     private static Map<String, Object> sub(Map<String, Object> m, String key) {
@@ -141,8 +185,49 @@ public final class Aanbieder {
         return nonEmpty(Json.str(a, "company", "name")) && nonEmpty(Json.str(a, "company", "email"));
     }
 
+    private static boolean serverReady(Map<String, Object> a) { return a.get("hosting") != null && a.get("backup") != null; }
+
+    private static Map<String, Object> find(List<Map<String, Object>> l, String id) {
+        if (id == null) return null;
+        for (Map<String, Object> m : l) if (id.equals(m.get("id"))) return m;
+        return null;
+    }
+
+    private static Map<String, Object> region(Map<String, Object> offer, String id) {
+        if (offer == null || id == null) return null;
+        for (Object r : Json.listAt(offer, "regions")) if (id.equals(Json.str(r, "id"))) return Json.asMap(r);
+        return null;
+    }
+
+    /** The server: provider, region (with city and country) and size, as the console shows it. */
+    private static Map<String, Object> hostingView(Map<String, Object> a, Offers o) {
+        Map<String, Object> h = Json.map(a, "hosting");
+        if (h == null) return null;
+        String p = Json.str(h, "provider"), reg = Json.str(h, "region");
+        Map<String, Object> offer = find(o.serverOffers(), p);
+        Map<String, Object> r = region(offer, reg);
+        return Json.obj("provider", p, "name", offer != null ? offer.get("name") : p, "region", reg, "regionLabel", r != null ? r.get("label") : reg,
+                "city", r != null ? r.get("city") : reg, "country", r != null ? r.get("country") : null, "size", h.get("size"), "monthly", h.get("monthly"));
+    }
+
+    /** The backup place: provider, region and (once there are backups) the bucket; the place is then fixed. */
+    private static Map<String, Object> backupView(Map<String, Object> a, Offers o) {
+        Map<String, Object> b = Json.map(a, "backup");
+        if (b == null) return null;
+        String p = Json.str(b, "provider"), reg = Json.str(b, "region"), endpoint = Json.str(b, "endpoint");
+        Map<String, Object> offer = find(o.storeOffers(), p);
+        Map<String, Object> r = region(offer, reg);
+        if (r == null && offer != null) for (Object x : Json.listAt(offer, "regions")) if (nonEmpty(Json.str(x, "endpoint")) && Json.str(x, "endpoint").equals(endpoint)) { r = Json.asMap(x); break; }
+        String host = hostOf(endpoint);
+        String country = nonEmpty(Json.str(b, "country")) ? Json.str(b, "country") : r != null && nonEmpty(Json.str(r, "country")) ? Json.str(r, "country") : null;
+        return Json.obj("provider", p, "name", offer != null ? offer.get("name") : p, "region", reg,
+                "regionLabel", r != null ? r.get("label") : host != null ? host.toLowerCase(Locale.ROOT) : reg, "country", country,
+                "bucket", b.get("bucket"),
+                "auto", "scaleway".equals(p) && (!nonEmpty(Json.str(b, "accessKey")) || nonEmpty(Json.str(b, "applicationId"))));
+    }
+
     /** GET /api/aanbieder: wat de console mag laten zien (geen geheimen, alleen de laatste 4 tekens). */
-    public static Map<String, Object> view(Map<String, Object> c) {
+    public static Map<String, Object> view(Map<String, Object> c, Offers offers) {
         Map<String, Object> a = existing(c);
         Object domain = c.get("domain");
         String defaultUrl = Json.truthy(domain) ? "https://dienst." + Json.jsString(domain) : null;
@@ -154,7 +239,6 @@ public final class Aanbieder {
         String smtp = smtpOf(c, a);
         String mollie = Json.str(acc, "mollieKey");
         Map<String, Object> server = Json.map(a, "server");
-        String bucket = Json.str(a, "backup", "bucket");
         Map<String, Object> checked = Json.map(a, "checked");
         String url = Json.str(a, "url");
         return Json.obj(
@@ -172,16 +256,27 @@ public final class Aanbieder {
                         "openproviderUser", acc.get("openproviderUser") != null ? acc.get("openproviderUser") : "", "openproviderPass", mask(Json.str(acc, "openproviderPass")),
                         "adresUrl", acc.get("adresUrl") != null ? acc.get("adresUrl") : "", "mailFrom", mailFromOf(c, a)),
                 "checked", checked != null ? checked : Json.obj(),
-                "ready", Json.obj("bedrijf", companyReady(a), "accounts", accountsReady(a), "adres", nonEmpty(url)),
-                "server", server == null ? null : Json.obj("region", server.get("region"), "size", server.get("size"), "serverId", server.get("serverId"),
+                "ready", Json.obj("bedrijf", companyReady(a), "accounts", accountsReady(a), "adres", nonEmpty(url), "server", serverReady(a)),
+                "hosting", hostingView(a, offers),
+                "hostingKeys", hostingKeys(a),
+                "server", server == null ? null : Json.obj("provider", server.get("provider"), "region", server.get("region"), "size", server.get("size"), "serverId", server.get("serverId"),
                         "ipv4", server.get("ipv4"), "ipv6", server.get("ipv6"), "createdAt", server.get("createdAt")),
-                "backup", nonEmpty(bucket) ? Json.obj("bucket", bucket, "region", Json.path(a, "backup", "region")) : null,
+                "backup", backupView(a, offers),
                 "dns", dnsInfo(c),
                 "createdAt", a.get("createdAt"),
                 "lastHealth", a.get("lastHealth"),
                 "removed", Json.truthy(a.get("removed")),
                 "retired", (long) Json.listAt(a, "retired").size(),
                 "beheerUrl", url != null ? url + "/beheer" : null);
+    }
+
+    /** Providers the Dienst has its own credentials for (Scaleway always: the key at Accounts). */
+    private static List<Object> hostingKeys(Map<String, Object> a) {
+        List<Object> out = new ArrayList<>();
+        out.add("scaleway");
+        Map<String, Object> keys = Json.map(a, "keys");
+        if (keys != null) for (String k : keys.keySet()) if (!"scaleway".equals(k)) out.add(k);
+        return out;
     }
 
     /** Vorige/Volgende in de stappen; "uit" vergeet alles zolang er geen Dienst is (of was). */
@@ -388,11 +483,130 @@ public final class Aanbieder {
         a.put("url", url);
         remove.remove(Json.str(dnsInfo(c), "sub"));
         if (remove.isEmpty()) a.remove("dnsRemove"); else a.put("dnsRemove", new ArrayList<>(remove));
-        if ("adres".equals(a.get("step"))) a.put("step", "opzetten");
+        if ("adres".equals(a.get("step"))) a.put("step", "server");
         return Json.obj("ok", true, "url", url, "step", a.get("step"), "dns", dnsInfo(c), "pending", a.get("server") != null);
     }
 
-    // ───────── 4. Opzetten ─────────
+    // ───────── 4. Server en back-ups ─────────
+
+    /**
+     * Where the Dienst's server goes. Without a region: log in (read only) and per region the smallest suitable size
+     * (≥ 2 GB, like the cloud) with its live price. With a region: store that choice. Credentials: Scaleway uses the key
+     * at Accounts; other providers what the cloud already linked, with what is typed now on top ("••…" keeps it).
+     */
+    public static Map<String, Object> saveServer(Map<String, Object> c, Map<String, Object> b, Offers deps) throws IOException {
+        Map<String, Object> a = state(c);
+        Map<String, Object> offer = find(deps.serverOffers(), Json.str(b, "provider"));
+        if (offer == null) throw new IllegalArgumentException("Kies een aanbieder voor de server");
+        String id = Json.str(offer, "id"), name = Json.str(offer, "name");
+        Map<String, Object> fields;
+        if ("scaleway".equals(id)) {
+            String key = Json.str(a, "accounts", "scalewaySecretKey");
+            if (!nonEmpty(key) || !Boolean.TRUE.equals(Json.path(a, "checked", "scaleway"))) throw new IllegalArgumentException("Controleer eerst je Scaleway-sleutel bij Accounts");
+            fields = Json.obj("secretKey", key, "projectId", nz(Json.str(a, "projectId")));
+        } else {
+            fields = Json.obj();
+            Map<String, Object> linked = Json.map(c, "providers", id), own = Json.map(a, "keys", id), in = Json.map(b, "fields");
+            if (linked != null) fields.putAll(Json.copy(linked));
+            if (own != null) fields.putAll(Json.copy(own));
+            if (in != null) for (Map.Entry<String, Object> e : in.entrySet()) {
+                if (!(e.getValue() instanceof String)) continue;
+                String t = ((String) e.getValue()).trim();
+                if (!t.isEmpty() && !t.startsWith("••")) fields.put(e.getKey(), t);
+            }
+            List<String> missing = new ArrayList<>();
+            for (Object f : Json.listAt(offer, "fields")) if (!Json.truthy(Json.path(f, "optional")) && !Json.truthy(fields.get(Json.str(f, "key")))) missing.add(Json.str(f, "label"));
+            if (!missing.isEmpty()) throw new IllegalArgumentException("Vul in: " + String.join(", ", missing));
+            try {
+                Adapters.makeProvider(id, fields).list(PROJECT_NAME);
+            } catch (IOException | RuntimeException e) {
+                throw new IOException("Inloggen bij " + name + " lukt niet: " + Bytes.head(String.valueOf(e.getMessage()).replaceFirst("https?://\\S+", ""), 160), e);
+            }
+            Map<String, Object> keys = Json.map(a, "keys") != null ? Json.copy(Json.map(a, "keys")) : Json.obj();
+            keys.put(id, fields);
+            a.put("keys", keys);
+        }
+        String reg = Json.str(b, "region");
+        if (!nonEmpty(reg)) {
+            List<Object> regions = new ArrayList<>();
+            for (Object r : Json.listAt(offer, "regions")) {
+                Map<String, Object> x = Json.obj("region", Json.str(r, "id"), "label", Json.str(r, "label"), "city", Json.str(r, "city"), "country", Json.str(r, "country"));
+                try {
+                    Catalog.SizeOption s = Catalog.pickSize(Catalog.fetchSizes(id, fields, Json.str(r, "id")), "data");
+                    if (s != null) {
+                        x.put("size", s.size);
+                        x.put("sizeLabel", s.label);
+                        x.put("monthly", s.monthly);
+                    } else x.put("error", "Geen geschikt formaat (minstens 2 GB geheugen)");
+                } catch (IOException | RuntimeException e) {
+                    x.put("error", "Prijzen ophalen lukt niet");
+                }
+                regions.add(x);
+            }
+            return Json.obj("ok", true, "provider", id, "regions", regions);
+        }
+        Map<String, Object> r = region(offer, reg);
+        if (r == null) throw new IllegalArgumentException("Kies een regio");
+        Catalog.SizeOption s;
+        try {
+            s = Catalog.pickSize(Catalog.fetchSizes(id, fields, reg), "data");
+        } catch (IOException | RuntimeException e) {
+            throw new IOException("Prijzen ophalen bij " + name + " lukt niet", e);
+        }
+        if (s == null) throw new IllegalArgumentException("Geen geschikt formaat in " + Json.str(r, "label") + " (minstens 2 GB geheugen)");
+        a.put("hosting", Json.obj("provider", id, "region", reg, "size", s.size, "monthly", s.monthly));
+        return Json.obj("ok", true, "provider", id, "hosting", hostingView(a, deps), "pending", a.get("server") != null);
+    }
+
+    /**
+     * Where the backups go: a linked S3 store of the cloud ({store}: its keys, an own bucket), or a storage offer with
+     * region and keys. Scaleway without keys: the console makes one. May differ from the server's provider. Once there
+     * are backups the place is fixed (a new server restores them from there).
+     */
+    public static Map<String, Object> saveBackup(Map<String, Object> c, Map<String, Object> b, Offers deps) {
+        Map<String, Object> a = state(c);
+        String have = Json.str(a, "backup", "bucket");
+        if (nonEmpty(have)) throw new IllegalArgumentException("De back-ups staan al in " + have + "; die plek blijft hetzelfde");
+        List<Map<String, Object>> offers = new ArrayList<>();
+        for (Map<String, Object> o : deps.storeOffers()) if (!"localfs".equals(o.get("id"))) offers.add(o);
+        String storeName = Json.str(b, "store");
+        if (nonEmpty(storeName)) {
+            Map<String, Object> st = null;
+            for (Map<String, Object> x : ClusterConfig.stores(c)) if (storeName.equals(x.get("name")) && "s3".equals(x.get("type"))) { st = x; break; }
+            String ep = Json.str(st, "endpoint");
+            if (st == null || !nonEmpty(ep) || !nonEmpty(Json.str(st, "accessKey")) || !nonEmpty(Json.str(st, "secretKey"))) throw new IllegalArgumentException("Kies een gekoppelde opslag");
+            String provider = "custom";
+            outer:
+            for (Map<String, Object> o : offers) for (Object r : Json.listAt(o, "regions")) if (nonEmpty(Json.str(r, "endpoint")) && Json.str(r, "endpoint").equals(ep)) { provider = Json.str(o, "id"); break outer; }
+            a.put("backup", Json.obj("provider", provider, "endpoint", ep, "region", st.get("region") != null ? st.get("region") : "us-east-1",
+                    "country", st.get("country") != null ? st.get("country") : "", "accessKey", st.get("accessKey"), "secretKey", st.get("secretKey")));
+            return Json.obj("ok", true, "backup", backupView(a, deps));
+        }
+        Map<String, Object> offer = find(offers, Json.str(b, "provider"));
+        if (offer == null) throw new IllegalArgumentException("Kies waar de back-ups komen");
+        Map<String, Object> r = region(offer, Json.str(b, "region"));
+        if (r == null) throw new IllegalArgumentException("Kies een locatie voor de back-ups");
+        String endpoint = Json.truthy(offer.get("customEndpoint")) ? (b.get("endpoint") == null ? "" : Json.jsString(b.get("endpoint"))).trim() : nz(Json.str(r, "endpoint"));
+        if (!Pattern.compile("^https?://[^\\s/]+").matcher(endpoint).find()) throw new IllegalArgumentException("Vul de endpoint-URL in (begint met https://)");
+        String rid = Json.str(r, "id");
+        String region = "eigen".equals(rid) ? "us-east-1" : rid;
+        String accessKey = (b.get("accessKey") == null ? "" : Json.jsString(b.get("accessKey"))).trim();
+        String secretKey = (b.get("secretKey") == null ? "" : Json.jsString(b.get("secretKey"))).trim();
+        if ((accessKey + secretKey).matches("(?s).*[\\r\\n].*")) throw new IllegalArgumentException("Een sleutel past op één regel");
+        String id = Json.str(offer, "id");
+        if ("scaleway".equals(id) && accessKey.isEmpty() && secretKey.isEmpty()) {
+            // Scaleway zonder eigen sleutels: bij het opzetten maakt de console een sleutel die alleen in het project mag.
+            Map<String, Object> prev = Json.map(a, "backup");
+            boolean keep = prev != null && "scaleway".equals(Json.str(prev, "provider")) && nonEmpty(Json.str(prev, "applicationId")) && endpoint.equals(Json.str(prev, "endpoint"));
+            if (!keep) a.put("backup", Json.obj("provider", "scaleway", "endpoint", endpoint, "region", region, "country", r.get("country")));
+        } else {
+            if (accessKey.isEmpty() || secretKey.isEmpty()) throw new IllegalArgumentException("Vul de toegangssleutel en geheime sleutel in");
+            a.put("backup", Json.obj("provider", id, "endpoint", endpoint, "region", region, "country", r.get("country"), "accessKey", accessKey, "secretKey", secretKey));
+        }
+        return Json.obj("ok", true, "backup", backupView(a, deps));
+    }
+
+    // ───────── 5. Opzetten ─────────
 
     private static Object scw(String method, String path, String key, Object body) throws IOException {
         Res r;
@@ -484,13 +698,14 @@ public final class Aanbieder {
         return id;
     }
 
+    /** Backups at Scaleway without own keys: the console makes a key itself (storage only, only in the project). */
+    private static boolean autoBackup(Map<String, Object> a) {
+        return "scaleway".equals(Json.str(a, "backup", "provider")) && !nonEmpty(Json.str(a, "backup", "accessKey"));
+    }
+
     /** Een eigen sleutel voor de back-ups: alleen Object Storage, alleen in het project van de Dienst. */
     private static void ensureBackupKey(Map<String, Object> a, String key, String org, Deps deps) throws IOException {
         Map<String, Object> bk = Json.map(a, "backup");
-        if (bk == null) {
-            bk = Json.obj("endpoint", deps.storeEndpoint(BACKUP_REGION), "region", BACKUP_REGION);
-            a.put("backup", bk);
-        }
         if (nonEmpty(Json.str(bk, "accessKey")) && nonEmpty(Json.str(bk, "secretKey"))) return;
         String name = PROJECT_NAME + "-backup";
         String orgQ = Bytes.encodeURIComponent(org);
@@ -520,8 +735,8 @@ public final class Aanbieder {
     private static void ensureBucket(Map<String, Object> c, Map<String, Object> a, Deps deps) throws IOException {
         Map<String, Object> bk = Json.map(a, "backup");
         String bucket = nonEmpty(Json.str(bk, "bucket")) ? Json.str(bk, "bucket") : Json.jsString(c.get("cluster")) + "-dienst-backup-" + Bytes.hex(Bytes.random(3));
-        Map<String, Object> store = Json.obj("name", "dienst-backup", "type", "s3", "purpose", "backup", "country", "FR", "endpoint", bk.get("endpoint"), "region", bk.get("region"),
-                "bucket", bucket, "accessKey", bk.get("accessKey"), "secretKey", bk.get("secretKey"));
+        Map<String, Object> store = Json.obj("name", "dienst-backup", "type", "s3", "purpose", "backup", "country", bk.get("country") != null ? bk.get("country") : "",
+                "endpoint", bk.get("endpoint"), "region", bk.get("region"), "bucket", bucket, "accessKey", bk.get("accessKey"), "secretKey", bk.get("secretKey"));
         List<Admin.StepResult> steps = new ArrayList<>();
         for (int i = 0; i < 4; i++) {
             steps = Admin.prepareStore(store);
@@ -537,8 +752,20 @@ public final class Aanbieder {
         throw new IOException("Back-upopslag klaarzetten lukte niet: " + String.join(", ", why));
     }
 
-    private static Provider provider(Map<String, Object> a) {
-        return Providers.make("scaleway", Json.obj("secretKey", Json.str(a, "accounts", "scalewaySecretKey"), "projectId", Json.str(a, "projectId")));
+    /**
+     * The Provider for servers of the Dienst at a provider: Scaleway with the key at Accounts in the project
+     * eigen-cloud-dienst; other providers with the credentials chosen at "Server en back-ups" (or the cloud's own).
+     */
+    private static Provider providerFor(Map<String, Object> c, Map<String, Object> a, String id) {
+        if ("scaleway".equals(id)) {
+            String key = Json.str(a, "accounts", "scalewaySecretKey");
+            if (!nonEmpty(key) || !nonEmpty(Json.str(a, "projectId"))) throw new IllegalStateException("Geen Scaleway-sleutel of project voor de server");
+            return Providers.make("scaleway", Json.obj("secretKey", key, "projectId", Json.str(a, "projectId")));
+        }
+        Map<String, Object> f = Json.map(a, "keys", id);
+        if (f == null) f = Json.map(c, "providers", id);
+        if (f == null) throw new IllegalStateException("Geen inloggegevens voor " + id + "; kies de server opnieuw");
+        return Providers.make(id, f);
     }
 
     private static Map<String, Object> step(String label, boolean ok, String detail) {
@@ -553,17 +780,30 @@ public final class Aanbieder {
         if (!companyReady(a)) throw new IllegalArgumentException("Vul eerst je bedrijfsgegevens in");
         if (!accountsReady(a)) throw new IllegalArgumentException("Controleer eerst je accounts (stap 2)");
         if (!nonEmpty(Json.str(a, "url"))) throw new IllegalArgumentException("Kies eerst het adres van je Dienst");
+        Map<String, Object> hosting = Json.map(a, "hosting");
+        if (hosting == null) throw new IllegalArgumentException("Kies eerst waar de server van je Dienst komt");
+        if (a.get("backup") == null) throw new IllegalArgumentException("Kies eerst waar de back-ups komen");
+        String hp = Json.str(hosting, "provider"), hr = Json.str(hosting, "region"), hs = Json.str(hosting, "size");
+        Map<String, Object> offer = find(deps.serverOffers(), hp);
+        if (offer == null) throw new IllegalArgumentException("Onbekende aanbieder " + hp);
+        Map<String, Object> where = region(offer, hr);
         String key = Json.str(a, "accounts", "scalewaySecretKey"), org = Json.str(a, "accounts", "scalewayOrgId");
         List<Object> steps = new ArrayList<>();
         boolean replace = nonEmpty(Json.str(a, "server", "serverId"));
         try {
-            ensureProject(a, key, org);
-            deps.save();
-            steps.add(step("Project " + PROJECT_NAME + " bij Scaleway", true, null));
-            ensureBackupKey(a, key, org, deps);
-            steps.add(step("Sleutel voor de back-ups (werkt alleen in dit project)", true, null));
+            boolean auto = autoBackup(a);
+            if ("scaleway".equals(hp) || auto) {
+                ensureProject(a, key, org);
+                deps.save();
+                steps.add(step("Project " + PROJECT_NAME + " bij Scaleway", true, null));
+            }
+            if (auto) {
+                ensureBackupKey(a, key, org, deps);
+                steps.add(step("Sleutel voor de back-ups (werkt alleen in dit project)", true, null));
+            }
             ensureBucket(c, a, deps);
-            steps.add(step("Back-upopslag in Parijs, 30 dagen niet te wissen", true, Json.str(a, "backup", "bucket")));
+            Map<String, Object> bv = backupView(a, deps);
+            steps.add(step("Back-upopslag bij " + Json.jsString(bv.get("name")) + " (" + Json.jsString(bv.get("regionLabel")) + "), 30 dagen niet te wissen", true, Json.str(a, "backup", "bucket")));
             if (!nonEmpty(Json.str(a, "secret"))) a.put("secret", EigenCrypto.randomKeyHex());
             deps.save();
             if (replace) {
@@ -571,9 +811,9 @@ public final class Aanbieder {
                 steps.add(step("Laatste back-up van de huidige server", (Boolean) h[0], (String) h[1]));
             }
             String nodeId = "dienst-" + Bytes.hex(Bytes.random(3));
-            Provider.ServerInfo info = provider(a).create(new Provider.CreateSpec(PROJECT_NAME, nodeId, "data", SERVER_REGION, SERVER_SIZE, serverUserData(c, a)));
+            Provider.ServerInfo info = providerFor(c, a, hp).create(new Provider.CreateSpec(PROJECT_NAME, nodeId, "data", hr, hs, serverUserData(c, a)));
             Map<String, Object> old = Json.map(a, "server");
-            Map<String, Object> srv = Json.obj("provider", "scaleway", "region", SERVER_REGION, "size", SERVER_SIZE, "serverId", info.serverId);
+            Map<String, Object> srv = Json.obj("provider", hp, "region", hr, "size", hs, "serverId", info.serverId);
             if (info.ipv4 != null) srv.put("ipv4", info.ipv4);
             if (info.ipv6 != null) srv.put("ipv6", info.ipv6);
             srv.put("createdAt", System.currentTimeMillis());
@@ -585,19 +825,19 @@ public final class Aanbieder {
                 a.put("step", "klaar");
                 if (old != null && nonEmpty(Json.str(old, "serverId"))) {
                     List<Object> retired = new ArrayList<>(Json.listAt(a, "retired"));
-                    retired.add(old.get("serverId"));
+                    retired.add(Json.obj("provider", old.get("provider"), "serverId", old.get("serverId")));
                     a.put("retired", retired);
                 }
             }
             deps.save();
-            steps.add(step("Server in Amsterdam (" + SERVER_SIZE + ")", true, info.ipv4 != null ? "IP-adres " + info.ipv4 : null));
+            steps.add(step("Server bij " + Json.jsString(offer.get("name")) + " in " + (where != null ? Json.str(where, "city") : hr) + " (" + hs + ")", true, info.ipv4 != null ? "IP-adres " + info.ipv4 : null));
             if (old != null && nonEmpty(Json.str(old, "serverId"))) steps.add(step("De vorige server wordt opgeruimd", true, null));
             Map<String, Object> d = dnsInfo(c);
             steps.add(Json.truthy(d.get("managed"))
                     ? step(Json.str(d, "host") + " wijst naar " + info.ipv4, true, "Je cloud zet dit record zelf in je DNS")
                     : step("Zet bij je DNS een A-record: " + Json.str(d, "host") + " → " + info.ipv4, true, null));
             if (!Json.listAt(a, "retired").isEmpty()) cleanupRetiredAsync(c, deps);
-            return Json.obj("ok", true, "replaced", replace, "steps", steps, "server", view(c).get("server"));
+            return Json.obj("ok", true, "replaced", replace, "steps", steps, "server", view(c, deps).get("server"));
         } catch (IOException | RuntimeException e) {
             try { deps.save(); } catch (IOException ignored) { /* bewaren lukt de volgende keer */ }
             throw new SetupException(e.getMessage(), steps, e);
@@ -606,7 +846,7 @@ public final class Aanbieder {
 
     private static final AtomicBoolean CLEANING = new AtomicBoolean();
 
-    /** Vervangen of verwijderde servers weghalen bij Scaleway, op de achtergrond; mislukt het, dan de volgende keer. */
+    /** Vervangen of verwijderde servers weghalen bij hun aanbieder, op de achtergrond; mislukt het, dan de volgende keer. */
     public static void cleanupRetiredAsync(Map<String, Object> c, Deps deps) {
         Map<String, Object> a = existing(c);
         if (a == null || Json.listAt(a, "retired").isEmpty() || !CLEANING.compareAndSet(false, true)) return;
@@ -617,19 +857,22 @@ public final class Aanbieder {
         t.start();
     }
 
+    private static String retiredKey(Object x) { return Json.str(x, "provider") + "/" + Json.str(x, "serverId"); }
+
     /** Hetzelfde, maar wachtend (tests). */
     public static void cleanupRetired(Map<String, Object> c, Deps deps) {
         Map<String, Object> a = existing(c);
         if (a == null) return;
         // Ook servers die tijdens het opruimen bij de lijst komen (bijv. verwijderen vlak na opnieuw opzetten).
-        java.util.Set<Object> tried = new java.util.HashSet<>();
-        for (Object id = first(Json.listAt(a, "retired"), tried); id != null; id = first(Json.listAt(a, "retired"), tried)) {
-            tried.add(id);
+        java.util.Set<String> tried = new java.util.HashSet<>();
+        for (Object x = first(Json.listAt(a, "retired"), tried); x != null; x = first(Json.listAt(a, "retired"), tried)) {
+            final String k = retiredKey(x);
+            tried.add(k);
             try {
-                provider(a).destroy(Json.jsString(id));
+                providerFor(c, a, Json.str(x, "provider")).destroy(Json.str(x, "serverId"));
                 synchronized (a) {
-                    List<Object> left = new ArrayList<>(Json.listAt(a, "retired"));
-                    left.remove(id);
+                    List<Object> left = new ArrayList<>();
+                    for (Object y : Json.listAt(a, "retired")) if (!retiredKey(y).equals(k)) left.add(y);
                     if (left.isEmpty()) a.remove("retired"); else a.put("retired", left);
                 }
                 deps.save();
@@ -639,12 +882,12 @@ public final class Aanbieder {
         }
     }
 
-    private static Object first(List<Object> l, java.util.Set<Object> skip) {
-        for (Object x : l) if (!skip.contains(x)) return x;
+    private static Object first(List<Object> l, java.util.Set<String> skip) {
+        for (Object x : l) if (!skip.contains(retiredKey(x))) return x;
         return null;
     }
 
-    // ───────── 5. Klaar: status, verwijderen ─────────
+    // ───────── 6. Klaar: status, verwijderen ─────────
 
     /** A-records via DNS-over-HTTPS (zoals DnsSetup.resolveNs). */
     static List<String> resolve4Doh(String host) {
@@ -686,13 +929,14 @@ public final class Aanbieder {
                     "backup", null, "closing", false, "error", m.contains("antwoordt") ? m : "Nog niet bereikbaar");
         }
         a.put("lastHealth", h);
-        // De user-data bevat de geheimen van de Dienst: weghalen bij Scaleway zodra de server draait.
+        // De user-data bevat de geheimen van de Dienst: weghalen bij de aanbieder zodra de server draait (als die dat kan).
         if (Boolean.TRUE.equals(h.get("reachable")) && !Json.truthy(server.get("userDataCleared"))) {
-            String[] parts = Json.jsString(server.get("serverId")).split("/");
             try {
-                Http.Response r = Http.request("DELETE", Endpoints.SCALEWAY.replaceAll("/+$", "") + "/instance/v1/zones/" + parts[0] + "/servers/" + parts[1] + "/user_data/cloud-init",
-                        Http.headers("x-auth-token", nz(Json.str(a, "accounts", "scalewaySecretKey"))), null, 15_000);
-                if (r.ok() || r.status == 404) server.put("userDataCleared", true);
+                Provider p = providerFor(c, a, Json.str(server, "provider"));
+                if (p instanceof ScalewayProvider) {
+                    ((ScalewayProvider) p).clearUserData(Json.str(server, "serverId"));
+                    server.put("userDataCleared", true);
+                }
             } catch (IOException | RuntimeException ignored) {
                 // volgende keer
             }
@@ -721,7 +965,7 @@ public final class Aanbieder {
         Object[] h = handover(a);
         synchronized (a) {
             List<Object> retired = new ArrayList<>(Json.listAt(a, "retired"));
-            retired.add(Json.path(a, "server", "serverId"));
+            retired.add(Json.obj("provider", Json.path(a, "server", "provider"), "serverId", Json.path(a, "server", "serverId")));
             a.put("retired", retired);
             a.put("server", null);
             a.put("removed", true);

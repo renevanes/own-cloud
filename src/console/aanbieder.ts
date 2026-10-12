@@ -1,8 +1,12 @@
 /**
  * Aanbieder worden: je eigen Eigen Cloud Dienst (src/broker) opzetten en bijhouden vanuit de console, zonder terminal.
- * Stappen: bedrijf → accounts (live gecontroleerd) → adres (dienst.<domein>, je cloud publiceert het A-record) →
- * opzetten (project "eigen-cloud-dienst" bij Scaleway, back-upbucket met eigen sleutel, server met cloud-init) → klaar
- * (status, opnieuw opzetten, verwijderen). De toestand staat in de kluis onder console.aanbieder.
+ * Stappen: bedrijf → accounts (live gecontroleerd) → adres (dienst.<domein>, je cloud publiceert het A-record via
+ * zijn eigen DNS-koppeling) → server (aanbieder en regio uit de registry, kleinste geschikte formaat; back-ups bij
+ * elke S3-opslag) → opzetten (back-upbucket, server met cloud-init) → klaar (status, opnieuw opzetten, verwijderen).
+ * De server en de back-ups mogen bij verschillende aanbieders staan. Bij Scaleway maakt de console een eigen project
+ * "eigen-cloud-dienst" en (back-ups bij Scaleway zonder eigen sleutels) een sleutel die alleen opslag in dat project mag.
+ * De Scaleway-sleutel bij Accounts blijft nodig: daarmee zet de Dienst de clouds van klanten op (src/broker/provision.ts).
+ * De toestand staat in de kluis onder console.aanbieder.
  * De Android-app heeft hetzelfde in Java (android/core Aanbieder.java); de JSON van de routes is gelijk.
  */
 import crypto from "node:crypto";
@@ -10,20 +14,22 @@ import dnsp from "node:dns/promises";
 import nodemailer from "nodemailer";
 import type { AdminConfig } from "./vault.js";
 import { DESEC_URL } from "./extras.js";
-import { makeProvider, scwApi } from "../cluster/providers.js";
+import { makeProvider, scwApi, type Provider } from "../cluster/providers.js";
 import { prepareStore, type StepResult } from "../cluster/admin.js";
 import type { StoreConfig } from "../cluster/stores.js";
 import { dienstUserData } from "../cluster/cloudinit.js";
 import { deriveKey, randomKeyHex } from "../cluster/crypto.js";
+import { fetchSizes, pickSize, type ServerOffer, type StoreOffer, type SizeOption } from "./catalog.js";
 
 export const MOLLIE_URL = () => (process.env.EIGEN_MOLLIE_URL ?? "https://api.mollie.com/v2").replace(/\/+$/, "");
 export const OPENPROVIDER_URL = () => (process.env.EIGEN_OPENPROVIDER_URL ?? "https://api.openprovider.eu/v1beta").replace(/\/+$/, "");
 
 export const PROJECT_NAME = "eigen-cloud-dienst";
+/** Waar een Dienst van vóór de keuze van aanbieder staat (alleen Scaleway kon toen). */
 export const SERVER_REGION = "nl-ams-1";
 export const SERVER_SIZE = "DEV1-S";
 export const BACKUP_REGION = "fr-par";
-const STEPS = ["bedrijf", "accounts", "adres", "opzetten", "klaar"] as const;
+const STEPS = ["bedrijf", "accounts", "adres", "server", "opzetten", "klaar"] as const;
 type Step = (typeof STEPS)[number];
 
 export interface AanbiederState {
@@ -33,15 +39,23 @@ export interface AanbiederState {
   accounts?: { scalewaySecretKey?: string; scalewayOrgId?: string; mollieKey?: string; desecToken?: string; smtpUrl?: string; openproviderUser?: string; openproviderPass?: string; adresUrl?: string; mailFrom?: string };
   checked?: Record<string, boolean>;
   projectId?: string;
-  backup?: { endpoint: string; region: string; bucket?: string; accessKey?: string; secretKey?: string; applicationId?: string; policyId?: string };
-  server?: { provider: "scaleway"; region: string; size: string; serverId: string; ipv4?: string; ipv6?: string; createdAt: number; userDataCleared?: boolean } | null;
+  /** Waar de server van de Dienst komt: een aanbieder met servers uit de registry, regio en (kleinste geschikte) formaat. */
+  hosting?: { provider: string; region: string; size: string; monthly: number | null };
+  /** Inloggegevens per aanbieder voor de server (niet voor Scaleway: dat is de sleutel bij Accounts). Nooit in een antwoord. */
+  keys?: Record<string, Record<string, string>>;
+  /**
+   * Back-upopslag (S3) bij een opslag-aanbieder uit de registry (`provider`), of "custom". Scaleway zonder eigen
+   * sleutels: de console maakt zelf een sleutel die alleen opslag in het project mag (applicationId/policyId).
+   */
+  backup?: { provider: string; endpoint: string; region: string; country?: string; bucket?: string; accessKey?: string; secretKey?: string; applicationId?: string; policyId?: string };
+  server?: { provider: string; region: string; size: string; serverId: string; ipv4?: string; ipv6?: string; createdAt: number; userDataCleared?: boolean } | null;
   /** BROKER_SECRET van de Dienst (64 hex); de back-ups zijn daarmee versleuteld. */
   secret?: string;
   createdAt?: number;
   lastHealth?: Health | null;
   removed?: boolean;
-  /** Vervangen servers die nog weg moeten. */
-  retired?: string[];
+  /** Vervangen servers die nog weg moeten (vroeger alleen een id: dat was altijd Scaleway). */
+  retired?: { provider: string; serverId: string }[];
   /** Vorige adressen (subnaam onder het domein) waarvan de cloud het record moet weghalen. */
   dnsRemove?: string[];
 }
@@ -58,11 +72,30 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const mask = (v?: string) => (v ? "•".repeat(8) + v.slice(-4) : "");
 const fail = (msg: string, steps?: StepResult[]) => Object.assign(new Error(msg), { steps });
 
+/**
+ * Oudere kluizen (alleen Scaleway) bijwerken naar de vorm van nu: server en back-up krijgen hun aanbieder, vervangen
+ * servers worden {provider, serverId}, en een Dienst die er is (of was) krijgt de plek waar hij stond.
+ */
+export function migrate(a: AanbiederState): AanbiederState {
+  const x = a as AanbiederState & { retired?: (string | { provider: string; serverId: string })[] };
+  if (x.retired) x.retired = x.retired.map((r) => (typeof r === "string" ? { provider: "scaleway", serverId: r } : r));
+  if (a.server && !a.server.provider) (a.server as { provider: string }).provider = "scaleway";
+  if (a.backup && !a.backup.provider) a.backup = { ...a.backup, provider: "scaleway", country: a.backup.country ?? "FR" };
+  if (!a.hosting && (a.server || a.removed || a.backup?.bucket)) {
+    a.hosting = { provider: a.server?.provider ?? "scaleway", region: a.server?.region ?? SERVER_REGION, size: a.server?.size ?? SERVER_SIZE, monthly: null };
+  }
+  if (a.step === "opzetten" && (!a.hosting || !a.backup)) a.step = "server";
+  return a;
+}
+
 function state(c: AdminConfig): AanbiederState {
   const con = c.console as AdminConfig["console"] & { aanbieder?: AanbiederState };
-  return (con.aanbieder ??= { step: "bedrijf" });
+  return migrate((con.aanbieder ??= { step: "bedrijf" }));
 }
-const existing = (c: AdminConfig) => (c.console as { aanbieder?: AanbiederState }).aanbieder ?? null;
+const existing = (c: AdminConfig) => {
+  const a = (c.console as { aanbieder?: AanbiederState }).aanbieder;
+  return a ? migrate(a) : null;
+};
 
 /** De mailserver van de Dienst: zelf ingevuld, anders de relay van je eigen cloud. */
 const smtpOf = (c: AdminConfig, a: AanbiederState) => a.accounts?.smtpUrl || c.console.mailRelay || "";
@@ -92,9 +125,34 @@ export function dnsInfo(c: AdminConfig) {
 
 const accountsReady = (a: AanbiederState) => ["scaleway", "mollie", "desec", "smtp"].every((k) => a.checked?.[k] === true) && a.checked?.adres !== false;
 const companyReady = (a: AanbiederState) => !!(a.company?.name && a.company.email);
+const serverReady = (a: AanbiederState) => !!(a.hosting && a.backup);
+
+/** Aanbieders en opslag uit de registry (de console geeft ze mee; in tests met een nep-S3). */
+export interface Offers {
+  serverOffers: () => ServerOffer[];
+  storeOffers: () => StoreOffer[];
+}
+
+/** De server: aanbieder, regio (met stad en land) en formaat, zoals de console hem laat zien. */
+function hostingView(a: AanbiederState, o: Offers) {
+  const h = a.hosting;
+  if (!h) return null;
+  const offer = o.serverOffers().find((x) => x.id === h.provider);
+  const r = offer?.regions.find((x) => x.id === h.region);
+  return { provider: h.provider, name: offer?.name ?? h.provider, region: h.region, regionLabel: r?.label ?? h.region, city: r?.city ?? h.region, country: r?.country ?? null, size: h.size, monthly: h.monthly ?? null };
+}
+
+/** De back-upplek: aanbieder, regio en (zodra er back-ups zijn) de bucket; die plek ligt dan vast. */
+function backupView(a: AanbiederState, o: Offers) {
+  const b = a.backup;
+  if (!b) return null;
+  const offer = o.storeOffers().find((x) => x.id === b.provider);
+  const r = offer?.regions.find((x) => x.id === b.region) ?? offer?.regions.find((x) => !!x.endpoint && x.endpoint === b.endpoint);
+  return { provider: b.provider, name: offer?.name ?? b.provider, region: b.region, regionLabel: r?.label ?? hostOf(b.endpoint) ?? b.region, country: b.country || r?.country || null, bucket: b.bucket ?? null, auto: b.provider === "scaleway" && (!b.accessKey || !!b.applicationId) };
+}
 
 /** Wat de console mag laten zien: geen geheimen, alleen de laatste 4 tekens. */
-export function view(c: AdminConfig) {
+export function view(c: AdminConfig, o: Offers) {
   const a = existing(c);
   const defaultUrl = c.domain ? `https://dienst.${c.domain}` : null;
   if (!a) return { started: false, step: null, defaultUrl, defaultEmail: c.console.alertEmail || null };
@@ -116,9 +174,12 @@ export function view(c: AdminConfig) {
       adresUrl: acc.adresUrl ?? "", mailFrom: mailFromOf(c, a),
     },
     checked: a.checked ?? {},
-    ready: { bedrijf: companyReady(a), accounts: accountsReady(a), adres: !!a.url },
-    server: a.server ? { region: a.server.region, size: a.server.size, serverId: a.server.serverId, ipv4: a.server.ipv4 ?? null, ipv6: a.server.ipv6 ?? null, createdAt: a.server.createdAt } : null,
-    backup: a.backup?.bucket ? { bucket: a.backup.bucket, region: a.backup.region } : null,
+    ready: { bedrijf: companyReady(a), accounts: accountsReady(a), adres: !!a.url, server: serverReady(a) },
+    hosting: hostingView(a, o),
+    /** Aanbieders waarvoor de Dienst eigen inloggegevens heeft (Scaleway: altijd, via Accounts). */
+    hostingKeys: ["scaleway", ...Object.keys(a.keys ?? {}).filter((k) => k !== "scaleway")],
+    server: a.server ? { provider: a.server.provider, region: a.server.region, size: a.server.size, serverId: a.server.serverId, ipv4: a.server.ipv4 ?? null, ipv6: a.server.ipv6 ?? null, createdAt: a.server.createdAt } : null,
+    backup: backupView(a, o),
     dns: dnsInfo(c),
     createdAt: a.createdAt ?? null,
     lastHealth: a.lastHealth ?? null,
@@ -300,11 +361,97 @@ export function saveAdres(c: AdminConfig, b: { url?: string }) {
   a.url = url;
   a.dnsRemove = (a.dnsRemove ?? []).filter((x) => x !== dnsInfo(c).sub);
   if (!a.dnsRemove.length) delete a.dnsRemove;
-  if (a.step === "adres") a.step = "opzetten";
+  if (a.step === "adres") a.step = "server";
   return { ok: true, url, step: a.step, dns: dnsInfo(c), pending: !!a.server };
 }
 
-// ───────── 4. Opzetten ─────────
+// ───────── 4. Server en back-ups ─────────
+
+/**
+ * Waar de server van de Dienst komt. Zonder `region`: inloggen controleren (alleen lezen) en per regio het kleinste
+ * geschikte formaat (≥ 2 GB, zoals bij de cloud) met de live prijs. Met `region`: die keuze bewaren.
+ * Inloggegevens: Scaleway gebruikt de sleutel bij Accounts; andere aanbieders wat je cloud al heeft gekoppeld, met wat
+ * nu is ingevuld eroverheen ("••…" laat de bewaarde staan). Een andere keuze gaat in bij (opnieuw) opzetten.
+ */
+export async function saveServer(c: AdminConfig, b: { provider?: string; region?: string; fields?: Record<string, unknown> }, deps: Offers) {
+  const a = state(c);
+  const offer = deps.serverOffers().find((o) => o.id === b.provider);
+  if (!offer) throw new Error("Kies een aanbieder voor de server");
+  let fields: Record<string, string>;
+  if (offer.id === "scaleway") {
+    const key = a.accounts?.scalewaySecretKey;
+    if (!key || a.checked?.scaleway !== true) throw new Error("Controleer eerst je Scaleway-sleutel bij Accounts");
+    fields = { secretKey: key, projectId: a.projectId ?? "" };
+  } else {
+    fields = { ...(c.providers[offer.id] ?? {}), ...(a.keys?.[offer.id] ?? {}) };
+    for (const [k, v] of Object.entries(b.fields ?? {})) {
+      if (typeof v !== "string") continue;
+      const t = v.trim();
+      if (t && !t.startsWith("••")) fields[k] = t;
+    }
+    const missing = offer.fields.filter((f) => !f.optional && !fields[f.key]);
+    if (missing.length) throw new Error(`Vul in: ${missing.map((f) => f.label).join(", ")}`);
+    try { await makeProvider(offer.id, fields).list(PROJECT_NAME); }
+    catch (e) { throw new Error(`Inloggen bij ${offer.name} lukt niet: ${(e as Error).message.replace(/https?:\/\/\S+/, "").slice(0, 160)}`); }
+    a.keys = { ...(a.keys ?? {}), [offer.id]: fields };
+  }
+  if (!b.region) {
+    const regions = await Promise.all(offer.regions.map(async (r) => {
+      const base = { region: r.id, label: r.label, city: r.city, country: r.country };
+      try {
+        const s = pickSize(await fetchSizes(offer.id, fields, r.id), "data");
+        return s ? { ...base, size: s.size, sizeLabel: s.label, monthly: s.monthly } : { ...base, error: "Geen geschikt formaat (minstens 2 GB geheugen)" };
+      } catch { return { ...base, error: "Prijzen ophalen lukt niet" }; }
+    }));
+    return { ok: true, provider: offer.id, regions };
+  }
+  const r = offer.regions.find((x) => x.id === b.region);
+  if (!r) throw new Error("Kies een regio");
+  let s: SizeOption | undefined;
+  try { s = pickSize(await fetchSizes(offer.id, fields, r.id), "data"); }
+  catch { throw new Error(`Prijzen ophalen bij ${offer.name} lukt niet`); }
+  if (!s) throw new Error(`Geen geschikt formaat in ${r.label} (minstens 2 GB geheugen)`);
+  a.hosting = { provider: offer.id, region: r.id, size: s.size, monthly: s.monthly };
+  return { ok: true, provider: offer.id, hosting: hostingView(a, deps), pending: !!a.server };
+}
+
+/**
+ * Waar de back-ups komen: een gekoppelde opslag van je cloud (`store`, met diens sleutels, een eigen bucket), of een
+ * opslag-aanbieder uit de registry met regio en sleutels. Scaleway zonder sleutels: de console maakt er zelf een.
+ * Mag bij een andere aanbieder dan de server. Zodra er back-ups zijn, ligt de plek vast (de nieuwe server zet ze terug).
+ */
+export function saveBackup(c: AdminConfig, b: { provider?: string; region?: string; endpoint?: string; accessKey?: string; secretKey?: string; store?: string }, deps: Offers) {
+  const a = state(c);
+  if (a.backup?.bucket) throw new Error(`De back-ups staan al in ${a.backup.bucket}; die plek blijft hetzelfde`);
+  const offers = deps.storeOffers().filter((o) => o.id !== "localfs");
+  if (b.store) {
+    const st = c.stores.find((x) => x.name === b.store && x.type === "s3");
+    if (!st?.endpoint || !st.accessKey || !st.secretKey) throw new Error("Kies een gekoppelde opslag");
+    const offer = offers.find((o) => o.regions.some((r) => !!r.endpoint && r.endpoint === st.endpoint));
+    a.backup = { provider: offer?.id ?? "custom", endpoint: st.endpoint, region: st.region ?? "us-east-1", country: st.country ?? "", accessKey: st.accessKey, secretKey: st.secretKey };
+    return { ok: true, backup: backupView(a, deps) };
+  }
+  const offer = offers.find((o) => o.id === b.provider);
+  if (!offer) throw new Error("Kies waar de back-ups komen");
+  const r = offer.regions.find((x) => x.id === b.region);
+  if (!r) throw new Error("Kies een locatie voor de back-ups");
+  const endpoint = offer.customEndpoint ? String(b.endpoint ?? "").trim() : r.endpoint;
+  if (!/^https?:\/\/[^\s/]+/.test(endpoint)) throw new Error("Vul de endpoint-URL in (begint met https://)");
+  const region = r.id === "eigen" ? "us-east-1" : r.id;
+  const accessKey = String(b.accessKey ?? "").trim(), secretKey = String(b.secretKey ?? "").trim();
+  if (/[\r\n]/.test(accessKey + secretKey)) throw new Error("Een sleutel past op één regel");
+  if (offer.id === "scaleway" && !accessKey && !secretKey) {
+    // Scaleway zonder eigen sleutels: bij het opzetten maakt de console een sleutel die alleen in het project mag.
+    const prev = a.backup;
+    a.backup = prev?.provider === "scaleway" && prev.applicationId && prev.endpoint === endpoint ? prev : { provider: "scaleway", endpoint, region, country: r.country };
+  } else {
+    if (!accessKey || !secretKey) throw new Error("Vul de toegangssleutel en geheime sleutel in");
+    a.backup = { provider: offer.id, endpoint, region, country: r.country, accessKey, secretKey };
+  }
+  return { ok: true, backup: backupView(a, deps) };
+}
+
+// ───────── 5. Opzetten ─────────
 
 async function scw(method: string, p: string, key: string, body?: unknown) {
   let r;
@@ -362,9 +509,7 @@ async function handover(a: AanbiederState): Promise<{ ok: boolean; detail: strin
   } catch { return { ok: false, detail: "De server is niet bereikbaar; de nieuwe server krijgt de laatste back-up" }; }
 }
 
-export interface Deps {
-  /** Endpoint van Scaleway Object Storage in een regio (in tests een nep-S3). */
-  storeEndpoint: (region: string) => string;
+export interface Deps extends Offers {
   save: () => void;
   /** Wachten tussen pogingen (een nieuwe sleutel werkt bij Scaleway soms pas na een paar seconden). */
   sleep?: (ms: number) => Promise<void>;
@@ -379,9 +524,12 @@ async function ensureProject(a: AanbiederState, key: string, org: string) {
   return (a.projectId = id);
 }
 
+/** Back-ups bij Scaleway zonder eigen sleutels: de console maakt er zelf een (alleen opslag, alleen in het project). */
+const autoBackup = (a: AanbiederState) => a.backup?.provider === "scaleway" && !a.backup.accessKey;
+
 /** Een eigen sleutel voor de back-ups: alleen Object Storage, alleen in het project van de Dienst. */
 async function ensureBackupKey(a: AanbiederState, key: string, org: string, deps: Deps) {
-  const bk = (a.backup ??= { endpoint: deps.storeEndpoint(BACKUP_REGION), region: BACKUP_REGION });
+  const bk = a.backup!;
   if (bk.accessKey && bk.secretKey) return;
   const name = `${PROJECT_NAME}-backup`;
   if (!bk.applicationId) {
@@ -408,7 +556,7 @@ async function ensureBackupKey(a: AanbiederState, key: string, org: string, deps
 async function ensureBucket(c: AdminConfig, a: AanbiederState, deps: Deps) {
   const bk = a.backup!;
   const bucket = bk.bucket ?? `${c.cluster}-dienst-backup-${crypto.randomBytes(3).toString("hex")}`;
-  const store: StoreConfig = { name: "dienst-backup", type: "s3", purpose: "backup", country: "FR", endpoint: bk.endpoint, region: bk.region, bucket, accessKey: bk.accessKey, secretKey: bk.secretKey };
+  const store: StoreConfig = { name: "dienst-backup", type: "s3", purpose: "backup", country: bk.country ?? "", endpoint: bk.endpoint, region: bk.region, bucket, accessKey: bk.accessKey, secretKey: bk.secretKey };
   let steps: StepResult[] = [];
   for (let i = 0; i < 4; i++) {
     steps = await prepareStore(store);
@@ -422,29 +570,54 @@ async function ensureBucket(c: AdminConfig, a: AanbiederState, deps: Deps) {
   throw new Error(`Back-upopslag klaarzetten lukte niet: ${steps.filter((x) => !x.ok).map((x) => x.label + (x.detail ? ` (${x.detail})` : "")).join(", ")}`);
 }
 
-const provider = (a: AanbiederState) => makeProvider("scaleway", { secretKey: a.accounts!.scalewaySecretKey!, projectId: a.projectId! });
+/**
+ * De Provider (src/cluster/adapters) voor servers van de Dienst bij een aanbieder. Scaleway: de sleutel bij Accounts
+ * in het project eigen-cloud-dienst; andere aanbieders: de inloggegevens die bij "Server en back-ups" zijn gekozen.
+ */
+function providerFor(c: AdminConfig, a: AanbiederState, id: string): Provider {
+  if (id === "scaleway") {
+    const key = a.accounts?.scalewaySecretKey;
+    if (!key || !a.projectId) throw new Error("Geen Scaleway-sleutel of project voor de server");
+    return makeProvider("scaleway", { secretKey: key, projectId: a.projectId });
+  }
+  const f = a.keys?.[id] ?? c.providers[id];
+  if (!f) throw new Error(`Geen inloggegevens voor ${id}; kies de server opnieuw`);
+  return makeProvider(id, f);
+}
 
 /**
  * Opzetten, of (als er al een server is) opnieuw opzetten: de huidige server maakt een laatste back-up, er komt een
  * nieuwe server die die back-up bij de eerste start terugzet, het adres wijst naar de nieuwe, de oude gaat weg.
- * Zo werken ook gewijzigde instellingen: die staan in de user-data van de nieuwe server.
+ * Zo werken ook gewijzigde instellingen (en een andere aanbieder of regio): die staan in de user-data van de nieuwe server.
  */
 export async function opzetten(c: AdminConfig, deps: Deps) {
   const a = state(c);
   if (!companyReady(a)) throw new Error("Vul eerst je bedrijfsgegevens in");
   if (!accountsReady(a)) throw new Error("Controleer eerst je accounts (stap 2)");
   if (!a.url) throw new Error("Kies eerst het adres van je Dienst");
+  if (!a.hosting) throw new Error("Kies eerst waar de server van je Dienst komt");
+  if (!a.backup) throw new Error("Kies eerst waar de back-ups komen");
+  const hosting = a.hosting;
+  const offer = deps.serverOffers().find((o) => o.id === hosting.provider);
+  if (!offer) throw new Error(`Onbekende aanbieder ${hosting.provider}`);
+  const where = offer.regions.find((r) => r.id === hosting.region);
   const key = a.accounts!.scalewaySecretKey!, org = a.accounts!.scalewayOrgId!;
   const steps: StepResult[] = [];
   const replace = !!a.server?.serverId;
   try {
-    await ensureProject(a, key, org);
-    deps.save();
-    steps.push({ label: `Project ${PROJECT_NAME} bij Scaleway`, ok: true });
-    await ensureBackupKey(a, key, org, deps);
-    steps.push({ label: "Sleutel voor de back-ups (werkt alleen in dit project)", ok: true });
+    const auto = autoBackup(a);
+    if (hosting.provider === "scaleway" || auto) {
+      await ensureProject(a, key, org);
+      deps.save();
+      steps.push({ label: `Project ${PROJECT_NAME} bij Scaleway`, ok: true });
+    }
+    if (auto) {
+      await ensureBackupKey(a, key, org, deps);
+      steps.push({ label: "Sleutel voor de back-ups (werkt alleen in dit project)", ok: true });
+    }
     await ensureBucket(c, a, deps);
-    steps.push({ label: "Back-upopslag in Parijs, 30 dagen niet te wissen", ok: true, detail: a.backup!.bucket });
+    const bv = backupView(a, deps)!;
+    steps.push({ label: `Back-upopslag bij ${bv.name} (${bv.regionLabel}), 30 dagen niet te wissen`, ok: true, detail: a.backup.bucket });
     a.secret ??= randomKeyHex();
     deps.save();
     if (replace) {
@@ -452,23 +625,23 @@ export async function opzetten(c: AdminConfig, deps: Deps) {
       steps.push({ label: "Laatste back-up van de huidige server", ok: h.ok, detail: h.detail });
     }
     const nodeId = `dienst-${crypto.randomBytes(3).toString("hex")}`;
-    const info = await provider(a).create({ cluster: PROJECT_NAME, nodeId, kind: "data", region: SERVER_REGION, size: SERVER_SIZE, userData: serverUserData(c, a) });
+    const info = await providerFor(c, a, hosting.provider).create({ cluster: PROJECT_NAME, nodeId, kind: "data", region: hosting.region, size: hosting.size, userData: serverUserData(c, a) });
     const old = a.server;
-    a.server = { provider: "scaleway", region: SERVER_REGION, size: SERVER_SIZE, serverId: info.serverId, ...(info.ipv4 ? { ipv4: info.ipv4 } : {}), ...(info.ipv6 ? { ipv6: info.ipv6 } : {}), createdAt: Date.now() };
+    a.server = { provider: hosting.provider, region: hosting.region, size: hosting.size, serverId: info.serverId, ...(info.ipv4 ? { ipv4: info.ipv4 } : {}), ...(info.ipv6 ? { ipv6: info.ipv6 } : {}), createdAt: Date.now() };
     a.removed = false;
     a.createdAt ??= Date.now();
     a.lastHealth = null;
     a.step = "klaar";
-    if (old?.serverId) a.retired = [...(a.retired ?? []), old.serverId];
+    if (old?.serverId) a.retired = [...(a.retired ?? []), { provider: old.provider, serverId: old.serverId }];
     deps.save();
-    steps.push({ label: `Server in Amsterdam (${SERVER_SIZE})`, ok: true, detail: info.ipv4 ? `IP-adres ${info.ipv4}` : undefined });
+    steps.push({ label: `Server bij ${offer.name} in ${where?.city ?? hosting.region} (${hosting.size})`, ok: true, detail: info.ipv4 ? `IP-adres ${info.ipv4}` : undefined });
     if (old?.serverId) steps.push({ label: "De vorige server wordt opgeruimd", ok: true });
     const d = dnsInfo(c);
     steps.push(d.managed
       ? { label: `${d.host} wijst naar ${info.ipv4}`, ok: true, detail: "Je cloud zet dit record zelf in je DNS" }
       : { label: `Zet bij je DNS een A-record: ${d.host} → ${info.ipv4}`, ok: true });
     if (a.retired?.length) void cleanupRetired(c, deps);
-    return { ok: true, replaced: replace, steps, server: view(c).server };
+    return { ok: true, replaced: replace, steps, server: view(c, deps).server };
   } catch (e) {
     deps.save();
     throw fail((e as Error).message, steps);
@@ -476,18 +649,20 @@ export async function opzetten(c: AdminConfig, deps: Deps) {
 }
 
 let cleaning: Promise<unknown> | null = null;
-/** Vervangen of verwijderde servers weghalen bij Scaleway (op de achtergrond; mislukt het, dan de volgende keer). */
+/** Vervangen of verwijderde servers weghalen bij hun aanbieder (op de achtergrond; mislukt het, dan de volgende keer). */
 export function cleanupRetired(c: AdminConfig, deps: Pick<Deps, "save">) {
   const a = existing(c);
   if (!a?.retired?.length || cleaning) return cleaning ?? Promise.resolve();
   cleaning = (async () => {
     // Ook servers die tijdens het opruimen bij de lijst komen (bijv. verwijderen vlak na opnieuw opzetten).
     const tried = new Set<string>();
-    for (let id = a.retired?.[0]; id !== undefined; id = (a.retired ?? []).find((x) => !tried.has(x))) {
-      tried.add(id);
+    const k = (x: { provider: string; serverId: string }) => `${x.provider}/${x.serverId}`;
+    for (let x = a.retired?.[0]; x !== undefined; x = (a.retired ?? []).find((y) => !tried.has(k(y)))) {
+      const cur = x;
+      tried.add(k(cur));
       try {
-        await provider(a).destroy(id);
-        a.retired = a.retired!.filter((x) => x !== id);
+        await providerFor(c, a, cur.provider).destroy(cur.serverId);
+        a.retired = a.retired!.filter((y) => k(y) !== k(cur));
         if (!a.retired.length) delete a.retired;
         deps.save();
       } catch { /* volgende keer */ }
@@ -496,7 +671,7 @@ export function cleanupRetired(c: AdminConfig, deps: Pick<Deps, "save">) {
   return cleaning;
 }
 
-// ───────── 5. Klaar: status, verwijderen ─────────
+// ───────── 6. Klaar: status, verwijderen ─────────
 
 export async function status(c: AdminConfig, deps: Pick<Deps, "save">) {
   const a = existing(c);
@@ -511,12 +686,14 @@ export async function status(c: AdminConfig, deps: Pick<Deps, "save">) {
     h = { at: Date.now(), reachable: false, version: null, uptime: null, lastBackupAt: a.lastHealth?.lastBackupAt ?? null, backup: null, closing: false, error: /antwoordt/.test(m) ? m : "Nog niet bereikbaar" };
   }
   a.lastHealth = h;
-  // De user-data bevat de geheimen van de Dienst: weghalen bij Scaleway zodra de server draait.
+  // De user-data bevat de geheimen van de Dienst: weghalen bij de aanbieder zodra de server draait (als die dat kan).
   if (h.reachable && !a.server.userDataCleared) {
-    const [zone, id] = a.server.serverId.split("/");
     try {
-      const r = await http(`${scwApi()}/instance/v1/zones/${zone}/servers/${id}/user_data/cloud-init`, { method: "DELETE", headers: { "x-auth-token": a.accounts?.scalewaySecretKey ?? "" } });
-      if (r.ok || r.status === 404) a.server.userDataCleared = true;
+      const p = providerFor(c, a, a.server.provider);
+      if (p.clearUserData) {
+        await p.clearUserData(a.server.serverId);
+        a.server.userDataCleared = true;
+      }
     } catch { /* volgende keer */ }
   }
   const host = hostOf(a.url)!;
@@ -533,7 +710,7 @@ export async function verwijderen(c: AdminConfig, b: { confirm?: string }, deps:
   const host = hostOf(a.url);
   if (String(b.confirm ?? "").trim().toLowerCase() !== host) throw new Error(`Typ ${host} om te bevestigen`);
   const h = await handover(a);
-  a.retired = [...(a.retired ?? []), a.server.serverId];
+  a.retired = [...(a.retired ?? []), { provider: a.server.provider, serverId: a.server.serverId }];
   a.server = null;
   a.removed = true;
   a.lastHealth = null;

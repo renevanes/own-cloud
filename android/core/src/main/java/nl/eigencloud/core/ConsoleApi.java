@@ -729,7 +729,7 @@ public final class ConsoleApi {
 
             // ── Aanbieder worden: je eigen Eigen Cloud Dienst opzetten en bijhouden ──
             case "GET /api/aanbieder":
-                return ok(Aanbieder.view(c));
+                return ok(Aanbieder.view(c, aanbiederDeps()));
             case "POST /api/aanbieder/stap": {
                 Map<String, Object> r = Aanbieder.setStep(c, Json.str(b, "step") == null ? "" : Json.str(b, "step"));
                 save();
@@ -747,6 +747,16 @@ public final class ConsoleApi {
             }
             case "POST /api/aanbieder/adres": {
                 Map<String, Object> r = Aanbieder.saveAdres(c, b);
+                save();
+                return ok(r);
+            }
+            case "POST /api/aanbieder/server": {
+                Map<String, Object> r = Aanbieder.saveServer(c, b, aanbiederDeps());
+                save();
+                return ok(r);
+            }
+            case "POST /api/aanbieder/backup": {
+                Map<String, Object> r = Aanbieder.saveBackup(c, b, aanbiederDeps());
                 save();
                 return ok(r);
             }
@@ -781,6 +791,15 @@ public final class ConsoleApi {
                 Admin.Status st = Admin.clusterStatus(c, Console.knownUrls(c));
                 return ok(Json.obj("state", Console.state(st, launching()), "domain", c.get("domain"), "appUrl", Console.appUrl(c),
                         "manifest", st.manifest, "live", st.live, "launch", launchJson()));
+            }
+            case "GET /api/costs": {
+                Admin.Status st = Admin.clusterStatus(c, Console.knownUrls(c));
+                return ok(Costs.view(c, st.manifest, st.live, catalog, "1".equals(query(path, "fresh"))));
+            }
+            case "POST /api/costs/budget": {
+                Map<String, Object> r = Costs.setBudget(c, b.get("budget"));
+                save();
+                return ok(r);
             }
             case "POST /api/action": {
                 Admin.Status st = Admin.clusterStatus(c, Console.knownUrls(c));
@@ -842,13 +861,12 @@ public final class ConsoleApi {
         };
     }
 
-    /** Wat Aanbieder nodig heeft: het opslag-endpoint per regio (uit de catalogus) en bewaren. */
+    /** Wat Aanbieder nodig heeft: de aanbieders en opslag uit de catalogus, en bewaren. */
     private Aanbieder.Deps aanbiederDeps() {
         return new Aanbieder.Deps() {
-            @Override public String storeEndpoint(String region) {
-                for (Object r : Json.listAt(catalog.storeOffer("scaleway"), "regions")) if (region.equals(Json.str(r, "id"))) return Json.str(r, "endpoint");
-                return "https://s3." + region + ".scw.cloud";
-            }
+            @Override public List<Map<String, Object>> serverOffers() { return catalog.serverOffers(); }
+
+            @Override public List<Map<String, Object>> storeOffers() { return catalog.storeOffers(); }
 
             @Override public void save() throws IOException { ConsoleApi.this.save(); }
         };

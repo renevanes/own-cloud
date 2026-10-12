@@ -609,7 +609,7 @@ function renderHealth() {
   $("#healthSummary").textContent = summary.fail || summary.warn
     ? `${summary.ok} in orde, ${summary.warn} let op, ${summary.fail} probleem${summary.fail === 1 ? "" : "en"} · gecontroleerd om ${fmtTime(checkedAt)}`
     : `Alles in orde · gecontroleerd om ${fmtTime(checkedAt)}`;
-  const groups = ["Mail", "Domein", "Back-up", "Servers", "Meldingen"];
+  const groups = ["Mail", "Domein", "Back-up", "Servers", "Meldingen", "Kosten"];
   const order = { fail: 0, warn: 1, ok: 2, skip: 3 };
   $("#healthList").innerHTML = groups.map((g) => {
     const items = checks.filter((c) => c.group === g).sort((a, b) => order[a.status] - order[b.status]);

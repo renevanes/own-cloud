@@ -104,6 +104,15 @@ public final class ScalewayProvider implements Provider {
         }
     }
 
+    /**
+     * Removes the cloud-init script (with secrets) at Scaleway once the server runs (clearUserData in TS). A server
+     * that no longer exists is fine.
+     */
+    public void clearUserData(String serverId) throws IOException {
+        String[] p = serverId.split("/", -1);
+        ProviderApi.call("DELETE", base(p[0]) + "/servers/" + (p.length > 1 ? p[1] : "") + "/user_data/cloud-init", h(), null, 404);
+    }
+
     @Override
     public List<ServerRef> list(String cluster) throws IOException {
         List<ServerRef> out = new ArrayList<>();

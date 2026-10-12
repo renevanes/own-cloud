@@ -46,6 +46,11 @@ export interface Provider {
   list(cluster: string): Promise<{ serverId: string; nodeId: string }[]>;
   /** Reverse DNS (PTR) van de IP-adressen zetten, als de aanbieder dat via de API kan. */
   setPtr?(server: ServerInfo, hostname: string): Promise<void>;
+  /**
+   * Het cloud-init-script (met geheimen) bij de aanbieder weghalen zodra de server draait, als de aanbieder het via
+   * de API laat lezen en wissen (Scaleway). Bestaat de server niet meer: geen fout.
+   */
+  clearUserData?(serverId: string): Promise<void>;
   country(region: string): string;
 }
 
@@ -109,6 +114,26 @@ export interface StorageCapability {
   keyHelp: string;
   /** Anders dan de signupUrl van de adapter (leeg = geen). */
   signupUrl?: string;
+  /**
+   * Lijstprijs in euro per GB (10^9 bytes) per maand voor wat er in de bucket staat, of null (of weggelaten) als we
+   * hem niet betrouwbaar weten; de console toont dan "onbekend". Zie `priceInfo` voor btw, bron en datum.
+   * Gebruikt voor de kostenschatting (src/cluster/costs.ts); uitgaand verkeer telt daarin niet mee.
+   */
+  pricePerGbMonth?: number | null;
+  priceInfo?: StoragePriceInfo;
+}
+
+export interface StoragePriceInfo {
+  /** Afgerekend in stappen van zoveel GB, met minstens één stap (UpCloud: per 250 GB). */
+  stepGb?: number;
+  /** "excl" = exclusief btw; "onbekend" = de prijslijst zegt het niet. */
+  vat: "excl" | "onbekend";
+  /** Datum waarop de prijs op de prijslijst is nagekeken (JJJJ-MM-DD). */
+  checked: string;
+  /** Waar de prijs staat. */
+  source: string;
+  /** Toelichting (Nederlands). */
+  note?: string;
 }
 
 export interface DnsCapability {

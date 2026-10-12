@@ -1441,9 +1441,9 @@ async function helpPanel(box, fail) {
 
 // ═════════ Aanbieder worden: je eigen Eigen Cloud Dienst ═════════
 
-const A_STEPS = [["bedrijf", "Bedrijf"], ["accounts", "Accounts"], ["adres", "Adres"], ["opzetten", "Opzetten"]];
+const A_STEPS = [["bedrijf", "Bedrijf"], ["accounts", "Accounts"], ["adres", "Adres"], ["server", "Server en back-ups"], ["opzetten", "Opzetten"]];
 const A_HELP = {
-  scaleway: `Maak in de Scaleway-console onder IAM een applicatie "eigen-cloud-dienst" met de rechten ProjectManager, IAMManager, InstancesFullAccess, ObjectStorageFullAccess en TransactionalEmailFullAccess, en maak daarvoor een API-sleutel. Het organisatie-ID staat bij Organisatie → Instellingen. <a href="https://console.scaleway.com/iam/applications" target="_blank" rel="noopener">IAM openen</a>`,
+  scaleway: `Hiermee zet je Dienst de clouds van je klanten op. Maak in de Scaleway-console onder IAM een applicatie "eigen-cloud-dienst" met de rechten ProjectManager, IAMManager, InstancesFullAccess, ObjectStorageFullAccess en TransactionalEmailFullAccess, en maak daarvoor een API-sleutel. Het organisatie-ID staat bij Organisatie → Instellingen. De server van je Dienst zelf mag ook bij een andere aanbieder staan. <a href="https://console.scaleway.com/iam/applications" target="_blank" rel="noopener">IAM openen</a>`,
   mollie: `Voor de betalingen van je klanten. Begin met de testsleutel (test_…); later zet je hier de live-sleutel. <a href="https://my.mollie.com/dashboard/developers/api-keys" target="_blank" rel="noopener">Sleutels bij Mollie</a>`,
   desec: `Voor de DNS van je klanten. Maak bij deSEC een token dat domeinen mag aanmaken. <a href="https://desec.io/tokens" target="_blank" rel="noopener">Tokens bij deSEC</a>`,
   smtp: `Voor inlogcodes, facturen en meldingen. Leeg laten = via de mail van je eigen cloud.`,
@@ -1470,7 +1470,7 @@ async function renderAanbieder(msg) {
   let a;
   try { a = await api("/api/aanbieder"); } catch { return; }
   if (!a.started) {
-    box.innerHTML = `<h2>Aanbieder worden</h2><div class="panel"><p style="margin:0">Draai zelf een Eigen Cloud Dienst: mensen nemen dan bij jou een cloud, met jouw prijzen en jouw naam, en betalen via je eigen Mollie. De console zet de Dienst op een eigen server bij Scaleway, maakt elk uur een back-up en houdt hem bij.</p>
+    box.innerHTML = `<h2>Aanbieder worden</h2><div class="panel"><p style="margin:0">Draai zelf een Eigen Cloud Dienst: mensen nemen dan bij jou een cloud, met jouw prijzen en jouw naam, en betalen via je eigen Mollie. De console zet de Dienst op een eigen server bij een Europese aanbieder naar keuze, maakt elk uur een back-up en houdt hem bij.</p>
       <div><button class="btn" id="aStart">Aanbieder worden</button></div></div>`;
     $("#aStart").onclick = () => aStep("bedrijf").catch(() => {});
     return;
@@ -1556,10 +1556,13 @@ async function renderAanbieder(msg) {
     };
     return;
   }
+  if (a.step === "server") return aanbiederServer(box, a, head, nav, wire);
   // opzetten
-  const missing = [!a.ready.bedrijf && "je bedrijfsgegevens", !a.ready.accounts && "je accounts", !a.ready.adres && "het adres"].filter(Boolean);
+  const missing = [!a.ready.bedrijf && "je bedrijfsgegevens", !a.ready.accounts && "je accounts", !a.ready.adres && "het adres", !a.ready.server && "de server en back-ups"].filter(Boolean);
+  const h = a.hosting ?? {}, bk = a.backup ?? {};
+  const moved = a.server && (a.server.provider !== h.provider || a.server.region !== h.region);
   box.innerHTML = `${head}<form class="fields panel" id="af">
-    <p style="margin:0">${a.server ? `Je Dienst krijgt een <b>nieuwe server</b> met de nieuwe instellingen. De huidige server maakt eerst een laatste back-up; de nieuwe zet die terug. Een paar minuten is de Dienst niet bereikbaar.` : `De console maakt bij Scaleway een project <b>eigen-cloud-dienst</b> met een kleine server in Amsterdam (DEV1-S) en opslag voor de back-ups in Parijs. De Dienst staat daarna op <b>${esc(a.url ?? "")}</b>.`}</p>
+    <p style="margin:0">${a.server ? `Je Dienst krijgt een <b>nieuwe server</b>${moved ? ` bij ${esc(h.name)} in ${esc(h.city)}` : ""} met de nieuwe instellingen. De huidige server maakt eerst een laatste back-up; de nieuwe zet die terug. Een paar minuten is de Dienst niet bereikbaar.` : `De console zet een server op bij <b>${esc(h.name ?? "")}</b> in ${esc(h.city ?? "")} (${esc(h.size ?? "")}${h.monthly != null ? `, ${eur(h.monthly)} per maand` : ""}) en bewaart de back-ups bij <b>${esc(bk.name ?? "")}</b> (${esc(bk.regionLabel ?? "")}).${h.provider === "scaleway" || bk.auto ? " Bij Scaleway komt dat in een eigen project <b>eigen-cloud-dienst</b>." : ""} De Dienst staat daarna op <b>${esc(a.url ?? "")}</b>.`}</p>
     <p class="muted" style="margin:0"><small>Elk uur een versleutelde back-up, 30 dagen niet te wissen. De server werkt zichzelf 's nachts bij naar de nieuwste versie en zet de vorige terug als dat misgaat.</small></p>
     ${missing.length ? `<p class="note warn" style="margin:0">Nog niet klaar: ${esc(missing.join(", "))}.</p>` : ""}
     <ul class="results" id="aSteps"></ul>
@@ -1573,6 +1576,80 @@ async function renderAanbieder(msg) {
       $("#aSteps").innerHTML = resultItems(r.steps);
       setTimeout(() => renderAanbieder({ ok: true, text: r.replaced ? "De nieuwe server start op; over een paar minuten is je Dienst weer bereikbaar." : "Je Dienst start op. Dat duurt meestal 3 à 5 minuten." }), 1500);
     } catch (err) { if (err.data?.steps) $("#aSteps").innerHTML = resultItems(err.data.steps); formMsg(f, err.message); }
+  };
+}
+
+/** Stap "Server en back-ups": aanbieder en regio (live prijzen, kleinste geschikte formaat) en de plek van de back-ups. */
+function aanbiederServer(box, a, head, nav, wire) {
+  const servers = state.offers.servers ?? [];
+  const stores = (state.offers.stores ?? []).filter((o) => o.id !== "localfs");
+  const linked = (config?.stores ?? []).filter((s) => s.type === "s3");
+  const h = a.hosting, bk = a.backup;
+  const hasKey = (id) => id === "scaleway" || !!config?.providers?.[id] || (a.hostingKeys ?? []).includes(id);
+  box.innerHTML = `${head}<form class="fields panel" id="af">
+    <p class="muted" style="margin:0">Kies waar de server van je Dienst draait en waar de back-ups komen. Dat mag bij verschillende aanbieders. Je kunt het later wijzigen met <b>Opnieuw opzetten</b>.</p>
+    <h3 style="margin:0">Server</h3>
+    <label>Aanbieder<select name="provider">${servers.map((o) => `<option value="${esc(o.id)}" ${o.id === (h?.provider ?? "scaleway") ? "selected" : ""}>${esc(o.name)}</option>`).join("")}</select></label>
+    <div id="aKeys" class="fields"></div>
+    <div><button type="button" class="btn" id="aPrices">Regio's en prijzen ophalen</button></div>
+    <div id="aRegions" class="fields"></div>
+    <h3 style="margin:0">Back-ups</h3>
+    ${bk?.bucket ? `<p style="margin:0">De back-ups staan in <b>${esc(bk.bucket)}</b> bij ${esc(bk.name)} (${esc(bk.regionLabel)}). Die plek blijft hetzelfde, zodat een nieuwe server ze terug kan zetten.</p>`
+      : `<label>Waar<select name="bwhere">${linked.map((s) => `<option value="store:${esc(s.name)}">Gekoppelde opslag van je cloud: ${esc(s.name)}</option>`).join("")}${stores.map((o) => `<option value="${esc(o.id)}" ${o.id === (bk?.provider ?? "scaleway") ? "selected" : ""}>${esc(o.name)}</option>`).join("")}</select></label>
+      <div id="aBackup" class="fields"></div>`}
+    <p class="msg"></p>${nav()}</form>`;
+  wire();
+  const f = $("#af");
+  const offer = () => servers.find((o) => o.id === f.provider.value);
+  const now = () => (h && h.provider === f.provider.value ? `<p class="muted" style="margin:0">Nu gekozen: ${esc(h.name)}, ${esc(h.regionLabel)} (${esc(h.size)}, ${esc(eur(h.monthly))} per maand)</p>` : "");
+  const keys = () => {
+    const o = offer();
+    $("#aKeys").innerHTML = !o ? "" : o.id === "scaleway"
+      ? `<small class="muted">Met je Scaleway-sleutel van stap 2, in een eigen project eigen-cloud-dienst.</small>`
+      : `${o.keyHelp ? `<small class="muted">${esc(o.keyHelp)}</small>` : ""}${fieldInputs(o.fields, { optional: hasKey(o.id), placeholder: () => (hasKey(o.id) ? "Bewaard; leeg laten = zo laten" : "") })}`;
+    $("#aRegions").innerHTML = now();
+  };
+  keys();
+  f.provider.onchange = keys;
+  const fields = () => Object.fromEntries($$("#aKeys input").map((i) => [i.name, i.value]));
+  $("#aPrices").onclick = async (e) => {
+    try {
+      const r = await busy(e.target, () => api("/api/aanbieder/server", { method: "POST", body: { provider: f.provider.value, fields: fields() } }));
+      const pick = h?.provider === f.provider.value ? h.region : r.regions.find((x) => !x.error)?.region;
+      $("#aRegions").innerHTML = r.regions.map((x) => `<label class="check"><input type="radio" name="region" value="${esc(x.region)}" ${x.error ? "disabled" : x.region === pick ? "checked" : ""}> ${FLAGS[x.country] ?? ""} ${esc(x.label)} <small class="muted">${x.error ? esc(x.error) : `${esc(x.sizeLabel)} (${esc(x.size)}), ${esc(eur(x.monthly))} per maand`}</small></label>`).join("");
+      formMsg(f, "");
+    } catch (err) { formMsg(f, err.message); }
+  };
+  const backupForm = () => {
+    const w = f.bwhere?.value;
+    if (!w) return;
+    if (w.startsWith("store:")) { $("#aBackup").innerHTML = `<small class="muted">Met de sleutels van deze opslag. De Dienst krijgt er een eigen bucket, 30 dagen niet te wissen.</small>`; return; }
+    const o = stores.find((x) => x.id === w);
+    const same = bk?.provider === o.id;
+    $("#aBackup").innerHTML = `<small class="muted">${esc(o.help ?? "")}</small>
+      ${o.regions.length > 1 ? `<label>Locatie<select name="bRegion">${o.regions.map((r) => `<option value="${esc(r.id)}" ${same && r.id === bk.region ? "selected" : ""}>${FLAGS[r.country] ?? ""} ${esc(r.label)}</option>`).join("")}</select></label>` : `<input type="hidden" name="bRegion" value="${esc(o.regions[0]?.id ?? "")}">`}
+      ${o.customEndpoint ? `<label>Endpoint<input name="bEndpoint" placeholder="https://…" autocomplete="off" spellcheck="false"></label>` : ""}
+      ${o.id === "scaleway" ? `<small class="muted">Sleutels leeg laten: de console maakt zelf een sleutel die alleen opslag in het project eigen-cloud-dienst mag.</small>` : ""}
+      <div class="row"><label>Toegangssleutel<input name="bAccess" autocomplete="off" spellcheck="false" ${same ? 'placeholder="Bewaard; leeg laten = zo laten"' : ""}></label><label>Geheime sleutel<input name="bSecret" type="password" autocomplete="off" ${same ? 'placeholder="Bewaard; leeg laten = zo laten"' : ""}></label></div>`;
+  };
+  backupForm();
+  if (f.bwhere) f.bwhere.onchange = backupForm;
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const region = $("input[name=region]:checked", f)?.value;
+    try {
+      await busy($("button.primary", f), async () => {
+        if (region) await api("/api/aanbieder/server", { method: "POST", body: { provider: f.provider.value, region, fields: fields() } });
+        else if (!h || h.provider !== f.provider.value) throw new Error("Haal eerst de regio's en prijzen op en kies een regio");
+        const w = f.bwhere?.value;
+        if (!w) return;
+        if (w.startsWith("store:")) return api("/api/aanbieder/backup", { method: "POST", body: { store: w.slice(6) } });
+        // Zelfde plek en geen nieuwe sleutels: laten zoals het is.
+        if (bk?.provider === w && (w !== "scaleway" || bk.region === f.bRegion.value) && !f.bAccess.value.trim() && !f.bSecret.value.trim() && !f.bEndpoint?.value.trim()) return;
+        return api("/api/aanbieder/backup", { method: "POST", body: { provider: w, region: f.bRegion.value, endpoint: f.bEndpoint?.value ?? "", accessKey: f.bAccess.value, secretKey: f.bSecret.value } });
+      });
+      await aStep("opzetten");
+    } catch (err) { formMsg(f, err.message); }
   };
 }
 
@@ -1594,7 +1671,7 @@ function aanbiederKlaar(box, a, msg) {
     </ul>`;
   };
   box.innerHTML = `<h2>Je dienst</h2><div class="panel">
-    <div><b>${esc(a.company?.name ?? "")}</b><br><span class="muted">${esc(a.url ?? "")} · server ${esc(a.server?.ipv4 ?? "")} in Amsterdam${a.backup ? ` · back-ups in ${esc(a.backup.bucket)}` : ""}</span></div>
+    <div><b>${esc(a.company?.name ?? "")}</b><br><span class="muted">${esc(a.url ?? "")} · server ${esc(a.server?.ipv4 ?? "")} bij ${esc(a.server ? placeName(a.server) : "")}${a.backup?.bucket ? ` · back-ups in ${esc(a.backup.bucket)} bij ${esc(a.backup.name)}` : ""}</span></div>
     <div id="aStatus"><p class="muted" style="margin:0">Status ophalen…</p></div>
     <div class="actions" style="margin:0">
       <button class="btn primary" id="aOpen">Beheer openen</button>
@@ -1650,9 +1727,40 @@ function keysSection() {
   </ul><div id="checkBox"></div></div>`;
 }
 
+/** Op het overzicht (zelf regelen): geschatte kosten per aanbieder en in totaal per maand, met een budget. */
+async function renderKosten(msg) {
+  const box = $("#kosten");
+  if (!box) return;
+  let k;
+  try { k = await api("/api/costs"); } catch (err) { box.innerHTML = `<h2>Kosten</h2><p class="msg err">${esc(err.message)}</p>`; return; }
+  const home = (id) => [...(state.offers.servers ?? []), ...(state.offers.stores ?? [])].find((o) => o.id === id)?.home;
+  const part = (n) => (n == null ? "onbekend" : eur(n));
+  const sub = (p) => [
+    k.sleeping && (state.offers.servers ?? []).some((o) => o.id === p.id) ? "servers € 0,00 (slaapt)" : p.servers === 0 ? "" : `servers ${part(p.servers)}`,
+    p.storage === 0 && !p.bytes ? "" : `opslag ${part(p.storage)}${p.bytes ? ` (${mbStr(p.bytes)})` : ""}`,
+  ].filter(Boolean).join(" · ");
+  box.innerHTML = `<h2>Kosten</h2>
+    <p class="muted" style="margin-top:0"><small>Geschat per maand, met de prijslijsten van de aanbieders. Uitgaand verkeer telt niet mee. Opslag gemeten om ${time(k.updatedAt)}.</small></p>
+    ${k.sleeping ? `<p class="note">Je cloud slaapt: de servers kosten nu niets, de opslag wel.</p>` : ""}
+    ${k.overBudget ? `<p class="note warn">De geschatte kosten (${eur(k.total)}) zijn hoger dan je budget van ${eur(k.budget)} per maand.</p>` : ""}
+    <ul class="items">${k.providers.length ? k.providers.map((p) => `<li><span class="flag">${FLAGS[home(p.id)] ?? "🧾"}</span><b>${esc(p.name)}</b><span class="sub">${esc(sub(p))}</span><span class="end">${eur(p.total)}</span></li>`).join("") : `<li><span></span><span class="muted">Nog niets dat geld kost</span></li>`}
+      <li><span></span><b>Totaal per maand</b><span class="sub">${k.complete ? "" : "Van een deel is de prijs onbekend; dat telt niet mee. "}${k.budget != null ? `Budget ${eur(k.budget)}` : "Geen budget ingesteld"}</span><span class="end"><b>${eur(k.total)}</b></span></li></ul>
+    <form class="fields" id="budgetForm"><label>Budget per maand in euro<input name="budget" inputmode="decimal" autocomplete="off" placeholder="bijvoorbeeld 25" value="${k.budget != null ? esc(String(k.budget).replace(".", ",")) : ""}"><small class="muted">Kom je erboven, dan krijg je een melding per mail. Leeg laten: geen budget.</small></label>
+      <div><button class="btn">Budget opslaan</button></div></form>
+    <p class="msg ${msg?.ok ? "ok" : ""}" id="kmsg">${esc(msg?.text ?? "")}</p>`;
+  $("#budgetForm").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const v = ev.target.budget.value.trim();
+    try {
+      await busy($("#budgetForm button"), () => api("/api/costs/budget", { method: "POST", body: { budget: v === "" ? null : v } }));
+      renderKosten({ ok: true, text: v === "" ? "Budget weggehaald." : "Budget opgeslagen." });
+    } catch (err) { $("#kmsg").textContent = err.message; $("#kmsg").className = "msg err"; }
+  };
+}
+
 async function renderDash() {
-  root.innerHTML = `<div class="dash"><div class="mapwrap" id="map"></div><section><div id="side"><p class="muted">Status ophalen…</p></div>${keysSection()}${config?.dienst?.orderId ? `<div id="abo"></div>` : ""}<div id="aanbieder"></div></section></div>`;
-  if (config?.dienst?.orderId) renderAbo();
+  root.innerHTML = `<div class="dash"><div class="mapwrap" id="map"></div><section><div id="side"><p class="muted">Status ophalen…</p></div>${config?.dienst?.orderId ? "" : `<div id="kosten"></div>`}${keysSection()}${config?.dienst?.orderId ? `<div id="abo"></div>` : ""}<div id="aanbieder"></div></section></div>`;
+  if (config?.dienst?.orderId) renderAbo(); else renderKosten();
   renderAanbieder();
   const draw = async () => {
     let s;

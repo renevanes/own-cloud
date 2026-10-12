@@ -27,7 +27,8 @@
         }
       ],
       "help": "Console → IAM → API-sleutels. Toegangssleutel en geheime sleutel.",
-      "signupUrl": "https://console.scaleway.com"
+      "signupUrl": "https://console.scaleway.com",
+      "pricePerGbMonth": 0.01606
     },
     {
       "id": "hetzner",
@@ -55,7 +56,8 @@
         }
       ],
       "help": "Cloud Console → je project → Object Storage → S3-sleutels aanmaken.",
-      "signupUrl": "https://console.hetzner.com"
+      "signupUrl": "https://console.hetzner.com",
+      "pricePerGbMonth": null
     },
     {
       "id": "upcloud",
@@ -72,7 +74,8 @@
       ],
       "customEndpoint": true,
       "help": "Maak een Object Storage-instantie; kopieer de endpoint-URL en een toegangssleutel.",
-      "signupUrl": "https://hub.upcloud.com"
+      "signupUrl": "https://hub.upcloud.com",
+      "pricePerGbMonth": null
     },
     {
       "id": "exoscale",
@@ -124,7 +127,8 @@
         }
       ],
       "help": "Portal → IAM → API-sleutel met rechten op Object Storage (SOS).",
-      "signupUrl": "https://portal.exoscale.com/register"
+      "signupUrl": "https://portal.exoscale.com/register",
+      "pricePerGbMonth": null
     },
     {
       "id": "ovh",
@@ -164,7 +168,8 @@
         }
       ],
       "help": "Public Cloud → Users & Roles → gebruiker met de rol ObjectStore operator → S3-sleutels genereren.",
-      "signupUrl": "https://www.ovhcloud.com/nl/public-cloud/"
+      "signupUrl": "https://www.ovhcloud.com/nl/public-cloud/",
+      "pricePerGbMonth": null
     },
     {
       "id": "custom",
@@ -181,7 +186,8 @@
       ],
       "customEndpoint": true,
       "help": "Elke S3-compatibele opslag, bijvoorbeeld een NAS thuis. Ideaal als extra back-up op een eigen plek.",
-      "signupUrl": ""
+      "signupUrl": "",
+      "pricePerGbMonth": null
     }
   ],
   "servers": [

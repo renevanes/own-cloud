@@ -15,6 +15,7 @@ import nodemailer from "nodemailer";
 import { request } from "undici";
 import { Vault, type AdminConfig } from "./vault.js";
 import * as catalog from "./catalog.js";
+import * as costs from "./costs.js";
 import { fetchSizes, pickSize, buildPresets, type SizeOption, type ServerOffer, type StoreOffer, type DnsOffer } from "./catalog.js";
 import { DEFAULT_POLICY, keysFor, type Placement } from "../cluster/config.js";
 import { randomKeyHex } from "../cluster/crypto.js";
@@ -808,12 +809,9 @@ export async function buildConsole() {
     });
 
     // ── Aanbieder worden: je eigen Eigen Cloud Dienst opzetten en bijhouden ──
-    const aDeps = (): aanbieder.Deps => ({
-      save,
-      storeEndpoint: (region) => storeOffers().find((o) => o.id === "scaleway")?.regions.find((r) => r.id === region)?.endpoint ?? `https://s3.${region}.scw.cloud`,
-    });
+    const aDeps = (): aanbieder.Deps => ({ save, serverOffers, storeOffers });
     const aFail = (reply: FastifyReply, e: unknown) => reply.code(400).send({ error: (e as Error).message, ...((e as { steps?: unknown }).steps ? { steps: (e as { steps?: unknown }).steps } : {}) });
-    s.get("/api/aanbieder", async () => aanbieder.view(cfg()));
+    s.get("/api/aanbieder", async () => aanbieder.view(cfg(), aDeps()));
     s.post<{ Body: { step?: string } }>("/api/aanbieder/stap", async (req, reply) => {
       try { const r = aanbieder.setStep(cfg(), req.body?.step ?? ""); save(); return r; } catch (e) { return aFail(reply, e); }
     });
@@ -825,6 +823,12 @@ export async function buildConsole() {
     });
     s.post<{ Body: { url?: string } }>("/api/aanbieder/adres", async (req, reply) => {
       try { const r = aanbieder.saveAdres(cfg(), req.body ?? {}); save(); return r; } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: { provider?: string; region?: string; fields?: Record<string, unknown> } }>("/api/aanbieder/server", async (req, reply) => {
+      try { const r = await aanbieder.saveServer(cfg(), req.body ?? {}, aDeps()); save(); return r; } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: Record<string, string> }>("/api/aanbieder/backup", async (req, reply) => {
+      try { const r = aanbieder.saveBackup(cfg(), req.body ?? {}, aDeps()); save(); return r; } catch (e) { return aFail(reply, e); }
     });
     s.post("/api/aanbieder/opzetten", async (_req, reply) => {
       try { return await aanbieder.opzetten(cfg(), aDeps()); } catch (e) { return aFail(reply, e); }
@@ -887,6 +891,16 @@ export async function buildConsole() {
         : st.live?.leader ? (st.live.sleeping ? "falling-asleep" : "awake")
         : st.manifest?.state === "asleep" ? "asleep" : st.manifest ? "unreachable" : "new";
       return { state, domain: c.domain, appUrl: appUrl(c), manifest: st.manifest, live: st.live, launch };
+    });
+
+    // ── Kosten en budget (zie costs.ts) ──
+    s.get<{ Querystring: { fresh?: string } }>("/api/costs", async (req) => {
+      const c = cfg();
+      const st = await clusterStatus(c, c.console.firstLaunch?.clusterUrl ? [c.console.firstLaunch.clusterUrl] : []);
+      return costs.view(c, st, { stores: storeOffers(), nameOf: (id) => getAdapter(id)?.name ?? id }, req.query.fresh === "1");
+    });
+    s.post<{ Body: { budget?: unknown } }>("/api/costs/budget", async (req, reply) => {
+      try { const r = costs.setBudget(cfg(), req.body?.budget); save(); return r; } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     });
 
     s.post<{ Body: { type: string; params?: Record<string, unknown> } }>("/api/action", async (req, reply) => {

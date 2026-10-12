@@ -98,6 +98,7 @@ jrun VaultTest
 jrun SmtpTest SMTP_INFO="$BUILD/smtp-info.json"
 jrun S3MotoTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
 jrun ConsoleApiTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
+jrun CostsTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
 if wait_for 60 test -s "$BUILD/dienst-info.json"; then
   jrun ConsoleExtrasTest MOTO_URL="http://127.0.0.1:$MOTO_PORT" DIENST_INFO="$BUILD/dienst-info.json"
   DIENST_OK=1

@@ -27,6 +27,8 @@ import { place, role } from "./places.js";
 import { gmailHooks, kickGmail } from "../gmail/sync.js";
 import { VERSION } from "../version.js";
 import * as updates from "./updates.js";
+import { estimate, parseBudget, serverPrice, storeOfferId } from "./costs.js";
+import { adapters, getAdapter } from "./adapters.js";
 
 export interface NodeRow {
   id: string; name: string | null; kind: "data" | "witness"; provider: string; region: string | null; country: string | null; size: string | null;
@@ -56,6 +58,10 @@ export class ClusterService {
   private providerCache = new Map<string, Provider>();
   lastSnapshotAt = 0;
   private healthRunning = false;
+  /** Bytes per opslag (voor de kostenschatting), hooguit eens per 6 uur gemeten. */
+  private storeBytes = new Map<string, { at: number; bytes: number | null }>();
+  /** Laatste kostenschatting tegen het budget (null: geen budget ingesteld). */
+  private costs: { total: number; complete: boolean; budget: number } | null = null;
 
   constructor(public cfg: ClusterConfig, private cfgFile: string, readonly dataDir: string) {
     this.keys = keysFor(cfg);
@@ -775,7 +781,35 @@ export class ClusterService {
       autoHeal: pol.autoHeal,
       update: (() => { const u = updates.updateSummary(this); return { available: u.available, mode: u.mode, failed: u.failed?.version ? u.failed : null, running: !!u.running, checkError: u.checkError }; })(),
       unreachable: ready.filter((n) => n.id !== this.self.id && Date.now() - (peers.get(n.id)?.lastContact ?? 0) > 30_000 && Date.now() - (this.raft.status().leaderSince ?? 0) > 30_000).map((n) => n.id),
+      costs: this.costs,
     };
+  }
+
+  /**
+   * Kostenschatting tegen het budget (instellingen budget_month en cost_servers van de beheerconsole; oudere consoles
+   * sturen ze niet, dan geen controle). Opslag: bytes in elke bucket × de lijstprijs van die aanbieder (zie costs.ts).
+   */
+  async refreshCosts() {
+    const budget = parseBudget(this.getSetting("budget_month") ?? "");
+    if (budget === null) { this.costs = null; return; }
+    let prices: Record<string, number> = {};
+    try { prices = JSON.parse(this.getSetting("cost_servers") || "{}"); } catch { /* geen prijzen */ }
+    const servers = this.nodes("status IN ('provisioning','syncing','ready')").filter((n) => n.provider !== "manual")
+      .map((n) => ({ provider: n.provider, monthly: serverPrice(prices, n) }));
+    const ids = adapters().filter((a) => a.storage).map((a) => a.id);
+    const stores = [];
+    for (const s of this.stores) {
+      let m = this.storeBytes.get(s.name);
+      if (!m || Date.now() - m.at > 6 * 3600e3) {
+        const bytes = await s.list("").then((l) => l.reduce((a, o) => a + o.size, 0), () => m?.bytes ?? null);
+        m = { at: Date.now(), bytes };
+        this.storeBytes.set(s.name, m);
+      }
+      const provider = storeOfferId(s.name, ids);
+      stores.push({ name: s.name, provider, bytes: m.bytes, pricePerGbMonth: provider ? getAdapter(provider)?.storage?.pricePerGbMonth ?? null : null });
+    }
+    const e = estimate(servers, stores, (id) => id);
+    this.costs = { total: e.total, complete: e.complete, budget };
   }
 
   async healthFix(action: string) {
@@ -812,6 +846,7 @@ export class ClusterService {
 
   /** Elk kwartier op de leider: controleren, veilige dingen zelf repareren, melden bij veranderingen. */
   async healthRound() {
+    await this.refreshCosts().catch((e) => { this.costs = null; console.error("kosten:", (e as Error).message); });
     let checks = await health.runChecks(this.healthInfo());
     const auto: string[] = [];
     const info = this.healthInfo();

@@ -15,7 +15,10 @@ import { S3Store } from "../src/cluster/stores.js";
 import { userData, caddyfile, dienstUserData, dienstCheckScript, updaterScript } from "../src/cluster/cloudinit.js";
 import { adminProof, consoleSettings } from "../src/cluster/admin.js";
 import * as aanbieder from "../src/console/aanbieder.js";
-import { buildPresets, pickSize, fetchSizes, SERVER_OFFERS, type SizeOption, type RegionInfo } from "../src/console/catalog.js";
+import * as costs from "../src/console/costs.js";
+import { parseBudget } from "../src/cluster/costs.js";
+import { getAdapter } from "../src/cluster/adapters.js";
+import { buildPresets, pickSize, fetchSizes, SERVER_OFFERS, serverOffers, storeOffers, type SizeOption, type RegionInfo } from "../src/console/catalog.js";
 import { hashPassword } from "../src/auth.js";
 import { isSecretField } from "../src/cluster/adapters.js";
 import { parseMx, unquoteTxt } from "../src/cluster/adapters/http.js";
@@ -359,14 +362,29 @@ const aanbiederConfigs = [
   withA(null),
   withA({ ...aanbiederState, server: { ...aanbiederState.server, ipv6: "2001:db8::1" } }, { domain: undefined }),
   withA({ ...aanbiederState, dnsRemove: ["dienst", "oud"], server: { ...aanbiederState.server, ipv6: "2001:db8::1" } }, { image: { ref: "eigen-cloud:latest", caddyRef: "ghcr.io/x/caddy@sha256:" + "c".repeat(64) } }),
+  // Server bij Hetzner, back-ups bij een andere aanbieder (UpCloud), een vervangen Scaleway-server nog op te ruimen.
+  withA({ ...aanbiederState, hosting: { provider: "hetzner", region: "fsn1", size: "cx23", monthly: 4.51 }, keys: { hetzner: { token: "hetzner-geheim" } },
+    backup: { provider: "upcloud", endpoint: "https://europe-1.upcloudobjects.com", region: "europe-1", country: "NL", bucket: "b-1", accessKey: "UPAK", secretKey: "up-geheim" },
+    server: { provider: "hetzner", region: "fsn1", size: "cx23", serverId: "42", ipv4: "192.0.2.20", ipv6: "2001:db8::2", createdAt: 1760000003000 }, retired: [{ provider: "scaleway", serverId: "nl-ams-1/srv-1/ip-1" }] }),
+  // Gekozen maar nog niet opgezet: Exoscale, back-ups bij Scaleway (sleutel maakt de console), prijs onbekend.
+  withA({ step: "opzetten", company: aanbiederState.company, url: "https://dienst.vanes.nl", hosting: { provider: "exoscale", region: "ch-gva-2", size: "standard.small", monthly: null },
+    backup: { provider: "scaleway", endpoint: "https://s3.nl-ams.scw.cloud", region: "nl-ams", country: "NL" } }),
+  // Oude kluis halverwege: stap opzetten zonder keuze gaat terug naar "server".
+  withA({ step: "opzetten", company: aanbiederState.company, url: "https://dienst.vanes.nl" }),
+  // Eigen S3-opslag (custom) met een onbekende regio.
+  withA({ ...aanbiederState, backup: { provider: "custom", endpoint: "https://s3.eigen.example", region: "us-east-1", country: "", bucket: "b-2", accessKey: "a", secretKey: "s" } }),
 ];
+const offers = { serverOffers: () => serverOffers(), storeOffers: () => storeOffers() };
 const clean = (x: unknown) => JSON.parse(JSON.stringify(x));
 const aanbiederOut = aanbiederConfigs.map((cfg) => {
   const c = clean(cfg);
+  // De kluis zoals hij was (oude vorm); view werkt hem bij, Java moet dat net zo doen.
+  const before = clean(c);
+  const view = aanbieder.view(c, offers);
   const a = c.console.aanbieder;
   let ud: string | null = null;
   try { ud = a?.server ? aanbieder.serverUserData(c, a) : null; } catch (e) { ud = `FOUT ${(e as Error).message}`; }
-  return { cfg: c, view: aanbieder.view(c), settings: consoleSettings(c), userData: ud };
+  return { cfg: before, view, migrated: a ?? null, settings: consoleSettings(c), userData: ud };
 });
 const dienstInits = [
   { host: "dienst.vanes.nl", email: "rene@elders.example", env: [["A", "x y 'z' \\n $HOME"], ["B_2", ""]], appImage: "ghcr.io/renevanes/eigen-cloud:latest", caddyImage: "ghcr.io/renevanes/eigen-caddy:latest", appRef: "ghcr.io/renevanes/eigen-cloud:latest", caddyRef: "ghcr.io/renevanes/eigen-caddy:latest" },
@@ -377,13 +395,47 @@ const urlCases = ["dienst.vanes.nl", " HTTPS://Dienst.Vanes.NL/ ", "http://diens
   .map((input) => { try { return { input, out: aanbieder.cleanUrl(input) }; } catch (e) { return { input, error: (e as Error).message }; } });
 const smtpCases = ["smtp://user%40x.nl:geheim@smtp.example.org:587", "smtps://mail.example.org", "smtp://127.0.0.1:2525", "", "geen url"].map((input) => ({ input, out: aanbieder.smtpDisplay(input) }));
 
+// ───────── Kosten en budget (src/cluster/costs.ts, src/console/costs.ts) ─────────
+const costCatalog = {
+  scaleway: { "nl-ams-1": { data: { size: "DEV1-S", label: "2 vCPU, 2 GB", ramGb: 2, cpus: 2, monthly: 6.42 }, witness: { size: "STARDUST1-S", label: "1 vCPU, 1 GB", ramGb: 1, cpus: 1, monthly: 0.1 } } },
+  hetzner: { fsn1: { data: { size: "cx23", label: "2 vCPU, 4 GB", ramGb: 4, cpus: 2, monthly: 4.51 } } },
+  exoscale: { "ch-gva-2": { data: { size: "standard.small", label: "2 vCPU, 2 GB", ramGb: 2, cpus: 2, monthly: null } } },
+};
+const costStores = [
+  { name: "scaleway-nl-ams", type: "s3", purpose: "replica", country: "NL", endpoint: "https://s3.nl-ams.scw.cloud", region: "nl-ams", bucket: "b1", accessKey: "a", secretKey: "s" },
+  { name: "scaleway-fr-par-backup", type: "s3", purpose: "backup", country: "FR", endpoint: "https://s3.fr-par.scw.cloud", region: "fr-par", bucket: "b2", accessKey: "a", secretKey: "s" },
+  { name: "hetzner-fsn1", type: "s3", purpose: "replica", country: "DE", endpoint: "https://fsn1.your-objectstorage.com", region: "fsn1", bucket: "b3", accessKey: "a", secretKey: "s" },
+  { name: "nas-thuis", type: "fs", purpose: "backup", dir: "/x" },
+];
+const costCfg = (consolePart: Record<string, unknown>, stores: unknown[] = costStores) => clean({ ...sampleConfig, stores, console: { ...sampleConfig.console, ...consolePart } });
+const liveNodes = [
+  { id: "n-1", kind: "data", provider: "scaleway", region: "nl-ams-1", size: "DEV1-S", status: "ready", monthly_cost: null },
+  { id: "n-2", kind: "data", provider: "hetzner", region: "fsn1", size: "cx23", status: "ready", monthly_cost: 4.99 },
+  { id: "n-3", kind: "witness", provider: "scaleway", region: "nl-ams-1", size: "STARDUST1-S", status: "syncing", monthly_cost: null },
+  { id: "n-4", kind: "data", provider: "scaleway", region: "nl-ams-1", size: "DEV1-S", status: "failed", monthly_cost: null },
+  { id: "n-5", kind: "witness", provider: "manual", region: null, size: null, status: "ready", monthly_cost: null },
+];
+const costCases = [
+  { name: "wakker", cfg: costCfg({ catalog: costCatalog, budget: 10 }), st: { manifest: null, live: { leader: true, nodes: liveNodes } }, bytes: { "scaleway-nl-ams": 12_345_678_901, "scaleway-fr-par-backup": 3e9, "hetzner-fsn1": 1e9, "nas-thuis": 5 } },
+  { name: "boven budget", cfg: costCfg({ catalog: costCatalog, budget: 7.5 }, costStores.slice(0, 2)), st: { manifest: null, live: { leader: true, nodes: liveNodes.slice(0, 1) } }, bytes: { "scaleway-nl-ams": 987_654_321_000, "scaleway-fr-par-backup": 0 } },
+  { name: "slaapt", cfg: costCfg({ catalog: costCatalog }), st: { manifest: { state: "asleep", topology: [{ kind: "data", provider: "scaleway", region: "nl-ams-1", size: "DEV1-S" }] }, live: null }, bytes: { "scaleway-nl-ams": 2e9, "scaleway-fr-par-backup": 1e9, "hetzner-fsn1": null } },
+  { name: "onbereikbaar", cfg: costCfg({ catalog: costCatalog, budget: "12,5" }), st: { manifest: { state: "awake", topology: [{ kind: "data", provider: "scaleway", region: "nl-ams-1", size: "DEV1-S" }, { kind: "data", provider: "exoscale", region: "ch-gva-2", size: "standard.small" }] }, live: null }, bytes: {} },
+  { name: "nieuw", cfg: costCfg({}, []), st: { manifest: null, live: null }, bytes: {} },
+];
+const costOffers = { stores: storeOffers(), nameOf: (id: string) => getAdapter(id)?.name ?? id };
+const costsOut = {
+  compute: costCases.map((x) => ({ ...x, out: costs.compute(x.cfg as never, x.st as never, x.bytes as never, costOffers) })),
+  settings: [costCfg({ catalog: costCatalog, budget: 25.5 }), costCfg({ budget: 0 }), costCfg({ catalog: {} })].map((c) => ({ cfg: c, out: consoleSettings(c) })),
+  budget: [25, "25", "25,50", " 12.345 ", "0", "-3", "abc", "", null, 1e6].map((input) => ({ input, out: parseBudget(input) })),
+};
+
 const out = {
   generated: new RealDate().toISOString(),
   masterKey, derived, derived16, derived64, seals, sealJson: sealJsonOut, rpc, bootstrap,
   json, presign, sign, userData: userDataOut, caddyfile: caddyOut,
   pickSize: pickCases, presets, apiResponses, fetchSizes: fetchSizesOut, dnsFormat, scalewayDns, signatures, secretFields,
   sheets, sheetDateText: dateText, dates, checklists, pbkdf2, passwords, proofs, sampleConfig,
-  aanbieder: aanbiederOut, dienstUserData: dienstUserDataOut, dienstCheckScript: dienstCheckScript(), updaterScript: updaterScript(), cleanUrl: urlCases, smtpDisplay: smtpCases,
+  aanbieder: aanbiederOut, costs: costsOut, dienstUserData: dienstUserDataOut, dienstCheckScript: dienstCheckScript(), updaterScript: updaterScript(), cleanUrl: urlCases, smtpDisplay: smtpCases,
 };
 fs.mkdirSync(path.dirname(outFile), { recursive: true });
 fs.writeFileSync(outFile, JSON.stringify(out, null, 1));

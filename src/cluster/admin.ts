@@ -9,6 +9,7 @@ import { makeProvider } from "./providers.js";
 import { makeStore, S3Store, type StoreConfig } from "./stores.js";
 import { imageUrls, userData } from "./cloudinit.js";
 import { rpc } from "./transport.js";
+import { parseBudget, serverPrices } from "./costs.js";
 
 export interface Manifest {
   cluster: string; state: "awake" | "asleep"; term: number; lastSeq: number; updated: number; leader: string;
@@ -203,7 +204,7 @@ export async function prepareStore(cfg: StoreConfig): Promise<StepResult[]> {
 }
 
 /** Stuurt gewijzigde beheerinstellingen naar het draaiende cluster (ondertekend). */
-type ConsolePart = { mailRelay?: string; spfExtra?: string; alertEmail?: string; extraDns?: unknown[]; maxUsers?: number; dienst?: { url?: string; orderId?: string; applied?: boolean };
+type ConsolePart = { budget?: number | null; catalog?: Parameters<typeof serverPrices>[0]; mailRelay?: string; spfExtra?: string; alertEmail?: string; extraDns?: unknown[]; maxUsers?: number; dienst?: { url?: string; orderId?: string; applied?: boolean };
   aanbieder?: { url?: string; removed?: boolean; dnsRemove?: string[]; server?: { ipv4?: string; ipv6?: string } | null } };
 
 /**
@@ -242,6 +243,11 @@ export function consoleSettings(c: ClusterConfig & { console?: ConsolePart }, de
   const token = c.dns.find((d) => d.type === "desec" && d.name === "dienst")?.token;
   const url = (con.dienst?.url || defaultDienst).replace(/\/$/, "");
   settings.dienst_report = con.dienst?.orderId && con.dienst.applied && token && url ? JSON.stringify({ url, orderId: con.dienst.orderId, token }) : "";
+  // Kosten en budget (zie costs.ts): budget per maand ("" = geen) en de maandprijzen van de formaten uit de catalogus.
+  // Oudere servers bewaren onbekende instellingen alleen en doen er niets mee.
+  const budget = parseBudget(con.budget);
+  settings.budget_month = budget === null ? "" : String(budget);
+  settings.cost_servers = JSON.stringify(serverPrices(con.catalog));
   return settings;
 }
 

@@ -58,6 +58,10 @@ export class ScalewayProvider implements Provider {
       }
     }
   }
+  async clearUserData(serverId: string) {
+    const [zone, id] = serverId.split("/");
+    await api(`${this.base(zone)}/servers/${id}/user_data/cloud-init`, { method: "DELETE", headers: this.h(), okStatus: [404] });
+  }
   async list(cluster: string) {
     const out: { serverId: string; nodeId: string }[] = [];
     for (const zone of ["nl-ams-1", "nl-ams-2", "nl-ams-3", "fr-par-1", "fr-par-2", "fr-par-3", "pl-waw-1", "pl-waw-2", "pl-waw-3"]) {
@@ -198,6 +202,10 @@ export const scaleway: ProviderAdapter = {
       { id: "pl-waw", label: "Warschau", country: "PL", endpoint: "https://s3.pl-waw.scw.cloud" },
     ],
     keyHelp: "Console → IAM → API-sleutels. Toegangssleutel en geheime sleutel.",
+    // Standard Multi-AZ (de standaardklasse): € 0,000022 per GB per uur ≈ € 0,01606 per GB per maand, excl. btw.
+    // Nagekeken op 12-10-2026 (prijslijst toont Parijs; Amsterdam en Warschau gaan we uit van hetzelfde).
+    pricePerGbMonth: 0.01606,
+    priceInfo: { vat: "excl", checked: "2026-10-12", source: "https://www.scaleway.com/en/pricing/storage/", note: "Standard Multi-AZ, prijs voor Parijs" },
   },
   dns: {
     name: "Scaleway DNS",

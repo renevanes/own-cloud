@@ -67,16 +67,40 @@ public class FormatsGoldenTest {
                 T.eq(Json.str(o, "out"), CloudInit.dienstUserData(d), "dienstUserData " + d.host);
             }
             int n = 0;
+            Aanbieder.Offers offers;
+            try (java.io.FileInputStream in = new java.io.FileInputStream(System.getProperty("catalog.file"))) { offers = Aanbieder.offers(Catalog.load(in)); }
             for (Object o : Json.listAt(g, "aanbieder")) {
                 Map<String, Object> cfg = Json.copy(Json.map(o, "cfg"));
                 n++;
-                T.eq(Json.stringify(Json.path(o, "view")), Json.stringify(Aanbieder.view(cfg)), "aanbieder view " + n);
+                T.eq(Json.stringify(Json.path(o, "view")), Json.stringify(Aanbieder.view(cfg, offers)), "aanbieder view " + n);
+                T.eq(Json.stringify(Json.path(o, "migrated")), Json.stringify(Json.path(cfg, "console", "aanbieder")), "aanbieder bijgewerkt " + n);
                 T.eq(Json.stringify(Json.path(o, "settings")), Json.stringify(Admin.consoleSettings(cfg, "")), "consoleSettings met aanbieder " + n);
                 Map<String, Object> a = Json.map(cfg, "console", "aanbieder");
                 String ud = a != null && a.get("server") != null ? Aanbieder.serverUserData(cfg, a) : null;
                 T.eq(Json.str(o, "userData"), ud, "aanbieder user-data " + n);
             }
-            T.check(n >= 6, "aanbieder-gevallen");
+            T.check(n >= 12, "aanbieder-gevallen");
+            // Kosten en budget (Costs ↔ src/cluster/costs.ts + src/console/costs.ts)
+            Catalog costCat;
+            try (java.io.FileInputStream in = new java.io.FileInputStream(System.getProperty("catalog.file"))) { costCat = Catalog.load(in); }
+            int nc = 0;
+            for (Object o : Json.listAt(g, "costs", "compute")) {
+                Map<String, Object> st = Json.map(o, "st");
+                Map<String, Object> r = Costs.compute(Json.map(o, "cfg"), Json.map(st, "manifest"), Json.map(st, "live"), Json.map(o, "bytes"), costCat.storeOffers(), id -> {
+                    String nm = Json.str(costCat.adapter(id), "name");
+                    return nm != null ? nm : id;
+                });
+                T.eq(Json.stringify(Json.path(o, "out")), Json.stringify(r), "kosten " + Json.str(o, "name"));
+                nc++;
+            }
+            T.check(nc >= 5, "kosten-gevallen");
+            for (Object o : Json.listAt(g, "costs", "settings")) {
+                T.eq(Json.stringify(Json.path(o, "out")), Json.stringify(Admin.consoleSettings(Json.map(o, "cfg"), "")), "consoleSettings met kosten");
+            }
+            for (Object o : Json.listAt(g, "costs", "budget")) {
+                Object in = Json.path(o, "input");
+                T.eq(Json.stringify(Json.path(o, "out")), Json.stringify(Costs.parseBudget(in)), "parseBudget " + Json.stringify(in));
+            }
             for (Object o : Json.listAt(g, "cleanUrl")) {
                 String in = Json.str(o, "input");
                 if (Json.str(o, "out") != null) T.eq(Json.str(o, "out"), Aanbieder.cleanUrl(in), "cleanUrl " + in);

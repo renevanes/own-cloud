@@ -289,6 +289,9 @@ export const ovh: ProviderAdapter = {
       { id: "uk", label: "Londen", country: "GB", endpoint: "https://s3.uk.io.cloud.ovh.net" },
     ],
     keyHelp: "Public Cloud → Users & Roles → gebruiker met de rol ObjectStore operator → S3-sleutels genereren.",
+    // De prijslijst was op 12-10-2026 niet op te halen; daarom onbekend.
+    pricePerGbMonth: null,
+    priceInfo: { vat: "onbekend", checked: "2026-10-12", source: "https://www.ovhcloud.com/nl/public-cloud/prices/", note: "Prijs niet nagekeken" },
   },
   dns: {
     name: "OVHcloud DNS",

@@ -115,11 +115,23 @@ test("beheerconsole: van niets naar een draaiende cloud, slapen, wekken en herst
     }, 30_000);
   });
 
+  await t.test("kosten: draaiende servers van de leider, budget gaat mee naar het cluster", async () => {
+    const k = (await c("GET", "/api/costs")).json;
+    assert.equal(k.sleeping, false);
+    const local = k.providers.find((p: { id: string }) => p.id === "local");
+    assert.ok(local && local.servers === 0, JSON.stringify(k.providers));
+    assert.equal((await c("POST", "/api/costs/budget", { budget: 20 })).status, 200);
+  });
+
   await t.test("back-up testen en laten slapen vanuit de console", async () => {
     assert.equal((await c("POST", "/api/action", { type: "drill" })).status, 200);
     await waitFor("brandoefening klaar", async () => (await c("GET", "/api/status")).json.live?.lastDrill, 60_000);
     assert.equal((await c("POST", "/api/action", { type: "sleep" })).status, 200);
     await waitFor("slaapt", async () => (await c("GET", "/api/status")).json.state === "asleep", 120_000);
+    const k = (await c("GET", "/api/costs")).json;
+    assert.equal(k.sleeping, true, "slapend: servers kosten niets, opslag telt nog");
+    assert.ok(k.providers.every((p: { servers: number | null }) => p.servers === 0), JSON.stringify(k.providers));
+    assert.ok(k.providers.some((p: { bytes: number | null }) => (p.bytes ?? 0) > 0), "opslag gemeten");
   });
 
   await t.test("wakker maken: data terug", async () => {
