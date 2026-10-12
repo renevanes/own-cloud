@@ -799,6 +799,36 @@ public final class ConsoleApi {
             // ── Wat je nodig hebt om aanbieder te worden, en het regelen ervan (Benodigdheden) ──
             case "GET /api/aanbieder/benodigdheden":
                 return ok(Benodigdheden.benodigdheden(c, "1".equals(query(path, "fresh")), aanbiederDeps()));
+            // ── Zo gratis mogelijk beginnen (Gratis): de keuze, het gratis adres, de server op starttegoed, verhuizen ──
+            case "POST /api/aanbieder/modus": {
+                Map<String, Object> r = Gratis.setModus(c, b);
+                save();
+                return ok(r);
+            }
+            case "POST /api/aanbieder/gratis-adres":
+                try {
+                    return ok(Gratis.gratisAdres(c, b, aanbiederDeps()));
+                } catch (IOException | RuntimeException e) {
+                    save();
+                    throw e;
+                }
+            case "POST /api/aanbieder/proef":
+                try {
+                    return ok(Gratis.proef(c, b, aanbiederDeps()));
+                } catch (IOException | RuntimeException e) {
+                    save();
+                    throw e;
+                }
+            case "POST /api/aanbieder/verhuizen":
+                try {
+                    return ok(Gratis.verhuizen(c, b, aanbiederDeps()));
+                } catch (Aanbieder.SetupException e) {
+                    save();
+                    return err(400, e.getMessage(), "steps", e.steps);
+                } catch (IOException | RuntimeException e) {
+                    save();
+                    throw e;
+                }
             case "POST /api/aanbieder/scaleway":
                 try {
                     return ok(Benodigdheden.scaleway(c, b, aanbiederDeps()));

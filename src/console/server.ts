@@ -31,6 +31,7 @@ import * as extras from "./extras.js";
 import * as aanbieder from "./aanbieder.js";
 import * as overstap from "./overstap.js";
 import * as nodig from "./benodigdheden.js";
+import * as gratis from "./gratis.js";
 import * as github from "./github.js";
 import * as voorwaarden from "./voorwaarden.js";
 import { zonelimiet } from "./zonelimiet.js";
@@ -904,7 +905,20 @@ export async function buildConsole() {
     s.get("/api/aanbieder", async () => aanbieder.view(cfg(), aDeps()));
     // ── Wat je nodig hebt om aanbieder te worden, en het regelen ervan (benodigdheden.ts) ──
     s.get<{ Querystring: { fresh?: string } }>("/api/aanbieder/benodigdheden", async (req, reply) => {
-      try { return await nodig.benodigdheden(cfg(), req.query.fresh === "1", { save }); } catch (e) { return aFail(reply, e); }
+      try { return await nodig.benodigdheden(cfg(), req.query.fresh === "1", aDeps()); } catch (e) { return aFail(reply, e); }
+    });
+    // ── Zo gratis mogelijk beginnen (gratis.ts): de keuze, het gratis adres bij deSEC, de server op starttegoed, verhuizen ──
+    s.post<{ Body: { modus?: string } }>("/api/aanbieder/modus", async (req, reply) => {
+      try { const r = gratis.setModus(cfg(), req.body ?? {}); save(); return r; } catch (e) { return aFail(reply, e); }
+    });
+    s.post<{ Body: { naam?: string; maken?: boolean } }>("/api/aanbieder/gratis-adres", async (req, reply) => {
+      try { return await gratis.gratisAdres(cfg(), req.body ?? {}, aDeps()); } catch (e) { save(); return aFail(reply, e); }
+    });
+    s.post<{ Body: { provider?: string; fields?: Record<string, unknown>; eind?: string | null } }>("/api/aanbieder/proef", async (req, reply) => {
+      try { return await gratis.proef(cfg(), req.body ?? {}, aDeps()); } catch (e) { save(); return aFail(reply, e); }
+    });
+    s.post<{ Body: { provider?: string; region?: string; akkoord?: boolean } }>("/api/aanbieder/verhuizen", async (req, reply) => {
+      try { return await gratis.verhuizen(cfg(), req.body ?? {}, aDeps()); } catch (e) { save(); return aFail(reply, e); }
     });
     s.post<{ Body: { accessKey?: string; secretKey?: string; verwijderen?: boolean } }>("/api/aanbieder/scaleway", async (req, reply) => {
       try { return await nodig.scaleway(cfg(), req.body ?? {}, aDeps()); } catch (e) { save(); return aFail(reply, e); }

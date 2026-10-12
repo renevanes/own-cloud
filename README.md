@@ -81,7 +81,9 @@ het IP-adres van je server op de lijst bij Openprovider. Een account openen (met
 ID-controle) doe je zelf; de app opent de juiste pagina en ziet daarna zelf dat het gelukt is. Dezelfde lijst staat later
 in *Je dienst*, en bij de stap *Accounts* openen dezelfde hulpjes in een venster (bijv. **Nog geen deSEC-account? Laat de
 app er een maken**). Een premium-domein (met een hogere prijs) koopt de app niet; dat doe je in het controlepaneel van
-Openprovider.
+Openprovider. Bovenaan kies je **Zo gratis mogelijk beginnen** (een gratis adres `naam.dedyn.io` bij deSEC, een server op
+starttegoed bij UpCloud of Exoscale, gratis mail via Scaleway; als het tegoed bijna op is verhuist de app je Dienst met
+één tik naar de goedkoopste betaalde server) of **Standaard**; zie [BROKER.md](BROKER.md#gratis-beginnen).
 
 Daarna is er één plek voor alles: **Je dienst** (op het startscherm van de app: *ESAPE beheren*, met de naam van je
 Dienst). Overzicht (status, versie, klanten, omzet), Bedrijf, Accounts en sleutels, Adressendienst (ook de zonelimiet bij

@@ -30,6 +30,8 @@ import { dohLookup, nsMatch, nsProvider } from "./doh.js";
 import { parsePhone, parseDnskey } from "../broker/provision.js";
 import * as voorwaarden from "./voorwaarden.js";
 import * as github from "./github.js";
+import * as G from "./gratis.js";
+import { serverOffers as catalogServerOffers, type ServerOffer } from "./catalog.js";
 
 // ───────── Toestand ─────────
 
@@ -100,6 +102,8 @@ type Status = "ok" | "bijna" | "open";
 export interface Item {
   id: string; label: string; status: Status; uitleg: string; kosten: string | null; detail: string; optioneel: boolean;
   actie: { label: string; soort: "paneel" | "stap" | "hub"; doel: string };
+  /** Alleen bij "Zo gratis mogelijk beginnen": de gratis route voor dit onderdeel. */
+  route?: string;
 }
 
 const item = (id: string, label: string, status: Status, uitleg: string, kosten: string | null, detail: string, optioneel: boolean, soort: Item["actie"]["soort"], doel: string): Item =>
@@ -114,19 +118,24 @@ const hostOf = (url?: string | null) => { try { return url ? new URL(url).hostna
  * Voorwaarden en Op de lijst: dezelfde controles als GET /api/aanbieder/juridisch (voorwaarden.ts) en
  * GET /api/aanbieder/lijst (github.ts), zodat de lijst en die onderdelen hetzelfde zeggen.
  */
-export async function benodigdheden(c: AdminConfig, fresh = false, deps: { save: () => void } = { save: () => {} }) {
-  const a = (aan.intern.existing(c) ?? { step: "bedrijf" }) as A;
+export async function benodigdheden(c: AdminConfig, fresh = false, deps: { save: () => void; serverOffers?: () => ServerOffer[] } = { save: () => {} }) {
+  const a = (aan.intern.existing(c) ?? { step: "bedrijf" }) as A & G.GratisState;
   const acc = a.accounts ?? {}, ch = a.checked ?? {};
   const host = hostOf(a.url);
   const zone = a.dns?.zone ?? aan.defaultZone(host);
   const live = !!a.server && !a.removed && !!a.url;
-  const [ns, aRec, adrNs, jur, lijst] = await Promise.all([
+  const gratis = G.modus(c) === "gratis";
+  const offers = deps.serverOffers ?? (() => catalogServerOffers());
+  const [ns, aRec, adrNs, jur, lijst, na, tegoed] = await Promise.all([
     zone ? cached(`ns:${zone}`, fresh, () => dohLookup(zone, "NS"), (v) => v !== null) : null,
     host && a.dnsHandmatig && a.server?.ipv4 ? cached(`a:${host}`, fresh, () => dohLookup(host, "A"), (v) => v !== null) : null,
     a.adressen ? cached(`ns:${a.adressen.zone}`, fresh, () => dohLookup(a.adressen!.zone, "NS"), (v) => v !== null) : null,
     live ? within(cached(`juridisch:${a.url}`, fresh, () => voorwaarden.status(c).catch(() => null), (v) => !!v?.bereikbaar)) : null,
     live && a.secret ? within(cached(`lijst:${a.url}`, fresh, () => github.view(c, deps).catch(() => null), (v) => !!v && !v.dienstFout && !v.lijstFout)) : null,
+    gratis ? within(G.prijsNa(c, a, { fresh, offers })) : null,
+    within(G.verversTegoed(c, fresh)),
   ]);
+  if (tegoed) deps.save();
   const items: Item[] = [];
 
   // Domein
@@ -247,8 +256,104 @@ export async function benodigdheden(c: AdminConfig, fresh = false, deps: { save:
     else if (v.lijstFout) L("bijna", "Kon de openbare lijst nu niet lezen");
     else L("open", pr?.status === "gesloten" ? `Voorstel #${pr.nummer} is gesloten; meld je opnieuw aan` : "Nog niet op de lijst");
   }
-  const nodig = items.filter((x) => !x.optioneel);
-  return { items, klaar: nodig.filter((x) => x.status === "ok").length, totaal: nodig.length, links: LINKS, at: Date.now() };
+  // De proef op starttegoed loopt af of het tegoed is bijna op: dat staat bij de server (ook bij Standaard).
+  const pv = G.proefView(a);
+  if (pv?.waarschuwing) {
+    const i = items.findIndex((x) => x.id === "server");
+    items[i] = { ...items[i], status: "bijna", detail: pv.waarschuwing, actie: { ...items[i].actie, label: "Regelen" } };
+  }
+  const lijstUit = gratis ? items.map((x) => gratisItem(x, { a, host, ns, na, pv, scwOk: ch.scaleway === true && !!acc.scalewaySecretKey })) : items;
+  if (gratis && a.gratisAdres && host === a.gratisAdres.naam && !a.gratisAdres.klaar && ns && nsMatch(ns.values, DESEC_NS)) { a.gratisAdres.klaar = true; deps.save(); }
+  const nodig = lijstUit.filter((x) => !x.optioneel);
+  return {
+    items: lijstUit, klaar: nodig.filter((x) => x.status === "ok").length, totaal: nodig.length, links: LINKS, at: Date.now(),
+    modus: G.modus(c),
+    kosten: gratis ? gratisKosten(a, na, pv) : null,
+    waarschuwing: pv?.waarschuwing ? { titel: pv.titel, tekst: pv.waarschuwing, provider: pv.provider } : null,
+    proefAanbieders: gratis ? proefAanbieders(offers) : null,
+  };
+}
+
+// ───────── Zo gratis mogelijk beginnen ─────────
+
+const U_DOMEIN_GRATIS = "Het adres van je Dienst. Gratis: een naam als jouwbedrijf.dedyn.io bij deSEC. Een eigen domein kan later altijd.";
+const U_SERVER_GRATIS = "Een eigen server voor je Dienst, met elk uur een versleutelde back-up. Gratis te proberen met starttegoed bij UpCloud of Exoscale; daarna verhuist de app je Dienst met één tik naar een betaalde server.";
+
+/** Een regel met een andere status (de knop past zich aan) en de gratis route erbij. */
+function opnieuw(x: Item, patch: Partial<Item>, route: string): Item {
+  const status = patch.status ?? x.status;
+  const soort = patch.actie?.soort ?? x.actie.soort;
+  const label = soort === "hub" ? "Bekijken" : status === "ok" ? "Wijzigen" : "Regelen";
+  return { ...x, ...patch, actie: { label, soort, doel: patch.actie?.doel ?? x.actie.doel }, route };
+}
+
+type GCtx = { a: A & G.GratisState; host: string | null; ns: { rcode: number; values: string[] } | null; na: { bedrag: number; vanaf: boolean } | null; pv: ReturnType<typeof G.proefView>; scwOk: boolean };
+
+/** Bij "Zo gratis mogelijk beginnen": per onderdeel de gratis route, wat het kost en (domein, server) een andere status. */
+function gratisItem(x: Item, g: GCtx): Item {
+  const { a, host, ns, pv } = g;
+  const dedyn = G.isDedyn(host);
+  const deSec = !!ns && nsMatch(ns.values, DESEC_NS);
+  switch (x.id) {
+    case "domein":
+      if (!host) return opnieuw(x, { uitleg: U_DOMEIN_GRATIS, kosten: "gratis", detail: "Nog geen naam gekozen" }, "Gratis adres bij deSEC");
+      if (dedyn) return opnieuw(x, { uitleg: U_DOMEIN_GRATIS, kosten: "gratis", status: deSec ? "ok" : "bijna", detail: deSec ? `${host} staat bij deSEC` : `deSEC zet ${host} klaar; dat duurt meestal een paar minuten` }, "Gratis adres bij deSEC");
+      return opnieuw(x, { uitleg: U_DOMEIN_GRATIS }, "Eigen domein");
+    case "dns":
+      if (!host) return opnieuw(x, { kosten: "gratis", detail: "Kies eerst een adres (hierboven)" }, "Gratis bij deSEC");
+      if (dedyn && a.dns?.zone === host && !a.dns.error) return opnieuw(x, { kosten: "gratis", status: deSec ? "ok" : "bijna", detail: deSec ? `${host} staat bij deSEC; de app zet de records` : "De app zet de records zodra deSEC je adres heeft klaargezet" }, "Gratis bij deSEC");
+      return opnieuw(x, { kosten: "gratis bij deSEC" }, "Gratis bij deSEC");
+    case "server": {
+      const na = G.naTekst(g.na);
+      const backup = a.backup?.provider === "scaleway" ? ` · back-ups ${G.BACKUP_KOSTEN}` : "";
+      const kosten = pv?.actief ? (pv.eindTekst && !pv.verlopen ? `gratis tot ${pv.eindTekst}, daarna ${na}${backup}` : `gratis tot je starttegoed op is, daarna ${na}${backup}`)
+        : !a.hosting ? `gratis met starttegoed, daarna ${na}` : x.kosten;
+      const paneel = { label: "", soort: "paneel" as const, doel: "server" };
+      if (!a.hosting || !a.backup) return opnieuw(x, { uitleg: U_SERVER_GRATIS, kosten, detail: "Kies UpCloud of Exoscale om gratis te proberen", actie: paneel }, "Gratis proberen met starttegoed");
+      if (pv?.actief && !pv.waarschuwing && x.status === "ok") {
+        const info = [pv.eindTekst ? `tot ${pv.eindTekst}` : null, pv.tegoedTekst ? `tegoed ${pv.tegoedTekst}` : null].filter(Boolean).join(", ");
+        return opnieuw(x, { uitleg: U_SERVER_GRATIS, kosten, detail: `Draait op starttegoed bij ${pv.naam}${info ? ` (${info})` : ""}`, actie: paneel }, "Gratis proberen met starttegoed");
+      }
+      return opnieuw(x, { uitleg: U_SERVER_GRATIS, kosten, actie: paneel }, pv?.actief ? "Gratis proberen met starttegoed" : "Betaalde server");
+    }
+    case "scaleway":
+      return opnieuw(x, { kosten: "gratis account; je betaalt alleen wat je klanten gebruiken (zit in je prijs)", ...(x.status === "open" ? { detail: "Nog geen sleutel. Een account is gratis; Scaleway vraagt wel een betaalmethode" } : {}) }, "Gratis account");
+    case "mollie":
+      return opnieuw(x, { kosten: "gratis account; geen vaste kosten, per betaling een klein bedrag (zit in je prijs)" }, "Gratis account");
+    case "mail":
+      return opnieuw(x, { kosten: G.MAIL_KOSTEN, ...(x.status === "open" ? { detail: g.scwOk ? "Nog geen mail; regel het via Scaleway" : "Regel eerst Scaleway (gratis account)" } : {}) }, "Gratis via Scaleway");
+    case "openprovider":
+      return opnieuw(x, x.status === "open" ? { detail: "Niet nodig met een gratis adres (optioneel)" } : {}, "Niet nodig om te beginnen");
+    case "adressendienst":
+      return opnieuw(x, !a.adressen ? { detail: "Niet nodig: hiervoor heb je een eigen domein nodig (optioneel)" } : {}, "Niet nodig");
+    case "voorwaarden":
+      return opnieuw(x, { kosten: "gratis" }, "Gratis");
+    default:
+      return opnieuw(x, {}, "Gratis");
+  }
+}
+
+/** Het eerlijke totaal bovenaan bij "Zo gratis mogelijk beginnen". */
+function gratisKosten(a: A & G.GratisState, na: { bedrag: number; vanaf: boolean; provider: string | null; naam: string | null } | null, pv: ReturnType<typeof G.proefView>) {
+  const proef = !a.hosting || !!pv?.actief;
+  const tekst = proef ? `€ 0 per maand tot je starttegoed op is; daarna ${G.naTekst(na)} voor de server (zonder btw)`
+    : a.hosting?.monthly != null ? `Ongeveer ${G.euro(a.hosting.monthly)} per maand voor de server (zonder btw)` : "Wat de server kost, zegt deze aanbieder niet vooraf";
+  const regels = [
+    ...(a.backup?.provider === "scaleway" || (!a.backup && pv?.provider !== "exoscale") ? [`Back-ups bij Scaleway: ${G.BACKUP_KOSTEN}.`] : []),
+    `Mail: ${G.MAIL_KOSTEN}.`,
+    "Scaleway en Mollie: geen vaste kosten. Je betaalt per betaling en wat je klanten gebruiken; dat zit in je prijzen.",
+  ];
+  return { tekst, na: proef ? na : null, regels, buiten: "Buiten de app: je bedrijf inschrijven bij de KvK kost eenmalig een bedrag; Mollie werkt alleen met een ingeschreven bedrijf." };
+}
+
+/** De aanbieders met starttegoed, met wat ze zeggen en de velden voor de sleutel. */
+function proefAanbieders(offers: () => ServerOffer[]) {
+  const list = offers();
+  return G.PROEF_IDS.map((id) => {
+    const o = list.find((x) => x.id === id);
+    const p = G.PROEF[id];
+    return { id, naam: p.naam, aanmelden: p.aanmelden, wat: p.wat, tijdens: p.tijdens, einde: p.einde, backup: p.backupUitleg, bron: p.bron, keyHelp: o?.keyHelp ?? "", fields: o?.fields ?? [] };
+  });
 }
 
 // ───────── Scaleway: één sleutel, de app regelt de rest ─────────
@@ -660,6 +765,8 @@ export async function kopen(c: AdminConfig, b: { voor?: string; zone?: string; p
 
 /** SMTP van Scaleway TEM (scaleway.com/en/docs/transactional-email/reference-content/smtp-configuration/). Tests: EIGEN_TEM_SMTP. */
 export const temSmtp = () => process.env.EIGEN_TEM_SMTP || "smtp.tem.scaleway.com:587";
+/** Mail via de HTTPS-koppeling van Scaleway TEM: scwtem://<project-id>:<sleutel>@fr-par (src/broker/mail.ts). */
+export const TEM_API_SCHEME = "scwtem:";
 
 /** Zet de mailrecords bij de eigen DNS-koppeling (als het maildomein onder die zone valt); anders blijven ze voor jou. */
 async function publishMail(a: A, recs: MailRec[]) {
@@ -738,7 +845,10 @@ export async function mail(c: AdminConfig, b: { manier?: string; smtpUrl?: strin
     { naam: `_dmarc.${host}`, type: "TXT", waarde: rec.dmarc?.value ?? "v=DMARC1; p=none", gezet: false },
   ];
   const records = await publishMail(a, want);
-  const url = `smtp://${encodeURIComponent(projectId)}:${encodeURIComponent(key)}@${temSmtp()}`;
+  // Zo gratis mogelijk: via de HTTPS-koppeling van Scaleway (scwtem://, zie src/broker/mail.ts). Een proefserver (UpCloud)
+  // laat naar buiten alleen de webpoorten toe; SMTP kan daar niet. Standaard: SMTP zoals altijd.
+  const url = G.modus(c) === "gratis" ? `${TEM_API_SCHEME}//${encodeURIComponent(projectId)}:${encodeURIComponent(key)}@fr-par`
+    : `smtp://${encodeURIComponent(projectId)}:${encodeURIComponent(key)}@${temSmtp()}`;
   acc.smtpUrl = url;
   acc.mailFrom = `noreply@${host}`;
   await scw("POST", `${TEM_DOMAINS}/${dom.id}/check`, key, {}).catch(() => null);

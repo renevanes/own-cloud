@@ -1,5 +1,14 @@
 [
   {
+    "version": "1.18",
+    "date": "2026-10-12",
+    "changes": [
+      "Nieuw voor aanbieders: 'Zo gratis mogelijk beginnen'. Met een gratis adres bij deSEC (naam.dedyn.io), gratis DNS en tot 300 gratis mails per maand via Scaleway",
+      "Je Dienst kan gratis draaien op starttegoed bij UpCloud of Exoscale; de app laat zien hoeveel tegoed er nog is en tot wanneer",
+      "Bijna op? Met één knop verhuist je Dienst naar de goedkoopste betaalde server, met je gegevens en adres mee"
+    ]
+  },
+  {
     "version": "1.17",
     "date": "2026-10-12",
     "changes": [

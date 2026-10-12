@@ -4,9 +4,12 @@ import { L, RIGHTS_HIDDEN, failText, good, look, loginFailed, row, type KeyCheck
 
 // ───────── UpCloud (Finland, met zones in o.a. Amsterdam en Frankfurt) ─────────
 
+/** Basisadres van de UpCloud-API (in tests een nepserver via EIGEN_UPCLOUD_API; in de app Endpoints.UPCLOUD). */
+export const upcApi = () => (process.env.EIGEN_UPCLOUD_API ?? "https://api.upcloud.com/1.3").replace(/\/+$/, "");
+
 export class UpCloudProvider implements Provider {
   readonly name = "upcloud";
-  private base = "https://api.upcloud.com/1.3";
+  private base = upcApi();
   constructor(private cfg: { username?: string; password?: string; token?: string; template?: string; sshKey?: string }) {}
   private h() {
     const auth = this.cfg.token ? `Bearer ${this.cfg.token}` : "Basic " + Buffer.from(`${this.cfg.username}:${this.cfg.password}`).toString("base64");
@@ -64,9 +67,8 @@ export class UpCloudProvider implements Provider {
 }
 
 /** Token (Bearer) of gebruikersnaam en wachtwoord (Basic), zoals UpCloudProvider. */
-const upcAuth = (f: Record<string, string>) => f.token ? `Bearer ${f.token}` : "Basic " + Buffer.from(`${f.username}:${f.password}`).toString("base64");
+export const upcAuth = (f: Record<string, string>) => f.token ? `Bearer ${f.token}` : "Basic " + Buffer.from(`${f.username}:${f.password}`).toString("base64");
 
-const UPC = "https://api.upcloud.com/1.3";
 
 /**
  * GET /account (inloggen), /server (servers bekijken) en /plan (formaten; prijzen geeft deze koppeling niet).
@@ -75,13 +77,13 @@ const UPC = "https://api.upcloud.com/1.3";
  */
 async function upcloudCheck(f: Record<string, string>): Promise<KeyCheck[]> {
   const h = { authorization: upcAuth(f) };
-  const a = await look(`${UPC}/account`, h);
+  const a = await look(`${upcApi()}/account`, h);
   const rest: [string, string][] = [["servers", L.servers], ["sizes", L.sizes], ["rights", L.rights]];
   if (a.status === 401) return loginFailed("UpCloud herkent deze sleutel niet. Maak een nieuw token: UpCloud Hub → Account → API-tokens.", rest);
   if (a.status === 403) return loginFailed("UpCloud staat API-toegang voor dit account niet toe. Zet bij Account → Permissions 'API-toegang' aan.", rest);
   if (!good(a.status)) return loginFailed(failText(a), rest);
-  const s = await look(`${UPC}/server`, h);
-  const p = await look(`${UPC}/plan`, h);
+  const s = await look(`${upcApi()}/server`, h);
+  const p = await look(`${upcApi()}/plan`, h);
   return [
     row("login", L.login, true),
     good(s.status) ? row("servers", L.servers, true) : s.status === 403 ? row("servers", L.servers, false, "Dit account mag geen servers bekijken. Geef het toegang: UpCloud Hub → People → Permissions.") : row("servers", L.servers, false, failText(s)),
@@ -107,7 +109,7 @@ export const upcloud: ProviderAdapter = {
     ],
     create: (f) => new UpCloudProvider(f as never),
     async fetchSizes(cfg) {
-      const j = await getJson(`${UPC}/plan`, { authorization: upcAuth(cfg) });
+      const j = await getJson(`${upcApi()}/plan`, { authorization: upcAuth(cfg) });
       return (j.plans.plan as any[])
         .filter((p) => /^\d+xCPU-\d+GB$/.test(p.name))
         .map((p) => ({ size: p.name, label: `${p.core_number} vCPU, ${p.memory_amount / 1024} GB`, ramGb: p.memory_amount / 1024, cpus: p.core_number, monthly: null }))

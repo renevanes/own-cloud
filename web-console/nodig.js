@@ -40,6 +40,29 @@ export const NODIG_CSS = `
 .recs > div { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; display: grid; gap: 2px; }
 .recs code { overflow-wrap: anywhere; }
 @media (max-width: 520px) { .nrow .head { grid-template-columns: 30px 1fr; } .nrow .head .btn { grid-column: 2; justify-self: start; } }
+.nmodus { border: 0; margin: 0; padding: 0; display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.nmodus legend { font-weight: 700; margin-bottom: 8px; padding: 0; }
+.nkeus { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: start; padding: 12px 14px; border: 1.5px solid var(--line); border-radius: var(--radius-l); background: var(--panel); cursor: pointer; }
+.nkeus input { margin: 3px 0 0; accent-color: var(--accent); width: auto; }
+.nkeus b { font-size: 15px; }
+.nkeus small { grid-column: 2; color: var(--muted); font-size: 13px; }
+.nkeus.on { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.ngratis { border-left: 4px solid var(--accent); background: var(--accent-soft); padding: 12px 14px; border-radius: var(--radius-s); display: grid; gap: 6px; }
+.ngratis b { font-size: 15px; }
+.ngratis ul { margin: 0; padding-left: 18px; font-size: 13px; display: grid; gap: 2px; }
+.ngratis small { font-size: 12px; }
+.nwarn { margin: 0; display: grid; gap: 10px; }
+.nwarn .actions { margin: 0; }
+.nrow .txt .route { justify-self: start; font-size: 12px; font-weight: 700; padding: 1px 8px; border-radius: 99px; background: var(--accent-soft); color: var(--text); }
+.nrow .txt .route.niet { background: var(--sunk); color: var(--muted); }
+.proefkeus { display: grid; gap: 10px; }
+.proefkeus .pk { border: 1.5px solid var(--line); border-radius: var(--radius-l); padding: 12px 14px; display: grid; gap: 6px; background: var(--panel); }
+.proefkeus .pk.on { border-color: var(--accent); }
+.proefkeus .pk p { margin: 0; font-size: 14px; }
+.proefkeus .pk small { color: var(--muted); font-size: 13px; }
+.tegoed { height: 8px; border-radius: 99px; background: var(--sunk); overflow: hidden; }
+.tegoed i { display: block; height: 100%; background: var(--accent); }
+.tegoed.laag i { background: var(--warn); }
 dialog.nvenster[open] { max-height: 92vh; overflow: auto; }
 dialog.nvenster .nrow { border: 0; background: none; }
 dialog.nvenster .nrow .body { border-top: 0; padding: 4px 0 0; }
@@ -65,12 +88,22 @@ export async function renderNodig(box, ctx, opts = {}) {
   const row = (x) => `<li class="nrow ${x.status}" data-id="${esc(x.id)}">
       <div class="head"><span class="ico" aria-hidden="true">${ICON[x.status]}</span>
         <div class="txt"><b>${esc(x.label)}<span class="visually-hidden">: ${esc(STATUS_TEXT[x.status])}</span></b><span class="u">${esc(x.uitleg)}</span>
-          <span class="d">${esc(x.detail)}</span>${x.kosten ? `<span class="k">Kosten: ${esc(x.kosten)}</span>` : ""}</div>
+          <span class="d">${esc(x.detail)}</span>${x.route ? `<span class="route${/^Niet nodig/.test(x.route) ? " niet" : ""}">${esc(x.route)}</span>` : ""}${x.kosten ? `<span class="k">Kosten: ${esc(x.kosten)}</span>` : ""}</div>
         ${x.actie.soort === "hub" && !ctx.a.hub ? "" : `<button type="button" class="btn${x.status === "ok" ? "" : " primary"}" data-actie="${esc(x.id)}">${esc(x.actie.label)}</button>`}</div>
       <div class="body" hidden></div></li>`;
   const must = l.items.filter((x) => !x.optioneel), opt = l.items.filter((x) => x.optioneel);
   const pct = l.totaal ? Math.round((l.klaar / l.totaal) * 100) : 0;
+  const gratis = l.modus === "gratis";
   box.innerHTML = `<div class="nodig">
+    ${l.waarschuwing ? `<div class="note warn nwarn"><div><b>${esc(l.waarschuwing.titel)}</b><br><small>${esc(l.waarschuwing.tekst)}</small></div>
+      <div class="actions"><button type="button" class="btn primary" data-verhuis>Verhuizen naar een betaalde server</button></div></div>` : ""}
+    <fieldset class="nmodus"><legend>Hoe wil je beginnen?</legend>
+      <label class="nkeus${gratis ? " on" : ""}"><input type="radio" name="nmodus" value="gratis" ${gratis ? "checked" : ""}><b>Zo gratis mogelijk beginnen</b>
+        <small>Een gratis adres bij deSEC, een server op starttegoed en gratis mail. Later verhuist de app je Dienst met één tik naar een betaalde server.</small></label>
+      <label class="nkeus${gratis ? "" : " on"}"><input type="radio" name="nmodus" value="standaard" ${gratis ? "" : "checked"}><b>Standaard</b>
+        <small>Een eigen domein en een betaalde server vanaf het begin.</small></label>
+    </fieldset>
+    ${gratis && l.kosten ? `<div class="ngratis"><b>${esc(l.kosten.tekst)}</b><ul>${l.kosten.regels.map((r) => `<li>${esc(r)}</li>`).join("")}</ul><small class="muted">${esc(l.kosten.buiten)}</small></div>` : ""}
     <div class="sum"><b>${l.klaar === l.totaal ? "Alles is geregeld" : `${l.klaar} van ${l.totaal} geregeld`}</b>
       <div class="bar2" role="progressbar" aria-valuemin="0" aria-valuemax="${l.totaal}" aria-valuenow="${l.klaar}"><i style="width:${pct}%"></i></div>
       <small class="muted">Wat via een koppeling kan, regelt de app. Een account openen (met je naam, betaalgegevens of een ID-controle) doe je zelf; de app opent de juiste pagina en ziet daarna zelf dat het gelukt is.</small>
@@ -82,6 +115,13 @@ export async function renderNodig(box, ctx, opts = {}) {
     ${opts.start ? `<div class="actions" style="margin:0"><button type="button" class="btn primary big" data-start>Beginnen</button></div>` : ""}
   </div>`;
   box.querySelector("#nFresh").onclick = () => renderNodig(box, ctx, { ...opts, fresh: true, open: null });
+  box.querySelectorAll("input[name=nmodus]").forEach((r) => r.onchange = async () => {
+    try { await ctx.api("/api/aanbieder/modus", { method: "POST", body: { modus: r.value } }); } catch { /* blijft zoals het was */ }
+    renderNodig(box, ctx, { ...opts, fresh: false, open: null });
+  });
+  box.querySelectorAll("[data-verhuis]").forEach((b) => b.onclick = () => verhuisVenster(ctx, (flash) => renderNodig(box, ctx, { ...opts, fresh: true, open: "server", flash })));
+  ctx.nodig = l;
+  ctx.openRow = (id) => { const x = l.items.find((y) => y.id === id); if (x) act(box, ctx, x, l, opts); };
   box.querySelectorAll("[data-start]").forEach((b) => b.onclick = () => ctx.aStep("bedrijf").then(() => ctx.goHash("aanbieder")).catch(() => {}));
   ctx.links = l.links;
   const items = Object.fromEntries(l.items.map((x) => [x.id, x]));
@@ -100,6 +140,8 @@ async function updateRows(box, ctx) {
     li.classList.add(x.status);
     li.querySelector(".ico").textContent = ICON[x.status];
     li.querySelector(".txt .d").textContent = x.detail;
+    const k = li.querySelector(".txt .k");
+    if (k && x.kosten) k.textContent = `Kosten: ${x.kosten}`;
     const b = li.querySelector("[data-actie]");
     if (b) { b.textContent = x.actie.label; b.classList.toggle("primary", x.status !== "ok"); }
   }
@@ -135,7 +177,7 @@ function act(box, ctx, x, l, opts) {
 }
 
 /** Titel van een onderdeel in een venster (regelVenster). */
-const TITELS = { scaleway: "Scaleway met één sleutel", desec: "Gratis deSEC-account", mollie: "Mollie nagaan", mail: "Mail van je Dienst", openprovider: "Openprovider koppelen", domein: "Domein", dns: "DNS voor je domein", adressendienst: "Gratis-adressendienst" };
+const TITELS = { scaleway: "Scaleway met één sleutel", desec: "Gratis deSEC-account", mollie: "Mollie nagaan", mail: "Mail van je Dienst", openprovider: "Openprovider koppelen", domein: "Domein", dns: "DNS voor je domein", adressendienst: "Gratis-adressendienst", server: "Server op starttegoed" };
 
 /**
  * Eén onderdeel regelen in een venster, zonder de lijst eromheen: hetzelfde paneel als in "Wat je nodig hebt". Voor de
@@ -157,6 +199,8 @@ export async function regelVenster(id, ctx, onDone) {
   try { l = await ctx.api("/api/aanbieder/benodigdheden"); }
   catch (err) { body.innerHTML = `<p class="msg err" style="margin:0">${ctx.esc(err.message)}</p>`; return; }
   ctx.links = l.links;
+  ctx.nodig = l;
+  ctx.openRow = (other) => { close(); regelVenster(other, ctx, onDone); };
   const again = (flash) => { close(); onDone?.(typeof flash === "string" ? flash : null); };
   again.rows = () => {};
   PANELS[id]?.(body, ctx, again, l);
@@ -231,13 +275,64 @@ async function checkDomein(el, ctx, body, again) {
 // ───────── Panelen ─────────
 
 function pDomein(body, ctx, again) {
+  if (ctx.nodig?.modus === "gratis") return pDomeinGratis(body, ctx, again);
+  return pDomeinEigen(body, ctx, again);
+}
+
+/** Zo gratis mogelijk: een naam bij deSEC (naam.dedyn.io), nagaan of hij vrij is, maken en wachten tot hij werkt. */
+function pDomeinGratis(body, ctx, again) {
   const { esc, a } = ctx;
-  body.innerHTML = `<form class="fields" id="nf"><label>Adres van je Dienst<input name="url" value="${esc(a.url ?? a.defaultUrl ?? "")}" placeholder="dienst.jouwbedrijf.nl" autocapitalize="off" spellcheck="false" required>
+  const host = (a.url ?? "").replace(/^https:\/\//, "");
+  const dedyn = /^[^.]+\.dedyn\.io$/.test(host);
+  const token = !!a.accounts?.desecToken;
+  const naam = (a.gratisAdres?.naam ?? (dedyn ? host : "")).replace(/\.dedyn\.io$/, "");
+  body.innerHTML = `<form class="fields" id="nGa">
+      <p style="margin:0">deSEC geeft je gratis een eigen naam onder <b>dedyn.io</b>, met DNSSEC. Dat wordt het adres van je Dienst, bijvoorbeeld <b>jouwbedrijf.dedyn.io</b>. Eén gratis adres per deSEC-account.</p>
+      ${token ? "" : `<p class="note warn" style="margin:0">Hiervoor heb je eerst een gratis deSEC-account nodig; de app maakt het voor je. <button type="button" class="link" id="nGaDesec">deSEC-account maken</button></p>`}
+      <label>Naam van je gratis adres<div class="suffix"><input name="naam" value="${esc(naam)}" placeholder="jouwbedrijf" autocapitalize="off" spellcheck="false" autocomplete="off" required><span>.dedyn.io</span></div>
+        <small>Kleine letters, cijfers en streepjes.</small></label>
+      ${a.server && host && !dedyn ? `<p class="note warn" style="margin:0">Een nieuw adres gaat pas in na <b>Opnieuw opzetten</b>.</p>` : ""}
+      <div class="actions" style="margin:0"><button type="button" class="btn" id="nGaCheck" ${token ? "" : "disabled"}>Nagaan of hij vrij is</button><button class="btn primary" ${token ? "" : "disabled"}>Maak dit adres</button></div>
+      <div id="nGaRes"></div><p class="msg"></p></form>
+    <details${host && !dedyn ? " open" : ""}><summary>Ik heb een eigen domein</summary><div id="nEigen" class="fields" style="margin-top:10px"></div></details>`;
+  pDomeinEigen(body.querySelector("#nEigen"), ctx, again, { leeg: dedyn });
+  body.querySelector("#nGaDesec")?.addEventListener("click", () => ctx.openRow?.("desec"));
+  const f = body.querySelector("#nGa"), res = body.querySelector("#nGaRes");
+  const show = (r) => {
+    const cls = { vrij: "ok", klaar: "ok", "van-jou": "ok", wacht: "", bezet: "err", ander: "err", onbekend: "" }[r.status] ?? "";
+    res.innerHTML = `<p class="msg ${cls}" style="margin:0">${esc(r.uitleg)}</p>
+      ${r.status === "wacht" ? `<p class="muted" style="margin:0"><small>Je kunt intussen verder met de rest van de lijst.</small></p>` : ""}
+      ${r.status === "ander" ? `<div><button type="button" class="btn" id="nGaAnder">${esc(r.ander)} gebruiken</button></div>` : ""}`;
+    res.querySelector("#nGaAnder")?.addEventListener("click", (e) => run(e.target, r.ander, true));
+    clearInterval(timer);
+    // deSEC zet de naam in dedyn.io; zolang dat duurt, elke 15 seconden opnieuw kijken.
+    if (r.status === "wacht") timer = setInterval(async () => {
+      if (!res.isConnected) return clearInterval(timer);
+      try { const n = await ctx.api("/api/aanbieder/gratis-adres", { method: "POST", body: { naam: r.naam } }); if (n.status !== "wacht") { clearInterval(timer); show(n); again.rows(); } } catch { /* volgende keer */ }
+    }, 15_000);
+  };
+  const run = async (btn, naamIn, maken) => {
+    if (maken) res.innerHTML = `<p class="muted" style="margin:0">Bezig: deSEC maakt je adres. Dat kan een halve minuut duren…</p>`;
+    try {
+      const r = await ctx.busy(btn, () => ctx.api("/api/aanbieder/gratis-adres", { method: "POST", body: { naam: naamIn, maken } }));
+      ctx.formMsg(f, "");
+      if (maken && r.gebruikt) { ctx.a = await ctx.api("/api/aanbieder"); again.rows(); }
+      show(r);
+    } catch (err) { res.innerHTML = ""; ctx.formMsg(f, err.message); }
+  };
+  body.querySelector("#nGaCheck").onclick = (e) => run(e.target, f.naam.value, false);
+  f.onsubmit = (e) => { e.preventDefault(); run(f.querySelector("button.primary"), f.naam.value, true); };
+  if (token && dedyn && a.gratisAdres?.naam === host) run(body.querySelector("#nGaCheck"), host, false);
+}
+
+function pDomeinEigen(body, ctx, again, opts = {}) {
+  const { esc, a } = ctx;
+  body.innerHTML = `<form class="fields" id="nf"><label>Adres van je Dienst<input name="url" value="${esc(opts.leeg ? "" : a.url ?? a.defaultUrl ?? "")}" placeholder="dienst.jouwbedrijf.nl" autocapitalize="off" spellcheck="false" required>
       <small>Een naam onder je eigen domein, bijvoorbeeld dienst.jouwbedrijf.nl. Nog geen domein? Vul het gewenste adres in; de app kijkt of het nog vrij is.</small></label>
     ${a.server ? `<p class="note warn" style="margin:0">Een nieuw adres gaat pas in na <b>Opnieuw opzetten</b>.</p>` : ""}
     <p class="msg"></p><div><button class="btn primary">Opslaan en nagaan</button></div></form><div id="nRes" class="fields"></div>`;
   const f = body.querySelector("#nf");
-  if (a.url) checkDomein(body.querySelector("#nRes"), ctx, {}, again);
+  if (a.url && !opts.leeg) checkDomein(body.querySelector("#nRes"), ctx, {}, again);
   f.onsubmit = async (e) => {
     e.preventDefault();
     try {
@@ -277,7 +372,7 @@ function pScaleway(body, ctx, again, l) {
   const { esc } = ctx;
   const klaar = l.items.find((x) => x.id === "scaleway")?.status === "ok";
   body.innerHTML = `${klaar ? `<p style="margin:0">Je Dienst heeft een eigen sleutel bij Scaleway. Opnieuw doen kan altijd: er komt niets dubbel.</p><details><summary>Opnieuw met een sleutel</summary>` : ""}<ol class="guide">
-      <li><b>Een account bij Scaleway.</b> Met je bedrijfsgegevens en een betaalmethode; dat doe je zelf.
+      <li><b>Een account bij Scaleway.</b> Met je bedrijfsgegevens en een betaalmethode; dat doe je zelf.${ctx.nodig?.modus === "gratis" ? ` Een account is gratis. Scaleway vraagt wel een betaalmethode voordat je iets kunt gebruiken: een creditcard (met een controlebedrag van € 1 dat je terugkrijgt) of SEPA-incasso (met een identiteitscontrole). Je hebt het toch nodig voor de clouds van je klanten en voor de mail.` : ""}
         <div>${linkBtn(ctx, ctx.links.scaleway.aanmelden, "Account maken")} <span class="muted">Heb je er al een? Sla deze stap over.</span></div></li>
       <li><b>Eén API-sleutel voor jezelf.</b> Kies <i>Generate API key</i>, bij <i>Bearer</i> jezelf (niet een applicatie), zonder vervaldatum. Kopieer de twee sleutels die Scaleway één keer laat zien.
         <div>${linkBtn(ctx, ctx.links.scaleway.sleutels, "Sleutelpagina openen")}</div></li>
@@ -348,7 +443,7 @@ function pMollie(body, ctx, again) {
 function mailResult(el, ctx, r) {
   const { esc } = ctx;
   el.innerHTML = !r.manier ? "" : `<div class="panel" style="margin:0"><ul class="results">
-      <li class="${r.werkt ? "" : "bad"}">${r.werkt ? "Inloggen bij de mailserver werkt" : "Inloggen bij de mailserver lukt niet"}<small>${esc(r.smtp ?? "")}${r.afzender ? ` · afzender ${esc(r.afzender)}` : ""}</small></li>
+      <li class="${r.werkt ? "" : "bad"}">${/^scwtem:/.test(r.smtp ?? "") ? (r.werkt ? "Mail versturen via de webkoppeling van Scaleway werkt" : "Mail versturen via Scaleway lukt niet") : r.werkt ? "Inloggen bij de mailserver werkt" : "Inloggen bij de mailserver lukt niet"}<small>${/^scwtem:/.test(r.smtp ?? "") ? "Via HTTPS, zonder SMTP" : esc(r.smtp ?? "")}${r.afzender ? ` · afzender ${esc(r.afzender)}` : ""}</small></li>
       ${r.manier === "scaleway" ? `<li class="${r.status === "checked" ? "" : "meh"}">${r.status === "checked" ? `Scaleway heeft ${esc(r.domein)} goedgekeurd` : `Scaleway controleert ${esc(r.domein)}`}<small>${r.status === "checked" ? "" : "Dat duurt meestal een paar minuten tot een uur."}</small></li>` : ""}</ul>
     ${r.records?.length ? `<div class="recs">${r.records.map((x) => `<div><b>${esc(x.type)} ${esc(x.naam)}</b>${x.gezet ? `<small class="muted">Door de app in je DNS gezet</small>` : `<small class="muted">Zet dit record zelf bij je DNS:</small>${copyLine(ctx, x.waarde)}`}</div>`).join("")}</div>` : ""}
     ${r.manier === "scaleway" && r.status !== "checked" ? `<div><button type="button" class="btn" id="nMailAgain">Opnieuw nagaan</button></div>` : ""}
@@ -359,11 +454,19 @@ function mailResult(el, ctx, r) {
   });
 }
 
+/** Uitleg bij "Regel het via Scaleway", met de gratis route als die gekozen is. */
+function gratisMail(scwOk, ctx) {
+  const gratis = ctx.nodig?.modus === "gratis";
+  if (!scwOk) return gratis ? "Regel eerst Scaleway (hierboven). Een account is gratis; Scaleway vraagt wel een betaalmethode. Je hebt het toch nodig voor de clouds van je klanten." : "Regel eerst Scaleway (hierboven).";
+  return gratis ? "Gratis tot 300 mails per maand, daarna € 0,25 per 1.000 (volgens Scaleway). De app meldt het adres van je Dienst aan als maildomein en zet de records in je DNS. De mail gaat via de beveiligde webkoppeling van Scaleway, zodat hij ook werkt op een proefserver waar de mailpoorten dicht zijn."
+    : "De app meldt het adres van je Dienst aan als maildomein, zet de records in je DNS en vult de mailserver in. Meestal gratis.";
+}
+
 function pMail(body, ctx, again, l) {
   const scwOk = l.items.find((x) => x.id === "scaleway")?.status === "ok";
   const cloud = !!ctx.config?.mailRelay;
   body.innerHTML = `<form class="fields" id="nf">
-      <label class="check"><input type="radio" name="manier" value="scaleway" ${scwOk ? "checked" : "disabled"}> Regel het via Scaleway (aanbevolen)<small>${scwOk ? "De app meldt het adres van je Dienst aan als maildomein, zet de records in je DNS en vult de mailserver in. Meestal gratis." : "Regel eerst Scaleway (hierboven)."}</small></label>
+      <label class="check"><input type="radio" name="manier" value="scaleway" ${scwOk ? "checked" : "disabled"}> Regel het via Scaleway (aanbevolen)<small>${gratisMail(scwOk, ctx)}</small></label>
       ${cloud ? `<label class="check"><input type="radio" name="manier" value="cloud" ${scwOk ? "" : "checked"}> Via de mail van je eigen cloud</label>` : ""}
       <label class="check"><input type="radio" name="manier" value="smtp" ${!scwOk && !cloud ? "checked" : ""}> Een eigen mailserver (SMTP)</label>
       <div id="nSmtp" class="row" hidden><label>Mailserver<input name="smtpUrl" placeholder="smtp://gebruiker:wachtwoord@server:587" autocomplete="off" spellcheck="false"></label><label>Afzender<input name="mailFrom" type="email" placeholder="noreply@jouwbedrijf.nl"></label></div>
@@ -479,7 +582,7 @@ function pOpenprovider(body, ctx, again) {
 }
 
 /** Per onderdeel het paneel onder "Regelen". */
-const PANELS = { domein: pDomein, dns: pDns, scaleway: pScaleway, mollie: pMollie, mail: pMail, desec: pDesec, openprovider: pOpenprovider, adressendienst: pAdressen };
+const PANELS = { domein: pDomein, dns: pDns, scaleway: pScaleway, mollie: pMollie, mail: pMail, desec: pDesec, openprovider: pOpenprovider, adressendienst: pAdressen, server: pServer };
 
 function pAdressen(body, ctx, again) {
   const { esc, a } = ctx;
@@ -490,4 +593,138 @@ function pAdressen(body, ctx, again) {
   const f = body.querySelector("#nf"), res = body.querySelector("#nRes");
   if (a.adressen?.zone) checkDomein(res, ctx, { voor: "adressen", zone: a.adressen.zone }, again);
   f.onsubmit = (e) => { e.preventDefault(); checkDomein(res, ctx, { voor: "adressen", zone: f.zone.value }, again); };
+}
+
+// ───────── Server op starttegoed en verhuizen ─────────
+
+/** Het tegoed als balkje, met de einddatum. */
+function proefInfo(ctx, p) {
+  const { esc } = ctx;
+  return `<div class="panel" style="margin:0"><div><b>Proef bij ${esc(p.naam)}</b>${p.actief ? "" : ` <span class="chip">${p.verhuisd ? "verhuisd" : "niet meer in gebruik"}</span>`}</div>
+    <dl class="kv"><dt>Tot</dt><dd>${esc(p.eindTekst ?? "tot je tegoed op is")}${p.eindBron === "geschat" ? ` <small class="muted">(geschat: ${esc(p.naam)} noemt 7 dagen vanaf het begin)</small>` : ""}</dd>
+      <dt>Tegoed</dt><dd>${p.tegoedTekst ? `${esc(p.tegoedTekst)} <small class="muted">volgens ${esc(p.naam)}</small>` : `<span class="muted">nog niet gelezen</span>`}</dd></dl>
+    ${p.procent != null ? `<div class="tegoed${p.procent < 20 ? " laag" : ""}" role="progressbar" aria-label="Tegoed" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${p.procent}"><i style="width:${p.procent}%"></i></div>` : ""}
+    ${p.waarschuwing ? `<p class="note warn" style="margin:0"><small>${esc(p.waarschuwing)}</small></p>` : ""}</div>`;
+}
+
+/**
+ * "Server en back-ups": bij Zo gratis mogelijk eerst UpCloud of Exoscale met starttegoed (aanmelden, wat je krijgt en
+ * wat er aan het eind gebeurt), dan de sleutel; de app kiest het kleinste geschikte formaat. Loopt de proef, dan het
+ * tegoed, de einddatum en Verhuizen naar een betaalde server.
+ */
+function pServer(body, ctx, again, l, opts = {}) {
+  const { esc, a } = ctx;
+  const p = a.proef;
+  const stap = () => ctx.aStep("server").then(() => ctx.goHash("aanbieder")).catch(() => {});
+  if (p && (p.actief || a.server?.provider === p.provider)) {
+    body.innerHTML = `${proefInfo(ctx, p)}
+      <p style="margin:0"><small class="muted">${esc(p.einde)}</small></p>
+      <form class="fields" id="nEind"><label>Tot wanneer loopt je proef?<input type="date" name="eind" value="${esc(p.eindDatum ?? "")}"><small>Staat in je account bij ${esc(p.naam)}. Leeg laten: de app schat het.</small></label>
+        <p class="msg"></p><div class="actions" style="margin:0"><button class="btn">Datum bewaren</button></div></form>
+      <div class="actions" style="margin:0">${a.server ? `<button type="button" class="btn primary" id="nMove">Verhuizen naar een betaalde server</button>` : ""}<button type="button" class="btn" id="nStap">${a.server ? "Andere aanbieder kiezen" : "Verder met opzetten"}</button></div>
+      <div id="nMoveBox"></div>`;
+    const f = body.querySelector("#nEind");
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      try { await ctx.busy(f.querySelector("button"), () => ctx.api("/api/aanbieder/proef", { method: "POST", body: { eind: f.eind.value } })); ctx.a = await ctx.api("/api/aanbieder"); again("<p class=\"msg ok\" style=\"margin:0\">Einddatum bewaard.</p>"); }
+      catch (err) { ctx.formMsg(f, err.message); }
+    };
+    body.querySelector("#nMove")?.addEventListener("click", () => verhuisPaneel(body.querySelector("#nMoveBox"), ctx, (flash) => again(flash)));
+    body.querySelector("#nStap").onclick = stap;
+    return;
+  }
+  const h = a.hosting;
+  if (h && !opts.kiezen) {
+    // Al een betaalde server (of gekozen bij Server en back-ups): dat laten zien, met de weg naar Server en back-ups.
+    const prijs = h.monthly != null ? `, € ${h.monthly.toFixed(2).replace(".", ",")} per maand zonder btw` : "";
+    body.innerHTML = `<p style="margin:0">${a.server ? "Je Dienst draait" : "Gekozen"} bij <b>${esc(h.name)}</b> in ${esc(h.city)} (${esc(h.size)})${esc(prijs)}.${p?.verhuisd ? ` Verhuisd van de proef bij ${esc(p.naam)}.` : ""}</p>
+      <div class="actions" style="margin:0"><button type="button" class="btn primary" id="nStap">Server en back-ups</button>${a.server ? "" : `<button type="button" class="btn" id="nKies">Toch gratis proberen met starttegoed</button>`}</div>`;
+    body.querySelector("#nStap").onclick = () => (a.hub ? ctx.goHash("aanbieder/server") : stap());
+    body.querySelector("#nKies")?.addEventListener("click", () => pServer(body, ctx, again, l, { kiezen: true }));
+    return;
+  }
+  const list = l.proefAanbieders ?? ctx.nodig?.proefAanbieders ?? [];
+  if (!list.length) { body.innerHTML = `<p style="margin:0">Kies bij <b>Server en back-ups</b> waar je server komt.</p><div><button type="button" class="btn primary" id="nStap">Server kiezen</button></div>`; body.querySelector("#nStap").onclick = stap; return; }
+  body.innerHTML = `<p style="margin:0">Probeer je Dienst eerst gratis op een server met starttegoed. Loopt de proef af, dan verhuist de app hem met één tik naar een betaalde server; je klanten merken daar weinig van.</p>
+    <div class="proefkeus">${list.map((x, i) => `<label class="pk${i === 0 ? " on" : ""}"><span class="check"><input type="radio" name="pk" value="${esc(x.id)}" ${i === 0 ? "checked" : ""}> <b>${esc(x.naam)}</b></span>
+        <p>${esc(x.wat)}</p><small>${esc(x.tijdens)}</small><small><b>Daarna:</b> ${esc(x.einde)}</small><small><b>Back-ups:</b> ${esc(x.backup)}</small></label>`).join("")}</div>
+    <ol class="guide" id="nProefStap"></ol>
+    <form class="fields" id="nProef"><div id="nVelden" class="fields"></div><ul class="results" id="nProefRes"></ul><p class="msg"></p>
+      <div class="actions" style="margin:0"><button class="btn primary">Koppelen en server kiezen</button></div></form>
+    <p class="muted" style="margin:0"><small>Liever meteen een betaalde server? <button type="button" class="link" id="nStap">Kies zelf bij Server en back-ups</button></small></p>`;
+  wireLinks(body, ctx);
+  body.querySelector("#nStap").onclick = stap;
+  const f = body.querySelector("#nProef");
+  const keus = () => list.find((x) => x.id === body.querySelector("input[name=pk]:checked")?.value) ?? list[0];
+  const sync = () => {
+    const x = keus();
+    body.querySelectorAll(".pk").forEach((el) => el.classList.toggle("on", el.querySelector("input").value === x.id));
+    body.querySelector("#nProefStap").innerHTML = `<li><b>Een account bij ${esc(x.naam)}.</b> Dat doe je zelf, met je creditcard ter controle.<div>${linkBtn(ctx, x.aanmelden, "Account maken")}</div></li>
+      <li><b>Een sleutel voor de app.</b> ${esc(x.keyHelp)}</li><li><b>Plak hem hier.</b> De app kiest de dichtstbijzijnde plek met het kleinste geschikte formaat.</li>`;
+    wireLinks(body.querySelector("#nProefStap"), ctx);
+    body.querySelector("#nVelden").innerHTML = x.fields.map((fl) => `<label>${esc(fl.label)}<input name="${esc(fl.key)}" ${fl.secret ? 'type="password"' : ""} autocomplete="off" autocapitalize="off" spellcheck="false" required></label>`).join("");
+  };
+  body.querySelectorAll("input[name=pk]").forEach((r) => r.onchange = sync);
+  sync();
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const x = keus();
+    const fields = Object.fromEntries(x.fields.map((fl) => [fl.key, f.querySelector(`[name="${fl.key}"]`).value]));
+    body.querySelector("#nProefRes").innerHTML = `<li class="busy">Bezig: sleutel controleren, formaten ophalen, tegoed lezen…</li>`;
+    try {
+      const r = await ctx.busy(f.querySelector("button.primary"), () => ctx.api("/api/aanbieder/proef", { method: "POST", body: { provider: x.id, fields } }));
+      ctx.a = await ctx.api("/api/aanbieder");
+      again(`<ul class="results"><li>Server bij ${esc(r.hosting.name)} in ${esc(r.hosting.city)} (${esc(r.hosting.size)})<small>Gratis zolang je starttegoed loopt${r.proef.eindTekst ? `, tot ${esc(r.proef.eindTekst)}` : ""}</small></li>
+        <li>Back-ups bij ${esc(r.backup.name)}<small>${esc(r.backupUitleg)}</small></li>${r.proef.tegoedTekst ? `<li>Tegoed: ${esc(r.proef.tegoedTekst)}</li>` : ""}</ul>
+        <p class="muted" style="margin:0"><small>De server komt er bij <b>Opzetten</b>, als de rest van de lijst klaar is.</small></p>`);
+    } catch (err) { body.querySelector("#nProefRes").innerHTML = ""; ctx.formMsg(f, err.message); }
+  };
+}
+
+/**
+ * Verhuizen naar een betaalde server: de goedkoopste geschikte plek bij de gekoppelde aanbieders (of een andere uit de
+ * lijst), dan het gewone opnieuw opzetten. onDone(flashHtml) na het verhuizen.
+ */
+export async function verhuisPaneel(el, ctx, onDone, opts = {}) {
+  const { esc } = ctx;
+  el.innerHTML = `<p class="muted" style="margin:0">De goedkoopste betaalde server zoeken…</p>`;
+  let r;
+  try { r = await ctx.api("/api/aanbieder/verhuizen", { method: "POST", body: {} }); }
+  catch (err) { el.innerHTML = `<p class="msg err" style="margin:0">${esc(err.message)}</p>`; return; }
+  const ander = () => ctx.aStep("server").then(() => ctx.goHash("aanbieder")).catch(() => {});
+  const prijs = (k) => (k.monthly == null ? "prijs onbekend" : `€ ${k.monthly.toFixed(2).replace(".", ",")} per maand (zonder btw)`);
+  if (!r.keuze) {
+    el.innerHTML = `<div class="fields"><p style="margin:0">${esc(r.uitleg)}</p><div class="actions" style="margin:0"><button type="button" class="btn primary" data-ander>Aanbieder kiezen</button></div></div>`;
+    el.querySelector("[data-ander]").onclick = ander;
+    return;
+  }
+  el.innerHTML = `<form class="fields${opts.venster ? "" : " panel"}" style="margin:0" id="nVh">${opts.venster ? "" : "<b>Verhuizen naar een betaalde server</b>"}
+      ${r.kandidaten.map((k, i) => `<label class="check"><input type="radio" name="naar" value="${i}" ${i === 0 ? "checked" : ""}> ${esc(k.naam)}, ${esc(k.city)} <small>${esc(k.sizeLabel)} (${esc(k.size)}), ${esc(prijs(k))}${i === 0 ? " · de goedkoopste" : ""}</small></label>`).join("")}
+      <p class="muted" style="margin:0"><small>De app maakt eerst een laatste back-up, zet een nieuwe server op die alles terugzet, zet het adres om en haalt de proefserver weg. Je Dienst is een paar minuten niet bereikbaar; door de DNS kan het tot een uur duren voordat iedereen hem weer ziet. ${esc(r.backup)}</small></p>
+      <ul class="results" id="nVhRes"></ul><p class="msg"></p>
+      <div class="actions" style="margin:0"><button class="btn primary">Verhuizen</button><button type="button" class="btn" data-ander>Andere aanbieder kiezen</button></div></form>`;
+  el.querySelector("[data-ander]").onclick = ander;
+  const f = el.querySelector("#nVh");
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const k = r.kandidaten[Number(f.querySelector("input[name=naar]:checked")?.value ?? 0)];
+    if (!confirm(`Je Dienst verhuizen naar ${k.naam} in ${k.city}?\n\nEen paar minuten is je Dienst niet bereikbaar.`)) return;
+    try {
+      const v = await ctx.busy(f.querySelector("button.primary"), () => ctx.api("/api/aanbieder/verhuizen", { method: "POST", body: { provider: k.provider, region: k.region, akkoord: true } }));
+      onDone?.(`<ul class="results">${ctx.resultItems(v.steps)}</ul><p class="msg ok" style="margin:0">Verhuisd. De nieuwe server start op; over een paar minuten is je Dienst weer bereikbaar.</p>`);
+    } catch (err) { if (err.data?.steps) f.querySelector("#nVhRes").innerHTML = ctx.resultItems(err.data.steps); ctx.formMsg(f, err.message); }
+  };
+}
+
+/** Hetzelfde in een venster (vanuit Je dienst en het overzicht). */
+export function verhuisVenster(ctx, onDone) {
+  const dlg = document.createElement("dialog");
+  dlg.className = "confirm nvenster";
+  dlg.innerHTML = `<h2>Verhuizen naar een betaalde server</h2><div class="nodig"><div id="nVhBox"></div></div><div class="row"><button type="button" class="btn quiet" data-close>Sluiten</button></div>`;
+  document.body.append(dlg);
+  dlg.showModal();
+  const close = () => { dlg.close(); dlg.remove(); };
+  dlg.querySelector("[data-close]").onclick = close;
+  dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });
+  verhuisPaneel(dlg.querySelector("#nVhBox"), ctx, (flash) => { close(); onDone?.(flash); }, { venster: true });
 }

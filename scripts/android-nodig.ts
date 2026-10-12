@@ -8,17 +8,23 @@
  *   POST <control>/get {path}                → een waarde uit de toestand van de nep-aanbieders ("op.contactPut", …)
  *   POST <control>/ts {fn, config, body?, fresh?} → dezelfde functie in TypeScript (src/console/benodigdheden.ts) met
  *        deze kluisconfiguratie; geeft {status, json, config}. Zo vergelijkt de Java-test zijn antwoorden met die van TS.
+ *   POST <control>/klok {now}                → de vaste klok van "Zo gratis mogelijk" (gratis.ts; null = de echte tijd)
+ * Ook een nep-S3 (fake-s3.ts) voor de back-ups bij verhuizen: zijn adres staat als `s3` in het bestand.
  */
 import fs from "node:fs";
 import http from "node:http";
 import { fakeNodig } from "../test/helpers/fake-nodig.js";
+import { fakeS3 } from "../test/helpers/fake-s3.js";
 
 const out = process.argv[2];
 if (!out) { console.error("gebruik: android-nodig.ts <info.json>"); process.exit(2); }
 const f = await fakeNodig();
+const s3 = fakeS3();
+const s3url = `http://127.0.0.1:${await s3.listening}`;
 Object.assign(process.env, f.env);
 const aan = await import("../src/console/aanbieder.js");
 const nodig = await import("../src/console/benodigdheden.js");
+const gratis = await import("../src/console/gratis.js");
 const { resetOpTokens } = await import("../src/cluster/adapters/openprovider.js");
 const { serverOffers, storeOffers, dnsOffers } = await import("../src/console/catalog.js");
 aan.aanbiederNet.reach = () => f.dienst;
@@ -41,6 +47,7 @@ function mutate(b: any) {
     case "opDomain": f.st.op.domains.push(b.domain); return;
     case "temStatus": f.st.scw.tem[0].status = b.status; return;
     case "desecConfirm": f.st.desec.confirmed = true; return;
+    case "upcServer": f.st.upc.servers.push(b.server); return;
     default: throw new Error(`onbekende op ${b.op}`);
   }
 }
@@ -61,6 +68,11 @@ const FNS: Record<string, (c: any, b: any, fresh: boolean) => Promise<unknown> |
   saveBedrijf: (c, b) => aan.saveBedrijf(c, b),
   saveAdres: (c, b) => aan.saveAdres(c, b),
   saveDns: (c, b) => aan.saveDns(c, b, deps),
+  setModus: (c, b) => gratis.setModus(c, b),
+  gratisAdres: (c, b) => gratis.gratisAdres(c, b, deps),
+  proef: (c, b) => gratis.proef(c, b, deps),
+  verhuizen: (c, b) => gratis.verhuizen(c, b, deps),
+  view: (c) => aan.view(c, deps),
 };
 
 const server = http.createServer((req, res) => {
@@ -71,7 +83,8 @@ const server = http.createServer((req, res) => {
     let b: any = {};
     try { b = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {}; } catch { return send(400, { error: "geen JSON" }); }
     try {
-      if (req.url === "/reset") { f.reset(); nodig.resetNodigCache(); resetOpTokens(); return send(200, { ok: true }); }
+      if (req.url === "/reset") { f.reset(); nodig.resetNodigCache(); gratis.resetGratisCache(); resetOpTokens(); return send(200, { ok: true }); }
+      if (req.url === "/klok") { const n = b.now; gratis.gratisNet.now = typeof n === "number" ? () => n : () => Date.now(); return send(200, { ok: true }); }
       if (req.url === "/mutate") { mutate(b); return send(200, { ok: true }); }
       if (req.url === "/op-zone") return send(200, { records: f.st.op.zones.get(b.name) ?? null });
       if (req.url === "/get") { let o: any = f.st; for (const k of String(b.path).split(".")) o = o?.[k]; return send(200, { value: o ?? null }); }
@@ -87,6 +100,6 @@ const server = http.createServer((req, res) => {
   });
 });
 const port = await new Promise<number>((r) => server.listen(0, "127.0.0.1", () => r((server.address() as { port: number }).port)));
-fs.writeFileSync(out, JSON.stringify({ control: `http://127.0.0.1:${port}`, base: f.base, dienst: f.dienst, env: f.env, smtpPort: f.smtpPort }));
+fs.writeFileSync(out, JSON.stringify({ control: `http://127.0.0.1:${port}`, base: f.base, dienst: f.dienst, env: f.env, smtpPort: f.smtpPort, s3: s3url }));
 console.log(`nep-aanbieders voor "Wat je nodig hebt" op ${f.base}, bediening op :${port}`);
-process.on("SIGTERM", () => { void f.close().finally(() => process.exit(0)); });
+process.on("SIGTERM", () => { void Promise.all([f.close(), s3.close()]).finally(() => process.exit(0)); });

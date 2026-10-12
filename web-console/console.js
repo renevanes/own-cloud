@@ -1,6 +1,6 @@
 // Eigen Cloud — beheerconsole
 import { europeMap, MAP_CSS } from "/shared/europe.js";
-import { renderNodig, regelVenster, NODIG_CSS } from "./nodig.js";
+import { renderNodig, regelVenster, verhuisVenster, NODIG_CSS } from "./nodig.js";
 document.head.insertAdjacentHTML("beforeend", `<style>${MAP_CSS}${NODIG_CSS}</style>`);
 
 const $ = (s, el = document) => el.querySelector(s);
@@ -1914,6 +1914,20 @@ function pendingBar(a) {
   return "";
 }
 
+/**
+ * Server op starttegoed (Zo gratis mogelijk beginnen): loopt de proef bijna af of is het tegoed bijna op, dan een
+ * melding met "Verhuizen naar een betaalde server" (bovenaan Je dienst en op het overzicht van je cloud).
+ */
+function proefBar(a, extra = "") {
+  const p = a.proef;
+  if (!p?.waarschuwing) return "";
+  return `<div class="note warn pendingbar proefbar"><div><b>${esc(p.titel)}</b><br><small>${esc(p.waarschuwing)}</small></div>
+    <div class="actions" style="margin:0"><button class="btn primary" data-verhuis>Verhuizen naar een betaalde server</button>${extra}</div></div>`;
+}
+function wireVerhuis(el, a, after) {
+  el.querySelectorAll("[data-verhuis]").forEach((b) => b.onclick = () => verhuisVenster(nodigCtx(a), () => after()));
+}
+
 /** "#aanbieder" / "#aanbieder/<onderdeel>": nog niet opgezet → de stappen; daarna "Je dienst" met alle onderdelen. */
 async function renderHub(hash, msg) {
   clearInterval(aanbiederTimer);
@@ -1940,7 +1954,7 @@ async function renderHub(hash, msg) {
       <div><small class="muted">Je dienst</small><h1>${esc(a.company?.name ?? "Je dienst")}</h1><span class="muted">${esc(host)}${a.server ? "" : " · verwijderd"}</span></div>
       <div class="actions" style="margin:0">${a.server ? `<button class="btn primary" id="hOpen">Beheer openen</button>` : ""}${back}</div>
     </header>
-    ${pendingBar(a)}
+    ${proefBar(a, `<a class="btn" href="#aanbieder/server">Bekijken</a>`)}${pendingBar(a)}
     <p class="msg ${msg?.ok ? "ok" : msg ? "err" : ""}" id="hmsg">${esc(msg?.text ?? "")}</p>
     <div class="hub">
       <nav class="hubnav" aria-label="Onderdelen van je dienst">${a.hub.map((x) => x.waar === "dienst"
@@ -1950,6 +1964,7 @@ async function renderHub(hash, msg) {
     </div></div>`;
   $("#hOpen")?.addEventListener("click", () => openBeheer(a.beheerUrl));
   root.querySelectorAll(".hubnav [data-link]").forEach((b) => b.onclick = () => openBeheer(b.dataset.link));
+  wireVerhuis(root.querySelector(".proefbar") ?? document.createElement("div"), a, () => renderHub("aanbieder/server", { ok: true, text: "Verhuisd. De nieuwe server start op; over een paar minuten is je Dienst weer bereikbaar." }));
   $("#hApply")?.addEventListener("click", async (e) => {
     try {
       const r = await busy(e.target, () => api("/api/aanbieder/toepassen", { method: "POST" }));
@@ -1984,6 +1999,7 @@ function statusList(a, s) {
     <li class="${s?.reachable ? "" : "meh"}">${esc((a.url ?? "").replace(/^https:\/\//, ""))} ${esc(dot)}${s?.version ? `<small>Versie ${esc(s.version)}${s.uptime != null ? ` · draait ${s.uptime < 3600 ? Math.max(1, Math.round(s.uptime / 60)) + " minuten" : Math.round(s.uptime / 3600) + " uur"}` : ""}</small>` : s?.error ? `<small>${esc(s.error === "Nog niet bereikbaar" ? "Even geduld, of kijk of de server draait" : s.error)}${a.server?.createdAt && Date.now() - a.server.createdAt < 15 * 60_000 ? " — de server start nog op" : ""}</small>` : ""}</li>
     <li class="${s?.lastBackupAt ? (s.backup === "fout" ? "bad" : "") : "meh"}">Back-up${s?.lastBackupAt ? `: ${time(s.lastBackupAt)}` : ": nog geen"}${s?.backup === "fout" ? "<small>De laatste poging mislukte</small>" : ""}</li>
     ${s?.dns ? `<li class="${s.dns.ok && !s.dns.error ? "" : s.dns.error ? "bad" : "meh"}">${esc(s.dns.host)} wijst ${s.dns.ok ? "naar je server" : s.dns.have?.length ? `naar ${esc(s.dns.have.join(", "))}` : "nog nergens heen"}${s.dns.ok && !s.dns.error ? "" : `<small>${esc(dnsHint(s.dns))}</small>`}</li>` : ""}
+    ${a.proef?.actief ? `<li class="${a.proef.waarschuwing ? "meh" : ""}">Proef bij ${esc(a.proef.naam)}${a.proef.eindTekst ? ` tot ${esc(a.proef.eindTekst)}` : ""}<small>${a.proef.tegoedTekst ? `Tegoed ${esc(a.proef.tegoedTekst)} (volgens ${esc(a.proef.naam)})` : "Tegoed nog niet gelezen"}${a.proef.waarschuwing ? ` · ${esc(a.proef.titel)}` : ""}</small></li>` : ""}
     ${s?.adressen ? `<li class="${s.adressen.ok ? "" : "meh"}">Gratis-adressendienst ${esc(s.adressen.url.replace(/^https:\/\//, ""))} ${s.adressen.reachable ? (s.adressen.ok ? "werkt" : `geeft zone ${esc(s.adressen.zone ?? "")}`) : "niet bereikbaar"}${s.adressen.error ? `<small>${esc(s.adressen.error)}</small>` : ""}</li>` : ""}
   </ul>`;
 }
@@ -2183,14 +2199,15 @@ function hubServer(pane, a) {
   pane.innerHTML = `${sectionHead(a, "server")}
     <div class="panel" style="margin-top:0">
       <div><b>Server</b><br><span class="muted">${a.server ? `${esc(a.server.ipv4 ?? "")} bij ${esc(placeName(a.server))} (${esc(a.server.size)})${h.monthly != null ? `, ${esc(eur(h.monthly))} per maand` : ""}` : "Geen server: je Dienst is verwijderd."}</span>
-        ${a.server && (h.provider !== a.server.provider || h.region !== a.server.region) ? `<br><small>Gekozen voor de volgende keer: ${esc(h.name)} in ${esc(h.city)}</small>` : ""}</div>
-      <div class="actions" style="margin:0"><button class="btn" id="hMove">Andere aanbieder of regio</button><button class="btn" id="hAddr">Ander adres</button></div>
+        ${a.server && (h.provider !== a.server.provider || h.region !== a.server.region) ? `<br><small>Gekozen voor de volgende keer: ${esc(h.name)} in ${esc(h.city)}</small>` : ""}
+        ${a.proef?.actief ? `<br><small>Op starttegoed bij ${esc(a.proef.naam)}${a.proef.eindTekst ? ` tot ${esc(a.proef.eindTekst)}` : ""}${a.proef.tegoedTekst ? `, tegoed ${esc(a.proef.tegoedTekst)}` : ""}. ${esc(a.proef.einde)}</small>` : ""}</div>
+      <div class="actions" style="margin:0">${a.proef?.actief && a.server ? `<button class="btn${a.proef.waarschuwing ? " primary" : ""}" data-verhuis>Verhuizen naar een betaalde server</button>` : ""}<button class="btn" id="hMove">Andere aanbieder of regio</button><button class="btn" id="hAddr">Ander adres</button></div>
     </div>
     <div class="panel">
       <div><b>Adres en DNS</b><br><span class="muted">${esc((a.url ?? "").replace(/^https:\/\//, ""))} · ${d.mode === "eigen" ? `de console zet het record bij ${esc(dnsLabel(d.provider))} (${esc(d.zone)})` : d.mode === "cloud" ? "je cloud zet het record" : "je zet het record zelf"}</span></div>
       ${l?.error ? `<p class="msg err" style="margin:0">${esc(l.error)}</p>` : ""}
       ${records.length ? `<ul class="results">${records.map((r) => `<li>${esc(r.sub ? `${r.sub}.${l.zone}` : l.zone)} ${esc(r.type)} → ${esc(r.value)}</li>`).join("")}</ul>` : ""}
-      ${l?.nameservers?.length ? `<small class="muted">Staat ${esc(l.zone)} nog niet bij deze DNS-aanbieder? Zet bij de partij waar je het domein hebt de nameservers op: ${esc(l.nameservers.join(", "))}.</small>` : ""}
+      ${l?.nameservers?.length && !/^[^.]+\.dedyn\.io$/.test(l.zone) ? `<small class="muted">Staat ${esc(l.zone)} nog niet bij deze DNS-aanbieder? Zet bij de partij waar je het domein hebt de nameservers op: ${esc(l.nameservers.join(", "))}.</small>` : ""}
       <form class="fields" id="hDns"><div id="hDnsBox" class="fields"></div><p class="msg"></p><div><button class="btn">DNS bewaren</button></div></form>
     </div>
     <div class="panel">
@@ -2205,6 +2222,7 @@ function hubServer(pane, a) {
       <div class="actions" style="margin:0"><button class="btn${a.wijzigingen === "opnieuw" || !a.server ? " primary" : ""}" id="hAgain">Opnieuw opzetten</button>${a.server ? `<button class="btn danger" id="hDel">Dienst verwijderen</button>` : ""}</div>
       <div id="hExtra"></div>
     </div>`;
+  wireVerhuis(pane, a, () => renderHub("aanbieder/server", { ok: true, text: "Verhuisd. De nieuwe server start op; over een paar minuten is je Dienst weer bereikbaar." }));
   $("#hMove").onclick = () => aStep("server").catch((e) => hubMsg(e.message));
   $("#hAddr").onclick = () => aStep("adres").catch((e) => hubMsg(e.message));
   const dnsUi = dnsChooser($("#hDnsBox"), a);
@@ -2412,9 +2430,10 @@ async function renderAanbiederTeaser() {
   try { a = await api("/api/aanbieder"); } catch { return; }
   rememberDienst(a);
   box.innerHTML = a.hub
-    ? `<h2>Je dienst</h2><div class="panel"><div><b>${esc(a.company?.name ?? "")}</b><br><span class="muted">${esc((a.url ?? "").replace(/^https:\/\//, ""))}${a.wijzigingen === "toepassen" ? " · wijzigingen wachten" : ""}</span></div><div><a class="btn primary" href="#aanbieder">${esc(a.company?.name ?? "Je dienst")} beheren</a></div></div>`
+    ? `<h2>Je dienst</h2>${proefBar(a)}<div class="panel"><div><b>${esc(a.company?.name ?? "")}</b><br><span class="muted">${esc((a.url ?? "").replace(/^https:\/\//, ""))}${a.wijzigingen === "toepassen" ? " · wijzigingen wachten" : ""}</span></div><div><a class="btn primary" href="#aanbieder">${esc(a.company?.name ?? "Je dienst")} beheren</a></div></div>`
     : a.started ? `<h2>Je dienst</h2><div class="panel"><p style="margin:0">Je bent bezig je eigen Dienst op te zetten.</p><div><a class="btn" href="#aanbieder">Verder met opzetten</a></div></div>`
     : `<h2>Aanbieder worden</h2><div class="panel"><p style="margin:0">Draai zelf een Eigen Cloud Dienst: mensen nemen dan bij jou een cloud, met jouw prijzen en jouw naam.</p><div><a class="btn" href="#aanbieder">Aanbieder worden</a></div></div>`;
+  wireVerhuis(box, a, () => renderAanbiederTeaser());
 }
 
 /** Op het overzicht: alle gekoppelde sleutels (servers, DNS, opslag), elk met "Sleutels controleren". */

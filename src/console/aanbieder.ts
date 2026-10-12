@@ -29,6 +29,7 @@ import { getAdapter } from "../cluster/adapters.js";
 import { dnsOffers as catalogDnsOffers, fetchSizes, pickSize, type DnsOffer, type ServerOffer, type StoreOffer, type SizeOption } from "./catalog.js";
 import { INSTELBAAR } from "../broker/instellingen.js";
 import { latestBackup } from "../broker/backup.js";
+import * as G from "./gratis.js";
 
 export const MOLLIE_URL = () => (process.env.EIGEN_MOLLIE_URL ?? "https://api.mollie.com/v2").replace(/\/+$/, "");
 /** Basisadres /v1 volgens developer.openprovider.com (get-started); de paden zijn die van de swagger van /v1beta. */
@@ -217,7 +218,7 @@ function backupView(a: AanbiederState, o: Offers) {
 export function view(c: AdminConfig, o: Offers) {
   const a = existing(c);
   const defaultUrl = c.domain ? `https://dienst.${c.domain}` : null;
-  if (!a) return { started: false, step: null, defaultUrl, defaultEmail: c.console.alertEmail || null };
+  if (!a) return { started: false, step: null, defaultUrl, defaultEmail: c.console.alertEmail || null, modus: G.modus(c) };
   const acc = a.accounts ?? {};
   const smtp = smtpOf(c, a);
   return {
@@ -262,6 +263,10 @@ export function view(c: AdminConfig, o: Offers) {
     hersteltest: a.hersteltest ?? null,
     pending: pendingSections(c, a),
     hub: hubOf(c, a),
+    /** "Zo gratis mogelijk beginnen" of "Standaard" (gratis.ts), de server op starttegoed en het gratis adres bij deSEC. */
+    modus: G.modus(c),
+    proef: G.proefView(a as AanbiederState & G.GratisState),
+    gratisAdres: (a as G.GratisState).gratisAdres ? { naam: (a as G.GratisState).gratisAdres!.naam, klaar: (a as G.GratisState).gratisAdres!.klaar } : null,
   };
 }
 
@@ -271,6 +276,8 @@ export const beheerLink = (url: string, page: string) => `${url}/beheer#/${page}
 /** Standaardzone voor de eigen DNS-koppeling: dienst.vanes.nl → vanes.nl (twee labels blijven zoals ze zijn). */
 export function defaultZone(host: string | null) {
   if (!host) return null;
+  // Een gratis adres van deSEC (naam.dedyn.io) is zelf de zone.
+  if (/^[^.]+\.dedyn\.io$/.test(host)) return host;
   const parts = host.split(".");
   return parts.length > 2 ? parts.slice(1).join(".") : host;
 }
@@ -445,6 +452,18 @@ async function checkDesec(token: string): Promise<Check> {
 async function checkSmtp(url: string): Promise<Check> {
   const c = { id: "smtp", label: "Mail versturen" };
   if (!url) return { ...c, ok: false, detail: "Vul een mailserver in, bijv. smtp://gebruiker:wachtwoord@smtp.tem.scaleway.com:587" };
+  if (url.startsWith("scwtem://")) {
+    // De HTTPS-koppeling van Scaleway Transactional Email (src/broker/mail.ts): de sleutel mag de maildomeinen van het project zien.
+    let project = "", key = "", region = "fr-par";
+    try { const u = new URL(url); project = decodeURIComponent(u.username); key = decodeURIComponent(u.password); region = u.hostname || region; } catch { /* hieronder */ }
+    if (!project || !key) return { ...c, ok: false, detail: "Dat is geen geldig adres voor de mail via Scaleway" };
+    try {
+      const r = await http(`${scwApi()}/transactional-email/v1alpha1/regions/${encodeURIComponent(region)}/domains?project_id=${encodeURIComponent(project)}&page_size=1`, { headers: { "x-auth-token": key } });
+      if (r.status === 401 || r.status === 403) return { ...c, ok: false, detail: "Scaleway accepteert deze sleutel niet voor mail" };
+      if (!r.ok) return { ...c, ok: false, detail: `Scaleway antwoordt ${r.status}` };
+      return { ...c, ok: true, detail: "Mail versturen werkt (via de webkoppeling van Scaleway)" };
+    } catch { return { ...c, ok: false, detail: "Scaleway is niet bereikbaar" }; }
+  }
   let host = "";
   try {
     const u = new URL(url);
@@ -1149,6 +1168,8 @@ export async function status(c: AdminConfig, deps: Pick<Deps, "save">) {
   const host = hostOf(a.url)!;
   const have = (await aanbiederNet.resolve4(host).catch(() => [] as string[])).sort();
   const overzicht = h.reachable && a.secret ? await dienstOverzicht(a) : null;
+  // Server op starttegoed: het tegoed hooguit eens per 10 minuten opnieuw lezen (voor de waarschuwing in Je dienst).
+  await G.verversTegoed(c, false);
   deps.save();
   void cleanupRetired(c, deps);
   return { ...h, server: true, removed: false,

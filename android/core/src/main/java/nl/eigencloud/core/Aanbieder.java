@@ -285,7 +285,7 @@ public final class Aanbieder {
         String defaultUrl = Json.truthy(domain) ? "https://dienst." + Json.jsString(domain) : null;
         String alert = Json.str(c, "console", "alertEmail");
         Object defaultEmail = nonEmpty(alert) ? alert : null;
-        if (a == null) return Json.obj("started", false, "step", null, "defaultUrl", defaultUrl, "defaultEmail", defaultEmail);
+        if (a == null) return Json.obj("started", false, "step", null, "defaultUrl", defaultUrl, "defaultEmail", defaultEmail, "modus", Gratis.modus(c));
         Map<String, Object> acc = Json.map(a, "accounts");
         if (acc == null) acc = Json.obj();
         String smtp = smtpOf(c, a);
@@ -330,7 +330,11 @@ public final class Aanbieder {
                 "defaultZone", defaultZone(hostOf(url)),
                 "hersteltest", a.get("hersteltest") != null ? a.get("hersteltest") : null,
                 "pending", new ArrayList<Object>(pendingSections(c, a)),
-                "hub", hubOf(c, a));
+                "hub", hubOf(c, a),
+                // "Zo gratis mogelijk beginnen" of "Standaard" (Gratis), de server op starttegoed en het gratis adres bij deSEC.
+                "modus", Gratis.modus(c),
+                "proef", Gratis.proefView(a),
+                "gratisAdres", Json.map(a, "gratisAdres") == null ? null : Json.obj("naam", Json.str(a, "gratisAdres", "naam"), "klaar", Json.truthy(Json.path(a, "gratisAdres", "klaar"))));
     }
 
     private static Map<String, Object> dnsLinkView(Map<String, Object> a) {
@@ -355,6 +359,8 @@ public final class Aanbieder {
     /** Standaardzone voor de eigen DNS-koppeling: dienst.vanes.nl → vanes.nl (twee labels blijven zoals ze zijn). */
     public static String defaultZone(String host) {
         if (host == null) return null;
+        // Een gratis adres van deSEC (naam.dedyn.io) is zelf de zone.
+        if (host.matches("^[^.]+\\.dedyn\\.io$")) return host;
         String[] parts = host.split("\\.", -1);
         return parts.length > 2 ? host.substring(host.indexOf('.') + 1) : host;
     }
@@ -593,6 +599,26 @@ public final class Aanbieder {
     static Map<String, Object> checkSmtp(String url) {
         String id = "smtp", label = "Mail versturen";
         if (url.isEmpty()) return check(id, label, false, "Vul een mailserver in, bijv. smtp://gebruiker:wachtwoord@smtp.tem.scaleway.com:587");
+        if (url.startsWith("scwtem://")) {
+            // De HTTPS-koppeling van Scaleway Transactional Email (src/broker/mail.ts): de sleutel mag de maildomeinen van het project zien.
+            String project = "", key = "", region = "fr-par";
+            try {
+                URI u = new URI(url);
+                String ui = u.getRawUserInfo();
+                if (ui != null && ui.indexOf(':') >= 0) { project = Bytes.decodeURIComponent(ui.substring(0, ui.indexOf(':'))); key = Bytes.decodeURIComponent(ui.substring(ui.indexOf(':') + 1)); }
+                if (nonEmpty(u.getHost())) region = u.getHost();
+            } catch (URISyntaxException | RuntimeException e) { project = ""; }
+            if (project.isEmpty() || key.isEmpty()) return check(id, label, false, "Dat is geen geldig adres voor de mail via Scaleway");
+            try {
+                Res r = http("GET", Endpoints.SCALEWAY.replaceAll("/+$", "") + "/transactional-email/v1alpha1/regions/" + Bytes.encodeURIComponent(region) + "/domains?project_id=" + Bytes.encodeURIComponent(project) + "&page_size=1",
+                        Http.headers("x-auth-token", key), null, 15_000);
+                if (r.status == 401 || r.status == 403) return check(id, label, false, "Scaleway accepteert deze sleutel niet voor mail");
+                if (!r.ok()) return check(id, label, false, "Scaleway antwoordt " + r.status);
+                return check(id, label, true, "Mail versturen werkt (via de webkoppeling van Scaleway)");
+            } catch (IOException | RuntimeException e) {
+                return check(id, label, false, "Scaleway is niet bereikbaar");
+            }
+        }
         SmtpCheck.Relay r = SmtpCheck.parseRelayUrl(url);
         if (r == null || r.host == null) return check(id, label, false, "Dat is geen geldig adres; het begint met smtp:// of smtps://");
         int port = r.port > 0 ? r.port : r.secure ? 465 : 587;
@@ -1498,6 +1524,8 @@ public final class Aanbieder {
         List<String> have = new ArrayList<>(resolver.resolve4(host));
         java.util.Collections.sort(have);
         Object overzicht = Boolean.TRUE.equals(h.get("reachable")) && nonEmpty(Json.str(a, "secret")) ? dienstOverzicht(a) : null;
+        // Server op starttegoed: het tegoed hooguit eens per 10 minuten opnieuw lezen (voor de waarschuwing in Je dienst).
+        Gratis.verversTegoed(c, false);
         deps.save();
         cleanupRetiredAsync(c, deps);
         Object want = server.get("ipv4");

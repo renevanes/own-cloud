@@ -137,7 +137,7 @@ public class AanbiederHubTest {
                 call(200, "POST", "/api/key/confirm", Json.obj("g3", Json.listAt(k, "groups").get(2), "g7", Json.listAt(k, "groups").get(6)));
                 call(200, "POST", "/api/step", Json.obj("step", "dienst"));
                 Map<String, Object> v = call(200, "GET", "/api/aanbieder", null);
-                T.eq("{\"started\":false,\"step\":null,\"defaultUrl\":null,\"defaultEmail\":null}", Json.stringify(v), "not started, no defaults without cloud");
+                T.eq("{\"started\":false,\"step\":null,\"defaultUrl\":null,\"defaultEmail\":null,\"modus\":\"standaard\"}", Json.stringify(v), "not started, no defaults without cloud");
 
                 // Stappen zonder cloud
                 call(200, "POST", "/api/aanbieder/bedrijf", Json.obj("name", "ESAPE", "address", "Coolsingel 1\n3011 AD Rotterdam", "kvk", "12345678", "email", "support@esape.nl"));

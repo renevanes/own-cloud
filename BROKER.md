@@ -107,7 +107,7 @@ en variabelen hieronder zijn voor wie de Dienst zelf met Docker draait; ze laten
 | `SCW_SECRET_KEY`, `SCW_ORGANIZATION_ID` | — | Sleutel van de dienst en je organisatie-id |
 | `SCW_API_URL` | `https://api.scaleway.com` | |
 | `SCW_PERMISSION_SETS` | `InstancesFullAccess,BlockStorageFullAccess,ObjectStorageFullAccess,TransactionalEmailFullAccess` | Rechten van de klantsleutel, alleen in het eigen project |
-| `BROKER_SMTP_URL` | — | Bijv. `smtp://gebruiker:wachtwoord@smtp.tem.scaleway.com:587`. Zonder: mails komen in het logboek (alleen voor ontwikkelen) |
+| `BROKER_SMTP_URL` | — | Bijv. `smtp://gebruiker:wachtwoord@smtp.tem.scaleway.com:587`, of `scwtem://<project-id>:<sleutel>@fr-par` voor Scaleway Transactional Email over HTTPS (voor een server die geen SMTP naar buiten toelaat, zie *Gratis beginnen*). Zonder: mails komen in het logboek (alleen voor ontwikkelen) |
 | `BROKER_MAIL_FROM` | `Eigen Cloud Dienst <noreply@localhost>` | Afzender |
 | `BROKER_ADMIN_EMAIL` | — | Krijgt meldingen (mislukt klaarzetten, incasso mislukt, te veel servers, opzeggingen) |
 | `BROKER_LOOP_MS` | `30000` | Hoe vaak de achtergrondlus draait |
@@ -454,7 +454,8 @@ mail via Scaleway**).
 
 Routes (console en app, zelfde JSON; nooit sleutels in een antwoord): `GET /api/aanbieder/benodigdheden?fresh=1`
 (→ `{items: [{id, label, status: "ok"|"bijna"|"open", uitleg, kosten, detail, optioneel, actie: {label, soort:
-"paneel"|"stap"|"hub", doel}}], klaar, totaal, links, at}`; netwerkcontroles met korte time-outs (de lijst wacht hooguit
+"paneel"|"stap"|"hub", doel}, route?}], klaar, totaal, links, at, modus, kosten, waarschuwing, proefAanbieders}`; `route`,
+`kosten` en `proefAanbieders` alleen bij *Zo gratis mogelijk*, zie *Gratis beginnen*; netwerkcontroles met korte time-outs (de lijst wacht hooguit
 6 seconden op een controle; een later antwoord staat de volgende keer klaar), een minuut bewaard, `fresh=1` kijkt opnieuw), `POST /api/aanbieder/scaleway {accessKey, secretKey, verwijderen?}` (→ `{ok, steps, org,
 applicatie, verwijderd}`), `POST /api/aanbieder/mollie {key?}` (→ `{ok, mode, profiel, methoden: {eerste, terugkerend},
 todo: [{tekst, link}], test, links, onboarding, pending}`), `POST /api/aanbieder/desec/register {captchaId, solution,
@@ -469,6 +470,79 @@ akkoord: true, houder?}`, `GET|POST /api/aanbieder/mail {manier: "scaleway"|"clo
 De Dienst heeft er één route bij: `GET /v1/status/check/openprovider` (met het beheertoken, zoals `/v1/status/overzicht`)
 → `{ok, ingesteld, detail}`: inloggen bij Openprovider en één domein opvragen, vanaf de server zelf (de IP-lijst geldt
 voor het adres van de server).
+
+### Gratis beginnen
+
+Bovenaan *Wat je nodig hebt* kies je **Zo gratis mogelijk beginnen** of **Standaard** (`POST /api/aanbieder/modus
+{modus: "gratis"|"standaard"}`, in de kluis als `console.aanbiederModus`; zonder keuze: Standaard, precies zoals het was).
+Bij *Zo gratis mogelijk* staat bij elk onderdeel de gratis route (`route`) en wat het kost, en bovenaan een eerlijk totaal
+(`kosten`): "€ 0 per maand tot je starttegoed op is; daarna ongeveer € X per maand voor de server (zonder btw)". X is het
+goedkoopste geschikte formaat (≥ 2 GB) bij de gekoppelde aanbieders met een bekende prijs (live via `fetchSizes`, niet die
+van de proef), anders de catalogus van je cloud, anders "vanaf ongeveer € 6" (zie de tabel). Code: `src/console/gratis.ts`
+en `benodigdheden.ts`; in de app `Gratis.java` en `Benodigdheden.java` (dezelfde JSON; `BenodigdhedenTest` speelt twee
+scenario's in TypeScript en Java na).
+
+| Onderdeel | Gratis route | Kosten |
+|---|---|---|
+| Domein | **Gratis adres bij deSEC**: `naam.dedyn.io`; het adres van je Dienst is die naam zelf (bijv. `esape.dedyn.io`). Later een eigen domein kan altijd (*Ik heb een eigen domein*, daarna opnieuw opzetten) | gratis |
+| DNS | Bij deSEC, door de app gezet (de zone is de dedyn.io-naam) | gratis |
+| Server | **Starttegoed** bij UpCloud of Exoscale, het kleinste geschikte formaat op de dichtstbijzijnde plek; daarna met één tik naar een betaalde server | gratis tot de einddatum of tot het tegoed op is, daarna ongeveer € X per maand |
+| Back-ups | Exoscale: bij Exoscale (Object Storage, dezelfde sleutel), van het tegoed. UpCloud: bij Scaleway, want opslag bij UpCloud maak je met de hand aan en die verdwijnt na de proef | Scaleway: minder dan € 0,01 per maand (een paar MB × € 0,01606 per GB) |
+| Mail van je Dienst | Via Scaleway Transactional Email, over HTTPS (`scwtem://`, zie hieronder) | gratis tot 300 mails per maand, daarna € 0,25 per 1.000 |
+| Scaleway, Mollie | Een account is gratis; geen vaste kosten | wat je klanten gebruiken, per betaling; zit in je prijzen |
+| deSEC, Voorwaarden, Op de lijst | Gratis | gratis |
+| Openprovider, gratis-adressendienst | Niet nodig om te beginnen (de adressendienst vraagt een eigen domein) | — |
+| Buiten de app | Een inschrijving bij de KvK (Mollie werkt alleen met een ingeschreven bedrijf) | eenmalig een bedrag |
+
+**Gratis adres** (`POST /api/aanbieder/gratis-adres {naam, maken?}` → `{naam, status: "vrij"|"bezet"|"onbekend"|"van-jou"|
+"ander"|"wacht"|"klaar", uitleg, ander, gebruikt, pending, url?}`): met het deSEC-token van je Dienst. Vrij of bezet zegt
+DoH (staat de naam al in de DNS); maken is `POST /api/v1/domains/ {name}`. deSEC geeft één naam direct onder dedyn.io per
+account (`status: "ander"` als er al een is) en antwoordt 400 bij een bezette naam. Daarna zet deSEC de naam in
+dedyn.io; zolang die nog niet in de DNS staat, is het `wacht` en kijkt de console elke 15 seconden opnieuw. Het adres van
+de Dienst wordt `https://naam.dedyn.io`, de DNS-koppeling deSEC met die zone (`saveDns`), en `defaultZone` geeft voor
+`naam.dedyn.io` de naam zelf.
+
+**Server op starttegoed** (`POST /api/aanbieder/proef {provider: "upcloud"|"exoscale", fields}` → `{hosting, backup,
+backupUitleg, proef}`; `{eind: "2026-10-19"}` past de einddatum aan, leeg = weer geschat): de sleutel koppelen zoals bij
+*Server en back-ups*, de dichtstbijzijnde regio met het kleinste geschikte formaat, en de back-ups (als die nog geen vaste
+plek hebben). In de kluis: `console.aanbieder.proef {provider, at, eind, eindBron: "ingevuld"|"geschat", tegoed, startTegoed,
+verhuisd?}`. Het tegoed leest de console alleen lezend: UpCloud `GET /1.3/account` → `credits` (in centen), Exoscale
+`GET /v2/live-balance` → `balance` (bij *Wat je nodig hebt* en hooguit eens per 10 minuten bij de status). Waarschuwing
+(`waarschuwing` in de lijst, `proef.waarschuwing` in `GET /api/aanbieder`): 3 dagen voor de einddatum, na de einddatum, of
+als er minder dan 20% van het starttegoed over is. Die staat bij de server in *Wat je nodig hebt*, bovenaan *Je dienst* en
+op het overzicht van je cloud, met **Verhuizen naar een betaalde server**. (De app kijkt op de achtergrond alleen naar je
+cloud, niet naar je kluis; deze melding zie je dus als je de console of de app opent.)
+
+**Verhuizen** (`POST /api/aanbieder/verhuizen` → `{keuze, kandidaten, backup, uitleg}`; met `{provider, region, akkoord:
+true}` het verhuizen zelf): per gekoppelde aanbieder (behalve die van de proef) de goedkoopste regio met het kleinste
+geschikte formaat, goedkoopste eerst; dan dezelfde stappen als **Opnieuw opzetten** (laatste back-up, nieuwe server die hem
+terugzet, adres naar de nieuwe server, proefserver weg). De back-ups blijven waar ze staan.
+
+**Mail over HTTPS.** Een proefserver bij UpCloud laat naar buiten alleen de webpoorten toe (SMTP 25, 465 en 587 kunnen
+niet). Daarom zet *Regel het via Scaleway* bij *Zo gratis mogelijk* `BROKER_SMTP_URL=scwtem://<project-id>:<sleutel>@fr-par`:
+de Dienst verstuurt dan via `POST /transactional-email/v1alpha1/regions/fr-par/emails` (`src/broker/mail.ts`), en de
+console controleert de sleutel via de maildomeinen van het project. Bij Standaard blijft het SMTP (`smtp.tem.scaleway.com:587`).
+
+Nagekeken op 12-10-2026:
+
+| Wat | Bron |
+|---|---|
+| deSEC: namen direct onder dedyn.io, één per account; 400 bij een naam die al bestaat; tokens met `perm_create_domain` | [desec.readthedocs.io/en/latest/dns/domains.html](https://desec.readthedocs.io/en/latest/dns/domains.html) |
+| UpCloud: proef van 7 dagen vanaf het activeren (creditcard ter controle, niet belast), hooguit 2 processors en 4 GB, naar buiten alleen 80, 443, 53 en 123 (SMTP dicht), daarna alles weg tenzij je minstens € 10 stort | [upcloud.com/docs/getting-started/free-trial/](https://upcloud.com/docs/getting-started/free-trial/), […/free-trial/upgrading/](https://upcloud.com/docs/getting-started/free-trial/upgrading/), [FAQ](https://upcloud.com/docs/getting-started/faq/) |
+| UpCloud: een actiepagina noemt 30 dagen met € 500 tegoed | [upcloud.com/get-started](https://upcloud.com/get-started) |
+| UpCloud: `credits` in `GET /1.3/account` is in centen | [developers.upcloud.com/1.3/3-accounts/](https://developers.upcloud.com/1.3/3-accounts/) (eenheid niet genoemd); upcloud-cli `internal/commands/account/show.go` ("Credits are returned in cents") |
+| UpCloud Starter 2 GB: € 6 per maand (zonder lokale belasting) | [upcloud.com/pricing/](https://upcloud.com/pricing/) |
+| Exoscale: € 20 (of CHF 20) tegoed na aanmelden, creditcard opslaan en achteraf betalen; geen vaste geldigheid genoemd | [community.exoscale.com/platform/quick-start/](https://community.exoscale.com/platform/quick-start/) |
+| Exoscale: `GET /v2/live-balance` → `{balance, currency}` (bèta) | [openapi-v2.exoscale.com/operation/operation-get-live-balance](https://openapi-v2.exoscale.com/operation/operation-get-live-balance) |
+| Scaleway Transactional Email: 300 mails per organisatie per maand gratis, daarna € 0,25 per 1.000 | [scaleway.com/en/pricing/managed-services/](https://www.scaleway.com/en/pricing/managed-services/) |
+| Scaleway TEM: verzenden via `POST …/regions/fr-par/emails`; SMTP op 587, 465, 2465, 2587 | [scaleway.com/en/developers/api/transactional-email/](https://www.scaleway.com/en/developers/api/transactional-email/), [smtp-configuration](https://www.scaleway.com/en/docs/transactional-email/reference-content/smtp-configuration/) |
+| Scaleway: een betaalmethode is nodig voordat je iets bestelt (creditcard met een controle van € 1 die terugkomt, of SEPA met identiteitscontrole) | [scaleway.com/en/docs/billing/how-to/add-payment-method/](https://www.scaleway.com/en/docs/billing/how-to/add-payment-method/) |
+| Scaleway DEV1-S € 0,00898 per uur (≈ € 6,55 per maand, zonder btw); Object Storage € 0,01606 per GB per maand | [scaleway.com/en/pricing/virtual-instances/](https://www.scaleway.com/en/pricing/virtual-instances/), [pricing/storage](https://www.scaleway.com/en/pricing/storage/) |
+
+Niet nagekeken: of UpCloud ook de poorten 465, 587 en 2587 dichthoudt (de lijst noemt alleen wat open is: 22 in, 80 en 443,
+53 en 123 uit), of een UpCloud-proefaccount de API gebruikt zoals een gewoon account, wat een positief of negatief saldo bij
+Exoscale precies betekent (de console toont het als "volgens Exoscale"), of Exoscale uitgaande mail beperkt, of Scaleway
+TEM een maildomein onder dedyn.io accepteert, en de prijs bij Exoscale (geen prijs-API) en wat de KvK-inschrijving nu kost.
 
 ### Instellingen wijzigen zonder nieuwe server
 

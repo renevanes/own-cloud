@@ -32,7 +32,7 @@ public class BenodigdhedenTest {
             Map<String, Object> m = Json.copy((Map<String, Object>) v);
             for (Iterator<String> it = m.keySet().iterator(); it.hasNext();) {
                 String k = it.next();
-                if (k.equals("at") || k.equals("checkAt") || k.equals("password")) it.remove();
+                if (k.equals("at") || k.equals("checkAt") || k.equals("password") || k.equals("createdAt") || k.equals("envAt") || k.equals("deployed") || k.equals("retired") || k.equals("verhuisd")) it.remove();
             }
             for (Map.Entry<String, Object> e : m.entrySet()) e.setValue(norm(e.getValue()));
             return m;
@@ -158,6 +158,11 @@ public class BenodigdhedenTest {
     static Object java(String fn, Map<String, Object> c, Map<String, Object> b, boolean fresh, Aanbieder.Deps deps) {
         try {
             switch (fn) {
+                case "setModus": return Gratis.setModus(c, b);
+                case "gratisAdres": return Gratis.gratisAdres(c, b, deps);
+                case "proef": return Gratis.proef(c, b, deps);
+                case "verhuizen": return Gratis.verhuizen(c, b, deps);
+                case "view": return Aanbieder.view(c, deps);
                 case "benodigdheden": return Benodigdheden.benodigdheden(c, fresh, deps);
                 case "scaleway": return Benodigdheden.scaleway(c, b, deps);
                 case "mollie": return Benodigdheden.mollie(c, b);
@@ -177,9 +182,152 @@ public class BenodigdhedenTest {
             }
         } catch (Benodigdheden.StepsException e) {
             return Json.obj("error", e.getMessage(), "steps", e.steps);
+        } catch (Aanbieder.SetupException e) {
+            return Json.obj("error", e.getMessage(), "steps", e.steps);
         } catch (IOException | IllegalArgumentException e) {
             return Json.obj("error", e.getMessage());
         }
+    }
+
+    // ───────── Zo gratis mogelijk beginnen (Gratis): hetzelfde scenario in Java en TypeScript ─────────
+
+    static final long NU = 1791799200000L; // 12 oktober 2026, 10:00 UTC
+    static final long DAG = 86_400_000L;
+
+    static Object[] klok(long ms) { return new Object[] {"klok", ms}; }
+
+    /** Gratis adres, Scaleway, een proef bij UpCloud (back-ups bij Scaleway), mail via HTTPS, tegoed en einddatum, verhuizen. */
+    static List<Object[]> gratisScenario() {
+        Map<String, Object> desec = Json.obj("NS", Json.list("ns1.desec.io", "ns2.desec.org"));
+        return Arrays.asList(
+                klok(NU),
+                fresh("benodigdheden"),
+                call("setModus", Json.obj("modus", "duur")),
+                call("setModus", Json.obj("modus", "gratis")),
+                fresh("benodigdheden"),
+                quiet("saveBedrijf", Json.obj("name", "ESAPE", "email", "rene@esape.nl")),
+                call("gratisAdres", Json.obj("naam", "esape")),
+                new Object[] {"desec"},
+                fake("op", "dns", "name", "bezet.dedyn.io", "rec", desec),
+                call("gratisAdres", Json.obj("naam", "-fout")),
+                call("gratisAdres", Json.obj("naam", "bezet")),
+                call("gratisAdres", Json.obj("naam", "https://Esape.dedyn.io/")),
+                call("gratisAdres", Json.obj("naam", "bezet", "maken", true)),
+                fake("op", "set", "path", "dedyn.traagMs", "value", 200),
+                call("gratisAdres", Json.obj("naam", "esape", "maken", true)),
+                fresh("benodigdheden"),
+                call("gratisAdres", Json.obj("naam", "nogeen", "maken", true)),
+                call("gratisAdres", Json.obj()),
+                fake("op", "dns", "name", "esape.dedyn.io", "rec", desec),
+                call("gratisAdres", Json.obj()),
+                fresh("benodigdheden"),
+                call("scaleway", Json.obj("accessKey", "SCWPERSONAL000000001", "secretKey", "11111111-2222-3333-4444-555555555555")),
+                fresh("benodigdheden"),
+                quiet("proef", Json.obj("provider", "upcloud", "fields", Json.obj("token", "fout"))),
+                call("proef", Json.obj("provider", "upcloud", "fields", Json.obj("token", "upc-token"))),
+                fresh("benodigdheden"),
+                call("proef", Json.obj("eind", "19-10-2026")),
+                call("proef", Json.obj("eind", "2026-10-26")),
+                call("proef", Json.obj("eind", "")),
+                call("mail", Json.obj("manier", "scaleway")),
+                fake("op", "upcServer", "server", Json.obj("uuid", "upc-1", "state", "started", "labels", Json.obj("label", Json.list(Json.obj("key", "cluster", "value", "eigen-cloud-dienst"))))),
+                new Object[] {"draait"},
+                fresh("benodigdheden"),
+                fake("op", "set", "path", "upc.credits", "value", 8000),
+                fresh("benodigdheden"),
+                call("view", Json.obj()),
+                fake("op", "set", "path", "upc.credits", "value", 45000),
+                klok(NU + 5 * DAG),
+                fresh("benodigdheden"),
+                klok(NU + 7 * DAG + 60_000),
+                fresh("benodigdheden"),
+                fake("op", "set", "path", "scwSizes.fr-par-1", "value", 6.5),
+                call("verhuizen", Json.obj()),
+                call("verhuizen", Json.obj("provider", "ovh", "region", "x", "akkoord", true)),
+                call("verhuizen", Json.obj("provider", "scaleway", "region", "nl-ams-1", "akkoord", true)),
+                fresh("benodigdheden"),
+                klok(-1));
+    }
+
+    /** Exoscale: back-ups bij Exoscale met dezelfde sleutel, saldo onder de 20%, zelf een einddatum, geen andere aanbieder. */
+    static List<Object[]> exoscaleScenario() {
+        return Arrays.asList(
+                klok(NU),
+                call("setModus", Json.obj("modus", "gratis")),
+                quiet("saveBedrijf", Json.obj("name", "ESAPE", "email", "rene@esape.nl")),
+                quiet("proef", Json.obj("provider", "exoscale", "fields", Json.obj("apiKey", "EXOfout", "apiSecret", "s"))),
+                call("proef", Json.obj("provider", "exoscale", "fields", Json.obj("apiKey", "EXOtest", "apiSecret", "geheim"))),
+                fresh("benodigdheden"),
+                new Object[] {"exoDraait"},
+                fake("op", "set", "path", "exo.balance", "value", 3),
+                fresh("benodigdheden"),
+                call("proef", Json.obj("eind", "2026-10-20")),
+                call("verhuizen", Json.obj()),
+                call("view", Json.obj()),
+                klok(-1));
+    }
+
+    /** Een stap die in beide kluizen precies hetzelfde doet. */
+    @SuppressWarnings("unchecked")
+    static void stap(String naam, Map<String, Object> c, String s3) {
+        Map<String, Object> a = (Map<String, Object>) Json.map(c, "console", "aanbieder");
+        if ("desec".equals(naam)) {
+            a.put("accounts", Json.obj("desecToken", "desec-bestaand"));
+            a.put("checked", Json.obj("desec", true));
+        } else if ("draait".equals(naam)) {
+            a.put("server", Json.obj("provider", "upcloud", "region", "nl-ams1", "size", "1xCPU-2GB", "serverId", "upc-1", "ipv4", "198.51.100.9", "createdAt", NU));
+            a.put("backup", Json.obj("provider", "custom", "endpoint", s3, "region", "us-east-1", "bucket", "dienst-gratis", "accessKey", "k", "secretKey", "s"));
+            a.put("secret", new String(new char[32]).replace("\0", "ab"));
+            a.put("lastHealth", Json.obj("at", NU, "reachable", true, "version", "1.17", "uptime", 5L, "lastBackupAt", NU, "backup", "aan", "closing", false));
+            Json.map(a, "accounts").put("mollieKey", "live_xyz789");
+            Json.map(a, "checked").put("mollie", true);
+        } else if ("exoDraait".equals(naam)) {
+            a.put("server", Json.obj("provider", "exoscale", "region", "de-fra-1", "size", "standard.small", "serverId", "de-fra-1/i-1", "ipv4", "198.51.100.20", "createdAt", NU));
+        }
+    }
+
+    /** Draait het scenario eerst in Java en dan in TypeScript, en vergelijkt elk antwoord; geeft de Java-antwoorden. */
+    @SuppressWarnings("unchecked")
+    static List<Object> vergelijk(String titel, List<Object[]> sc, Aanbieder.Deps deps, String s3) throws IOException {
+        post("/reset", null);
+        Benodigdheden.resetCache();
+        Gratis.resetCache();
+        Openprovider.resetTokens();
+        Map<String, Object> cj = newConfig();
+        List<Object> outJ = new ArrayList<>();
+        for (Object[] s : sc) {
+            if ("fake".equals(s[0])) { post("/mutate", s[1]); continue; }
+            if ("klok".equals(s[0])) { final long n = (Long) s[1]; Gratis.clock = n < 0 ? System::currentTimeMillis : () -> n; continue; }
+            if (s.length == 1) { stap((String) s[0], cj, s3); continue; }
+            Object r = java((String) s[0], cj, (Map<String, Object>) Json.copy(s[1]), (Boolean) s[2], deps);
+            outJ.add(s.length > 3 ? r : r);
+        }
+        post("/reset", null);
+        Object ct = newConfig();
+        List<Object> outT = new ArrayList<>();
+        for (Object[] s : sc) {
+            if ("fake".equals(s[0])) { post("/mutate", s[1]); continue; }
+            if ("klok".equals(s[0])) { long n = (Long) s[1]; post("/klok", Json.obj("now", n < 0 ? null : n)); continue; }
+            if (s.length == 1) { stap((String) s[0], (Map<String, Object>) ct, s3); continue; }
+            Object r = post("/ts", Json.obj("fn", s[0], "config", ct, "body", s[1], "fresh", s[2]));
+            ct = Json.path(r, "config");
+            outT.add(Json.path(r, "json"));
+        }
+        T.eq(outT.size(), outJ.size(), titel + ": zelfde aantal stappen");
+        int i = 0;
+        for (Object[] s : sc) {
+            if ("fake".equals(s[0]) || "klok".equals(s[0]) || s.length == 1) continue;
+            if (s.length > 3) { i++; continue; }
+            T.eq(Json.stringify(norm(outT.get(i))), Json.stringify(norm(outJ.get(i))), titel + ": zelfde antwoord als TypeScript: " + s[0] + " " + Json.stringify(s[1]) + " (stap " + (i + 1) + ")");
+            i++;
+        }
+        T.eq(Json.stringify(norm(Json.path(ct, "console"))), Json.stringify(norm(Json.path(cj, "console"))), titel + ": zelfde kluis als TypeScript");
+        return outJ;
+    }
+
+    static Map<String, Object> rij(Object lijst, String id) {
+        for (Object x : Json.listAt(lijst, "items")) if (id.equals(Json.str(x, "id"))) return Json.asMap(x);
+        return null;
     }
 
     @SuppressWarnings("unchecked")
@@ -214,6 +362,8 @@ public class BenodigdhedenTest {
             Endpoints.DOH = Json.str(env, "EIGEN_DOH_URLS").split(",");
             Endpoints.TEM_SMTP = Json.str(env, "EIGEN_TEM_SMTP");
             Endpoints.AANBIEDERS = Json.str(env, "EIGEN_AANBIEDERS_URL");
+            Endpoints.UPCLOUD = Json.str(env, "EIGEN_UPCLOUD_API");
+            Endpoints.EXOSCALE = Json.str(env, "EIGEN_EXO_API");
             final String dienst = Json.str(inf, "dienst");
             Aanbieder.reach = url -> dienst;
             Aanbieder.plainSmtp = SmtpCheck.Security.NONE;
@@ -312,6 +462,44 @@ public class BenodigdhedenTest {
             T.eq("duur.nl is een premium-domein met een andere prijs. Koop het in het controlepaneel van Openprovider.", Json.str(outJ.get(indexOf(sc, "kopen", "duur.nl")), "error"), "premium niet kopen");
             String geheimen = Json.stringify(laatste);
             T.check(!geheimen.contains("live_xyz789") && !geheimen.contains(Json.str(cj, "console", "aanbieder", "accounts", "scalewaySecretKey")), "geen geheimen in de lijst");
+
+            // ── Zo gratis mogelijk beginnen: hetzelfde in Java en TypeScript ──
+            Aanbieder.retryDelayMs = 0;
+            String s3 = Json.str(inf, "s3");
+            List<Object> g = vergelijk("gratis", gratisScenario(), deps, s3);
+            T.eq("standaard", Json.str(g.get(0), "modus"), "zonder keuze: Standaard");
+            T.check(Json.path(g.get(0), "items", 0, "route") == null && Json.path(g.get(0), "kosten") == null, "Standaard zonder gratis route en totaal");
+            T.eq("Kies hoe je wilt beginnen", Json.str(g.get(1), "error"), "onbekende keuze");
+            T.eq("€ 0 per maand tot je starttegoed op is; daarna vanaf ongeveer € 6,00 per maand voor de server (zonder btw)", Json.str(g.get(3), "kosten", "tekst"), "eerlijk totaal (vanaf)");
+            T.eq("Gratis adres bij deSEC", Json.str(rij(g.get(3), "domein"), "route"), "gratis route domein");
+            T.check(Json.str(g.get(5), "error").startsWith("Maak eerst je gratis deSEC-account"), "eerst deSEC");
+            T.eq("bezet", Json.str(g.get(7), "status"), "bezette naam");
+            T.eq("vrij", Json.str(g.get(8), "status"), "vrije naam");
+            T.eq("bezet.dedyn.io is al bezet. Kies een andere naam.", Json.str(g.get(9), "error"), "bezet bij maken");
+            T.eq("wacht", Json.str(g.get(10), "status"), "maken duurt even");
+            T.eq("deSEC zet esape.dedyn.io klaar; dat duurt meestal een paar minuten", Json.str(rij(g.get(11), "domein"), "detail"), "lijst: wacht op deSEC");
+            T.eq("ander", Json.str(g.get(12), "status"), "één gratis adres per account");
+            T.eq("klaar", Json.str(g.get(14), "status"), "klaar zodra hij in de DNS staat");
+            T.eq("ok", Json.str(rij(g.get(15), "domein"), "status"), "lijst: adres klaar");
+            T.eq("gratis met starttegoed, daarna ongeveer € 6,42 per maand", Json.str(rij(g.get(17), "server"), "kosten"), "prijs daarna bij Scaleway");
+            T.check(Json.str(g.get(18), "error").startsWith("Inloggen bij UpCloud lukt niet"), "UpCloud: verkeerde sleutel");
+            T.eq("[upcloud, nl-ams1, 1xCPU-2GB, scaleway, ongeveer 19 oktober, € 500,00 van € 500,00]", Arrays.asList(Json.str(g.get(19), "hosting", "provider"), Json.str(g.get(19), "hosting", "region"), Json.str(g.get(19), "hosting", "size"),
+                    Json.str(g.get(19), "backup", "provider"), Json.str(g.get(19), "proef", "eindTekst"), Json.str(g.get(19), "proef", "tegoedTekst")).toString(), "proef bij UpCloud, back-ups bij Scaleway");
+            T.check(Json.str(g.get(24), "smtp").startsWith("scwtem://"), "mail via de HTTPS-koppeling");
+            T.eq("Starttegoed bijna op", Json.str(g.get(26), "waarschuwing", "titel"), "tegoed onder 20%");
+            T.eq(16L, Json.num(g.get(27), "proef", "procent").longValue(), "Je dienst: 16% tegoed");
+            T.eq("Proefperiode bijna voorbij", Json.str(g.get(28), "waarschuwing", "titel"), "drie dagen voor het einde");
+            T.eq("Proefperiode voorbij", Json.str(g.get(29), "waarschuwing", "titel"), "na het einde");
+            T.eq("[scaleway, nl-ams-1, DEV1-S]", Arrays.asList(Json.str(g.get(30), "keuze", "provider"), Json.str(g.get(30), "keuze", "region"), Json.str(g.get(30), "keuze", "size")).toString(), "goedkoopste betaalde server");
+            T.eq(true, Json.path(g.get(32), "verhuisd"), "verhuisd");
+            T.eq("scaleway", Json.str(g.get(32), "server", "provider"), "nieuwe server bij Scaleway");
+            T.eq(null, Json.path(g.get(33), "waarschuwing"), "na verhuizen geen waarschuwing");
+            List<Object> e = vergelijk("exoscale", exoscaleScenario(), deps, s3);
+            T.check(Json.str(e.get(2), "error").startsWith("Inloggen bij Exoscale lukt niet"), "Exoscale: verkeerde sleutel");
+            T.eq("[de-fra-1, exoscale, de-fra-1]", Arrays.asList(Json.str(e.get(3), "hosting", "region"), Json.str(e.get(3), "backup", "provider"), Json.str(e.get(3), "backup", "region")).toString(), "back-ups bij Exoscale");
+            T.eq("Starttegoed bijna op", Json.str(e.get(5), "waarschuwing", "titel"), "Exoscale: saldo onder 20%");
+            T.eq("20 oktober", Json.str(e.get(6), "proef", "eindTekst"), "zelf een einddatum");
+            T.eq(null, Json.path(e.get(7), "keuze"), "Exoscale: nog geen andere aanbieder");
         });
     }
 

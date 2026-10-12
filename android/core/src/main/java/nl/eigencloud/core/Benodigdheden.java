@@ -163,10 +163,14 @@ public final class Benodigdheden {
         final boolean secret = nonEmpty(Json.str(a, "secret"));
         final String ipv4 = Json.str(a, "server", "ipv4");
         final String adrZone = Json.str(a, "adressen", "zone");
-        ExecutorService ex = Executors.newFixedThreadPool(5, r -> { Thread t = new Thread(r, "benodigdheden"); t.setDaemon(true); return t; });
+        final boolean gratis = "gratis".equals(Gratis.modus(c));
+        ExecutorService ex = Executors.newFixedThreadPool(7, r -> { Thread t = new Thread(r, "benodigdheden"); t.setDaemon(true); return t; });
         Future<Doh.Answer> fNs, fA, fAdr;
-        Future<Map<String, Object>> fJur, fLijst;
+        Future<Map<String, Object>> fJur, fLijst, fNa;
+        Future<Boolean> fTegoed;
         try {
+            fNa = gratis ? submit(ex, () -> Gratis.prijsNa(c, a, fresh, deps)) : null;
+            fTegoed = submit(ex, () -> Gratis.verversTegoed(c, fresh));
             fNs = zone != null ? submit(ex, () -> cached("ns:" + zone, fresh, () -> Doh.lookup(zone, "NS"), v -> v != null)) : null;
             fA = host != null && Json.truthy(a.get("dnsHandmatig")) && ipv4 != null ? submit(ex, () -> cached("a:" + host, fresh, () -> Doh.lookup(host, "A"), v -> v != null)) : null;
             fAdr = adrZone != null ? submit(ex, () -> cached("ns:" + adrZone, fresh, () -> Doh.lookup(adrZone, "NS"), v -> v != null)) : null;
@@ -180,7 +184,8 @@ public final class Benodigdheden {
             ex.shutdown();
         }
         Doh.Answer ns = get(fNs), aRec = get(fA), adrNs = get(fAdr);
-        Map<String, Object> jur = within(fJur), lijst = within(fLijst);
+        Map<String, Object> jur = within(fJur), lijst = within(fLijst), na = within(fNa);
+        if (Boolean.TRUE.equals(within(fTegoed))) save(deps);
         List<Object> items = new ArrayList<>();
 
         // Domein
@@ -319,13 +324,142 @@ public final class Benodigdheden {
             else { status = "open"; detail = "gesloten".equals(prs) ? "Voorstel #" + nr + " is gesloten; meld je opnieuw aan" : "Nog niet op de lijst"; }
             items.add(item("lijst", "Op de lijst", status, uitleg, "gratis", detail, true, "hub", "lijst"));
         }
+        // De proef op starttegoed loopt af of het tegoed is bijna op: dat staat bij de server (ook bij Standaard).
+        Map<String, Object> pv = Gratis.proefView(a);
+        if (pv != null && pv.get("waarschuwing") != null) {
+            for (int i = 0; i < items.size(); i++) {
+                if (!"server".equals(Json.str(items.get(i), "id"))) continue;
+                Map<String, Object> x = Json.copy(Json.asMap(items.get(i)));
+                x.put("status", "bijna");
+                x.put("detail", pv.get("waarschuwing"));
+                Map<String, Object> act = Json.copy(Json.map(x, "actie"));
+                act.put("label", "Regelen");
+                x.put("actie", act);
+                items.set(i, x);
+            }
+        }
+        List<Object> uit = items;
+        if (gratis) {
+            boolean scwOk = isTrue(ch.get("scaleway")) && nonEmpty(Json.str(acc, "scalewaySecretKey"));
+            uit = new ArrayList<>();
+            for (Object x : items) uit.add(gratisItem(Json.asMap(x), a, host, ns, na, pv, scwOk));
+            Map<String, Object> ga = Json.map(a, "gratisAdres");
+            if (ga != null && host != null && host.equals(Json.str(ga, "naam")) && !Json.truthy(ga.get("klaar")) && ns != null && Doh.nsMatch(ns.values, DESEC_NS)) { ga.put("klaar", true); save(deps); }
+        }
         long klaar = 0, totaal = 0;
-        for (Object x : items) {
+        for (Object x : uit) {
             if (Json.truthy(Json.path(x, "optioneel"))) continue;
             totaal++;
             if ("ok".equals(Json.str(x, "status"))) klaar++;
         }
-        return Json.obj("items", items, "klaar", klaar, "totaal", totaal, "links", links(), "at", System.currentTimeMillis());
+        return Json.obj("items", uit, "klaar", klaar, "totaal", totaal, "links", links(), "at", System.currentTimeMillis(),
+                "modus", Gratis.modus(c),
+                "kosten", gratis ? gratisKosten(a, na, pv) : null,
+                "waarschuwing", pv != null && pv.get("waarschuwing") != null ? Json.obj("titel", pv.get("titel"), "tekst", pv.get("waarschuwing"), "provider", pv.get("provider")) : null,
+                "proefAanbieders", gratis ? proefAanbieders(deps) : null);
+    }
+
+    private static void save(Aanbieder.Deps deps) {
+        try { deps.save(); } catch (IOException ignored) { /* volgende keer */ }
+    }
+
+    // ───────── Zo gratis mogelijk beginnen ─────────
+
+    private static final String U_DOMEIN_GRATIS = "Het adres van je Dienst. Gratis: een naam als jouwbedrijf.dedyn.io bij deSEC. Een eigen domein kan later altijd.";
+    private static final String U_SERVER_GRATIS = "Een eigen server voor je Dienst, met elk uur een versleutelde back-up. Gratis te proberen met starttegoed bij UpCloud of Exoscale; daarna verhuist de app je Dienst met één tik naar een betaalde server.";
+
+    /** A row with another status (the button follows) and the free route (opnieuw in TS). Keys in {@code patch} order: as in TS. */
+    private static Map<String, Object> opnieuw(Map<String, Object> x, Map<String, Object> patch, String route) {
+        Map<String, Object> out = Json.copy(x);
+        for (Map.Entry<String, Object> e : patch.entrySet()) if (!"actie".equals(e.getKey())) out.put(e.getKey(), e.getValue());
+        String status = Json.str(out, "status");
+        Map<String, Object> pa = Json.map(patch, "actie");
+        String soort = pa != null ? Json.str(pa, "soort") : Json.str(x, "actie", "soort");
+        String doel = pa != null ? Json.str(pa, "doel") : Json.str(x, "actie", "doel");
+        out.put("actie", Json.obj("label", "hub".equals(soort) ? "Bekijken" : "ok".equals(status) ? "Wijzigen" : "Regelen", "soort", soort, "doel", doel));
+        out.put("route", route);
+        return out;
+    }
+
+    /** With "Zo gratis mogelijk beginnen": per row the free route, its cost and (domain, server) another status (gratisItem in TS). */
+    private static Map<String, Object> gratisItem(Map<String, Object> x, Map<String, Object> a, String host, Doh.Answer ns, Map<String, Object> na, Map<String, Object> pv, boolean scwOk) {
+        boolean dedyn = Gratis.isDedyn(host);
+        boolean deSec = ns != null && Doh.nsMatch(ns.values, DESEC_NS);
+        String status = Json.str(x, "status");
+        boolean open = "open".equals(status);
+        switch (Json.str(x, "id")) {
+            case "domein":
+                if (host == null) return opnieuw(x, Json.obj("uitleg", U_DOMEIN_GRATIS, "kosten", "gratis", "detail", "Nog geen naam gekozen"), "Gratis adres bij deSEC");
+                if (dedyn) return opnieuw(x, Json.obj("uitleg", U_DOMEIN_GRATIS, "kosten", "gratis", "status", deSec ? "ok" : "bijna",
+                        "detail", deSec ? host + " staat bij deSEC" : "deSEC zet " + host + " klaar; dat duurt meestal een paar minuten"), "Gratis adres bij deSEC");
+                return opnieuw(x, Json.obj("uitleg", U_DOMEIN_GRATIS), "Eigen domein");
+            case "dns":
+                if (host == null) return opnieuw(x, Json.obj("kosten", "gratis", "detail", "Kies eerst een adres (hierboven)"), "Gratis bij deSEC");
+                if (dedyn && host.equals(Json.str(a, "dns", "zone")) && !nonEmpty(Json.str(a, "dns", "error"))) return opnieuw(x, Json.obj("kosten", "gratis", "status", deSec ? "ok" : "bijna",
+                        "detail", deSec ? host + " staat bij deSEC; de app zet de records" : "De app zet de records zodra deSEC je adres heeft klaargezet"), "Gratis bij deSEC");
+                return opnieuw(x, Json.obj("kosten", "gratis bij deSEC"), "Gratis bij deSEC");
+            case "server": {
+                String naT = Gratis.naTekst(na);
+                String backup = "scaleway".equals(Json.str(a, "backup", "provider")) ? " · back-ups " + Gratis.BACKUP_KOSTEN : "";
+                boolean actief = pv != null && Json.truthy(pv.get("actief"));
+                String eindTekst = pv == null ? null : Json.str(pv, "eindTekst");
+                String kosten = actief ? (eindTekst != null && !Json.truthy(pv.get("verlopen")) ? "gratis tot " + eindTekst + ", daarna " + naT + backup : "gratis tot je starttegoed op is, daarna " + naT + backup)
+                        : a.get("hosting") == null ? "gratis met starttegoed, daarna " + naT : Json.str(x, "kosten");
+                Map<String, Object> paneel = Json.obj("label", "", "soort", "paneel", "doel", "server");
+                if (a.get("hosting") == null || a.get("backup") == null) return opnieuw(x, Json.obj("uitleg", U_SERVER_GRATIS, "kosten", kosten, "detail", "Kies UpCloud of Exoscale om gratis te proberen", "actie", paneel), "Gratis proberen met starttegoed");
+                if (actief && pv.get("waarschuwing") == null && "ok".equals(status)) {
+                    List<String> info = new ArrayList<>();
+                    if (eindTekst != null) info.add("tot " + eindTekst);
+                    if (Json.str(pv, "tegoedTekst") != null) info.add("tegoed " + Json.str(pv, "tegoedTekst"));
+                    return opnieuw(x, Json.obj("uitleg", U_SERVER_GRATIS, "kosten", kosten, "detail", "Draait op starttegoed bij " + Json.str(pv, "naam") + (info.isEmpty() ? "" : " (" + String.join(", ", info) + ")"), "actie", paneel), "Gratis proberen met starttegoed");
+                }
+                return opnieuw(x, Json.obj("uitleg", U_SERVER_GRATIS, "kosten", kosten, "actie", paneel), actief ? "Gratis proberen met starttegoed" : "Betaalde server");
+            }
+            case "scaleway":
+                return opnieuw(x, open ? Json.obj("kosten", "gratis account; je betaalt alleen wat je klanten gebruiken (zit in je prijs)", "detail", "Nog geen sleutel. Een account is gratis; Scaleway vraagt wel een betaalmethode")
+                        : Json.obj("kosten", "gratis account; je betaalt alleen wat je klanten gebruiken (zit in je prijs)"), "Gratis account");
+            case "mollie":
+                return opnieuw(x, Json.obj("kosten", "gratis account; geen vaste kosten, per betaling een klein bedrag (zit in je prijs)"), "Gratis account");
+            case "mail":
+                return opnieuw(x, open ? Json.obj("kosten", Gratis.MAIL_KOSTEN, "detail", scwOk ? "Nog geen mail; regel het via Scaleway" : "Regel eerst Scaleway (gratis account)")
+                        : Json.obj("kosten", Gratis.MAIL_KOSTEN), "Gratis via Scaleway");
+            case "openprovider":
+                return opnieuw(x, open ? Json.obj("detail", "Niet nodig met een gratis adres (optioneel)") : Json.obj(), "Niet nodig om te beginnen");
+            case "adressendienst":
+                return opnieuw(x, a.get("adressen") == null ? Json.obj("detail", "Niet nodig: hiervoor heb je een eigen domein nodig (optioneel)") : Json.obj(), "Niet nodig");
+            case "voorwaarden":
+                return opnieuw(x, Json.obj("kosten", "gratis"), "Gratis");
+            default:
+                return opnieuw(x, Json.obj(), "Gratis");
+        }
+    }
+
+    /** The honest total at the top with "Zo gratis mogelijk beginnen" (gratisKosten in TS). */
+    private static Map<String, Object> gratisKosten(Map<String, Object> a, Map<String, Object> na, Map<String, Object> pv) {
+        boolean proef = a.get("hosting") == null || (pv != null && Json.truthy(pv.get("actief")));
+        Number monthly = Json.num(a, "hosting", "monthly");
+        String tekst = proef ? "€ 0 per maand tot je starttegoed op is; daarna " + Gratis.naTekst(na) + " voor de server (zonder btw)"
+                : monthly != null ? "Ongeveer " + Gratis.euro(monthly.doubleValue()) + " per maand voor de server (zonder btw)" : "Wat de server kost, zegt deze aanbieder niet vooraf";
+        List<Object> regels = new ArrayList<>();
+        String bp = Json.str(a, "backup", "provider");
+        if ("scaleway".equals(bp) || (a.get("backup") == null && !(pv != null && "exoscale".equals(pv.get("provider"))))) regels.add("Back-ups bij Scaleway: " + Gratis.BACKUP_KOSTEN + ".");
+        regels.add("Mail: " + Gratis.MAIL_KOSTEN + ".");
+        regels.add("Scaleway en Mollie: geen vaste kosten. Je betaalt per betaling en wat je klanten gebruiken; dat zit in je prijzen.");
+        return Json.obj("tekst", tekst, "na", proef ? na : null, "regels", regels,
+                "buiten", "Buiten de app: je bedrijf inschrijven bij de KvK kost eenmalig een bedrag; Mollie werkt alleen met een ingeschreven bedrijf.");
+    }
+
+    /** The providers with start credit, what they say and the key fields (proefAanbieders in TS). */
+    private static List<Object> proefAanbieders(Aanbieder.Offers deps) {
+        List<Object> out = new ArrayList<>();
+        for (String id : Gratis.PROEF_IDS) {
+            Map<String, Object> o = null;
+            for (Map<String, Object> x : deps.serverOffers()) if (id.equals(x.get("id"))) o = x;
+            Gratis.Proef p = Gratis.proefInfo(id);
+            out.add(Json.obj("id", id, "naam", p.naam, "aanmelden", p.aanmelden, "wat", p.wat, "tijdens", p.tijdens, "einde", p.einde, "backup", p.backupUitleg, "bron", p.bron,
+                    "keyHelp", o != null && o.get("keyHelp") != null ? o.get("keyHelp") : "", "fields", o != null && o.get("fields") != null ? Json.copy(o.get("fields")) : Json.list()));
+        }
+        return out;
     }
 
     // ───────── Scaleway: één sleutel, de app regelt de rest ─────────
@@ -959,7 +1093,9 @@ public final class Benodigdheden {
         Map<String, Object> dmarc = Json.asMap(rec.get("dmarc"));
         want.add(Json.obj("naam", "_dmarc." + host, "type", "TXT", "waarde", dmarc != null ? Json.str(dmarc, "value") : "v=DMARC1; p=none", "gezet", false));
         List<Object> records = publishMail(a, want);
-        String url = "smtp://" + Bytes.encodeURIComponent(projectId) + ":" + Bytes.encodeURIComponent(key) + "@" + Endpoints.TEM_SMTP;
+        // Zo gratis mogelijk: via de HTTPS-koppeling van Scaleway (scwtem://); een proefserver laat geen SMTP toe. Standaard: SMTP.
+        String url = "gratis".equals(Gratis.modus(c)) ? "scwtem://" + Bytes.encodeURIComponent(projectId) + ":" + Bytes.encodeURIComponent(key) + "@fr-par"
+                : "smtp://" + Bytes.encodeURIComponent(projectId) + ":" + Bytes.encodeURIComponent(key) + "@" + Endpoints.TEM_SMTP;
         acc.put("smtpUrl", url);
         acc.put("mailFrom", "noreply@" + host);
         try { scw("POST", Extras.TEM + "/" + Json.str(dom, "id") + "/check", key, Json.obj()); } catch (IOException | RuntimeException ignored) { /* later opnieuw */ }

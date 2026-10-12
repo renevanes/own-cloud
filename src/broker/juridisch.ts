@@ -206,7 +206,8 @@ export function subverwerkers(ctx: Ctx): Subverwerker[] {
   }
   if (cfg.smtpUrl) {
     const host = hostOf(cfg.smtpUrl) ?? "";
-    add(/(^|\.)(scw\.cloud|scaleway\.com)$/.test(host) ? scw : `de mailserver ${host}`, "het versturen van inlogcodes, facturen en meldingen per mail");
+    // scwtem://…: de HTTPS-koppeling van Scaleway Transactional Email (zie mail.ts).
+    add(cfg.smtpUrl.startsWith("scwtem:") || /(^|\.)(scw\.cloud|scaleway\.com)$/.test(host) ? scw : `de mailserver ${host}`, "het versturen van inlogcodes, facturen en meldingen per mail");
   }
   if (cfg.mollie.apiKey) add("Mollie B.V. (Nederland)", "de betalingen (iDEAL, SEPA-incasso en creditcard)");
   if (cfg.desec.token) add(getAdapter("desec")?.owner ?? "deSEC e.V. (Duitsland)", "de DNS van je domein, met DNSSEC");

@@ -3,7 +3,9 @@
  * deSEC (account, tokens, zones), Openprovider (inloggen, DNS-zones, domeinen, klanten, contactpersonen), een
  * DNS-over-HTTPS-resolver (RFC 8484, binair), de Dienst zelf (/v1/brand, /v1/juridisch, /v1/status/lijst,
  * /v1/status/check/…) en de openbare lijst van aanbieders (/lijst, zoals aanbieders.json op GitHub), plus een
- * SMTP-server met inloggen (zoals smtp.tem.scaleway.com). Eén server, met een voorvoegsel per aanbieder.
+ * SMTP-server met inloggen (zoals smtp.tem.scaleway.com). Eén server, met een voorvoegsel per aanbieder. Voor "Zo gratis
+ * mogelijk beginnen" (gratis.ts) ook: UpCloud (/upc: tegoed, formaten, servers weghalen), Exoscale (/exo/<zone>: saldo,
+ * formaten), Scaleway-formaten met prijzen en servers maken, mail via de HTTPS-koppeling, en dedyn.io-namen bij deSEC.
  * Wordt gebruikt door test/benodigdheden.test.ts en (via scripts/android-nodig.ts) door de Java-test.
  */
 import http from "node:http";
@@ -43,6 +45,15 @@ export function initialState() {
       contactPut: null as any,
     },
     dns: new Map<string, Rec>(),
+    /** UpCloud: token, servers, tegoed in centen (GET /1.3/account → credits). */
+    upc: { token: "upc-token", credits: 50000 as number, servers: [] as any[] },
+    /** Exoscale: sleutel en saldo (GET /v2/live-balance), servers per zone. */
+    exo: { key: "EXOtest", balance: 20 as number, currency: "EUR", instances: [] as any[] },
+    /** Scaleway-formaten per zone (GET /instance/v1/zones/{zone}/products/servers) en servers. */
+    scwSizes: { "nl-ams-1": 6.42 } as Record<string, number>,
+    scwServers: [] as any[], scwIps: [] as any[], temSent: [] as any[],
+    /** deSEC, gratis adressen (dedyn.io): bezette namen, hoe lang het maken duurt, en of ze al in de DNS staan. */
+    dedyn: { bezet: new Set<string>(["bezet.dedyn.io"]), traagMs: 0, metEen: true },
     /** De Dienst: links naar voorwaarden en privacy, staat hij op de openbare lijst (met de goede sleutel), Openprovider-controle. */
     dienst: { termsUrl: null as string | null, privacyUrl: null as string | null, lijst: { opLijst: false, sleutelKlopt: null as boolean | null }, opCheck: { ok: true, detail: "De server van je Dienst kan bij Openprovider" } },
     calls: [] as string[],
@@ -107,7 +118,7 @@ export async function fakeNodig() {
       const u = new URL(req.url ?? "/", "http://x");
       const raw = Buffer.concat(chunks).toString("utf8");
       let body: any = null; try { body = raw ? JSON.parse(raw) : null; } catch { body = null; }
-      const m0 = /^\/(scw|mollie|desec|op|doh|doh-kapot|dienst|lijst)(\/.*)?$/.exec(u.pathname);
+      const m0 = /^\/(scw|mollie|desec|op|doh|doh-kapot|dienst|lijst|upc|exo)(\/.*)?$/.exec(u.pathname);
       const send = (status: number, j: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(j === null ? "" : JSON.stringify(j)); };
       if (!m0) return send(404, { error: "onbekend" });
       const [, who, rest = "/"] = m0;
@@ -124,6 +135,46 @@ export async function fakeNodig() {
         if (h("accept") !== "application/dns-message") return send(400, {});
         const ans = dnsAnswer(Buffer.from(q.get("dns") ?? "", "base64url"), st);
         res.writeHead(200, { "content-type": "application/dns-message" }); return res.end(ans);
+      }
+      // UpCloud (/1.3): inloggen, servers, formaten en het tegoed (in centen)
+      if (who === "upc") {
+        if (h("authorization") !== `Bearer ${st.upc.token}`) return send(401, { error: { error_code: "AUTHENTICATION_FAILED", error_message: "Authentication failed" } });
+        if (p === "/account") return send(200, { account: { credits: st.upc.credits, username: "rene", resource_limits: { cores: 2, memory: 4096 } } });
+        if (p === "/server" && method === "GET") return send(200, { servers: { server: st.upc.servers.filter((x) => !q.get("label") || x.labels.label.some((l: any) => `${l.key}=${l.value}` === q.get("label"))) } });
+        if (p === "/plan") return send(200, { plans: { plan: [
+          { name: "1xCPU-1GB", core_number: 1, memory_amount: 1024 }, { name: "1xCPU-2GB", core_number: 1, memory_amount: 2048 },
+          { name: "2xCPU-4GB", core_number: 2, memory_amount: 4096 }, { name: "DEV-1xCPU-1GB-10GB", core_number: 1, memory_amount: 1024 },
+        ] } });
+        if (p === "/storage/template") return send(200, { storages: { storage: [{ uuid: "tpl-noble", title: "Ubuntu Server 24.04 LTS (Noble Numbat)" }] } });
+        if (p === "/server" && method === "POST") {
+          const x = { uuid: `upc-${++st.n}`, state: "started", title: body.server.title, zone: body.server.zone, plan: body.server.plan, labels: body.server.labels,
+            ip_addresses: { ip_address: [{ access: "public", family: "IPv4", address: `198.51.100.${30 + st.upc.servers.length}` }] } };
+          st.upc.servers.push(x); return send(202, { server: x });
+        }
+        if ((m = /^\/server\/([^/]+)\/stop$/.exec(p)) && method === "POST") { const x = st.upc.servers.find((y) => y.uuid === m![1]); if (!x) return send(404, {}); x.state = "stopped"; return send(200, { server: x }); }
+        if ((m = /^\/server\/([^/]+)$/.exec(p))) {
+          const i = st.upc.servers.findIndex((y) => y.uuid === m![1]);
+          if (i < 0) return send(404, { error: { error_code: "SERVER_NOT_FOUND" } });
+          if (method === "DELETE") { st.upc.servers.splice(i, 1); return send(204, null); }
+          return send(200, { server: st.upc.servers[i] });
+        }
+        return send(599, { error: `nep-UpCloud kent ${method} ${p} niet` });
+      }
+      // Exoscale (/v2 per zone: /exo/<zone>/…): servers, formaten en het saldo
+      if (who === "exo") {
+        if (!/^EXO2-HMAC-SHA256 credential=EXOtest,/.test(h("authorization"))) return send(403, { message: "Invalid request signature" });
+        const mz = /^\/([a-z0-9-]+)(\/.*)$/.exec(p);
+        if (!mz) return send(404, {});
+        const [, zone, ep] = mz;
+        if (ep === "/live-balance") return send(200, { balance: st.exo.balance, currency: st.exo.currency });
+        if (ep === "/instance" && method === "GET") return send(200, { instances: st.exo.instances.filter((x) => x.zone === zone) });
+        if (ep === "/instance-type") return send(200, { "instance-types": [
+          { id: "t-micro", family: "standard", size: "micro", cpus: 1, memory: 536870912, authorized: true },
+          { id: "t-small", family: "standard", size: "small", cpus: 2, memory: 2147483648, authorized: true },
+          { id: "t-medium", family: "standard", size: "medium", cpus: 2, memory: 4294967296, authorized: true },
+        ] });
+        if ((m = /^\/instance\/([^/]+)$/.exec(ep)) && method === "DELETE") { st.exo.instances = st.exo.instances.filter((x) => x.id !== m![1]); return send(200, { id: "op", state: "success" }); }
+        return send(599, { message: `nep-Exoscale kent ${method} ${ep} niet` });
       }
       // Scaleway
       if (who === "scw") {
@@ -166,9 +217,29 @@ export async function fakeNodig() {
           if (method === "GET") return send(200, { projects: st.scw.projects.filter((x) => !q.get("name") || x.name === q.get("name")), total_count: st.scw.projects.length });
           const x = { id: `proj${String(++st.n).padStart(4, "0")}-0000-1111-2222-333333333333`, ...body }; st.scw.projects.push(x); return send(200, x);
         }
+        // Instances: formaten met prijzen per zone, en servers maken (zoals ScalewayProvider.create)
+        if ((m = /^\/instance\/v1\/zones\/([^/]+)\/products\/servers$/.exec(p))) {
+          const dev = st.scwSizes[m[1]] ?? 6.57;
+          return send(200, { servers: {
+            "STARDUST1-S": { ncpus: 1, ram: 1073741824, arch: "x86_64", monthly_price: 0.11 },
+            "DEV1-S": { ncpus: 2, ram: 2147483648, arch: "x86_64", monthly_price: dev },
+            "PLAY2-PICO": { ncpus: 1, ram: 2147483648, arch: "x86_64", monthly_price: 10.44 },
+            "DEV1-M": { ncpus: 3, ram: 4294967296, arch: "x86_64", monthly_price: 14.75 },
+          } });
+        }
+        if ((m = /^\/instance\/v1\/zones\/([^/]+)\/ips$/.exec(p)) && method === "POST") { const x = { id: `ip-${++st.n}`, address: `192.0.2.${10 + st.scwIps.length}`, zone: m[1] }; st.scwIps.push(x); return send(201, { ip: x }); }
+        if ((m = /^\/instance\/v1\/zones\/([^/]+)\/ips\/([^/]+)$/.exec(p)) && method === "DELETE") { st.scwIps = st.scwIps.filter((x) => x.id !== m![2]); return send(204, null); }
+        if ((m = /^\/instance\/v1\/zones\/([^/]+)\/servers$/.exec(p))) {
+          if (method === "GET") return send(200, { servers: st.scwServers.filter((x) => x.zone === m![1]) });
+          const x = { id: `srv-${++st.n}`, zone: m[1], state: "stopped", ...body, public_ips: (body.public_ips ?? []).map((i: string) => ({ id: i })) }; st.scwServers.push(x); return send(201, { server: x });
+        }
+        if ((m = /^\/instance\/v1\/zones\/([^/]+)\/servers\/([^/]+)\/user_data\/([^/]+)$/.exec(p))) return send(204, null);
+        if ((m = /^\/instance\/v1\/zones\/([^/]+)\/servers\/([^/]+)\/action$/.exec(p))) { const x = st.scwServers.find((y) => y.id === m![2]); if (!x) return send(404, {}); x.state = body.action === "poweron" ? "running" : x.state; return send(202, { task: { id: "t" } }); }
+        if (p === "/marketplace/v2/local-images") return send(200, { local_images: [{ id: `img-${q.get("zone")}`, label: q.get("image_label") }] });
+        if (p === "/transactional-email/v1alpha1/regions/fr-par/emails" && method === "POST") { st.temSent.push(body); return send(200, { emails: [{ id: `mail-${st.temSent.length}` }] }); }
         const tem = "/transactional-email/v1alpha1/regions/fr-par/domains";
         if (p === tem) {
-          if (method === "GET") return send(200, { domains: st.scw.tem.filter((d) => d.project_id === q.get("project_id") && d.name === q.get("name")) });
+          if (method === "GET") return send(200, { domains: st.scw.tem.filter((d) => d.project_id === q.get("project_id") && (!q.get("name") || d.name === q.get("name"))) });
           const d = body.domain_name;
           const x = { id: `tem-${++st.n}`, name: d, project_id: body.project_id, status: "pending",
             records: { spf: { name: d, value: "v=spf1 include:_spf.tem.scaleway.com -all" }, dkim: { name: `${body.project_id}._domainkey.${d}`, value: "v=DKIM1; h=sha256; k=rsa; p=MIIBIjANBgkq" }, dmarc: { name: `_dmarc.${d}`, value: "v=DMARC1; p=none" } } };
@@ -205,7 +276,16 @@ export async function fakeNodig() {
           const t = { id: `tok-${++st.n}`, token: `desec-${body.name}-${st.n}`, ...body }; st.desec.tokens.push(t); return send(201, t);
         }
         if (p === "/domains/" && method === "GET") return send(200, [...st.desec.zones.keys()].map((name) => ({ name })));
-        if (p === "/domains/" && method === "POST") { st.desec.zones.set(body.name, { keys: [{ dnskey: "257 3 13 QUJDREVG", ds: ["12345 13 2 aabbccdd"], managed: true }] }); return send(201, { name: body.name }); }
+        if (p === "/domains/" && method === "POST") {
+          const name = String(body?.name ?? "");
+          if (name.endsWith(".dedyn.io")) {
+            // Zoals deSEC: één naam direct onder dedyn.io per account; een bezette naam geeft 400. Het maken kan even duren.
+            if (st.dedyn.bezet.has(name)) return send(400, { name: ["This domain name conflicts with an existing zone, or is disallowed by policy."] });
+            if (st.dedyn.metEen && [...st.desec.zones.keys()].some((z) => z.endsWith(".dedyn.io"))) return send(400, { detail: "You reached the maximum number of domains allowed for your account." });
+            return void setTimeout(() => { st.desec.zones.set(name, { keys: [{ dnskey: "257 3 13 QUJDREVG", ds: ["12345 13 2 aabbccdd"], managed: true }] }); send(201, { name }); }, st.dedyn.traagMs);
+          }
+          st.desec.zones.set(name, { keys: [{ dnskey: "257 3 13 QUJDREVG", ds: ["12345 13 2 aabbccdd"], managed: true }] }); return send(201, { name });
+        }
         if ((m = /^\/domains\/([^/]+)\/$/.exec(p))) { const z = st.desec.zones.get(m[1]); return z ? send(200, { name: m[1], keys: z.keys }) : send(404, { detail: "Not found." }); }
         if ((m = /^\/domains\/([^/]+)\/rrsets\/$/.exec(p)) && method === "PUT") return send(200, body);
         return send(599, {});
@@ -255,10 +335,13 @@ export async function fakeNodig() {
       // De Dienst
       if (who === "dienst") {
         if (p === "/v1/brand") return send(200, { name: "ESAPE", termsUrl: st.dienst.termsUrl, privacyUrl: st.dienst.privacyUrl });
+        if (p === "/v1/status") return send(200, { version: "1.17", uptime: 7200, lastBackupAt: Date.now() - 600_000, backup: "aan", closing: false });
         if (p === "/v1/juridisch") return send(200, { documents: st.dienst.termsUrl ? [{ kind: "voorwaarden", title: "Algemene voorwaarden", url: st.dienst.termsUrl, version: 1, updatedAt: 1760000000000 }] : [] });
         if (!/^Beheer [0-9a-f]{64}$/.test(h("authorization"))) return send(401, { error: "Geen toegang" });
         if (p === "/v1/status/lijst") return send(200, { entry: { naam: "ESAPE", url: DIENST_URL, land: "NL", contact: "rene@esape.nl", omschrijving: "", sleutel: DIENST_SLEUTEL }, opLijst: st.dienst.lijst.opLijst, voorwaarden: { termsUrl: st.dienst.termsUrl, privacyUrl: st.dienst.privacyUrl } });
         if (p === "/v1/status/check/openprovider") return send(200, { ...st.dienst.opCheck, ingesteld: true });
+        if (p === "/v1/status/handover" && method === "POST") return send(200, { ok: true, lastBackupAt: 1760000000000 });
+        if (p === "/v1/status/overzicht") return send(200, { klanten: 3, actief: 2, omzetMaand: { net: 23.98, count: 2 }, openHulpvragen: 0, achterstanden: 0 });
         return send(404, { error: "Niet gevonden" });
       }
       return send(404, {});
@@ -270,7 +353,8 @@ export async function fakeNodig() {
     get st() { return st; },
     reset() { st = initialState(); smtpAuth.length = 0; },
     base, smtpPort, smtpAuth,
-    env: { EIGEN_SCW_API: `${base}/scw`, EIGEN_MOLLIE_URL: `${base}/mollie`, EIGEN_DESEC_URL: `${base}/desec`, EIGEN_OPENPROVIDER_URL: `${base}/op`, EIGEN_DOH_URLS: `${base}/doh-kapot,${base}/doh`, EIGEN_TEM_SMTP: `127.0.0.1:${smtpPort}`, EIGEN_AANBIEDERS_URL: `${base}/lijst` },
+    env: { EIGEN_SCW_API: `${base}/scw`, EIGEN_MOLLIE_URL: `${base}/mollie`, EIGEN_DESEC_URL: `${base}/desec`, EIGEN_OPENPROVIDER_URL: `${base}/op`, EIGEN_DOH_URLS: `${base}/doh-kapot,${base}/doh`, EIGEN_TEM_SMTP: `127.0.0.1:${smtpPort}`, EIGEN_AANBIEDERS_URL: `${base}/lijst`,
+      EIGEN_UPCLOUD_API: `${base}/upc`, EIGEN_EXO_API: `${base}/exo/{zone}` },
     dienst: `${base}/dienst`,
     close: () => Promise.all([new Promise<void>((r) => server.close(() => r())), new Promise<void>((r) => smtp.close(() => r()))]),
   };
