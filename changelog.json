@@ -1,5 +1,12 @@
 [
   {
+    "version": "1.19",
+    "date": "2026-10-13",
+    "changes": [
+      "De app wordt weer gebouwd en bijgewerkt; in de testfase met een testsleutel (installeer Eigen Cloud alleen via de app of de officiële releases)"
+    ]
+  },
+  {
     "version": "1.18",
     "date": "2026-10-12",
     "changes": [

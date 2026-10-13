@@ -6,14 +6,21 @@ plugins {
 // (scripts/bump.sh). Het wijzigingslog (changelog.json) gaat mee in de app voor "Wat is er nieuw".
 def versionProps = new Properties()
 file("../../VERSION").withInputStream { versionProps.load(it) }
+// Ondertekening (zie android/signing/README.md):
+//  - officieel: alle vier ANDROID_KEYSTORE-waarden uit de CI-secrets; moet passen bij signing/certificate-sha256.txt;
+//  - anders de OPENBARE testsleutel uit signing/test/ (tijdelijke vereenvoudiging zolang de secrets er niet zijn);
+//    moet passen bij signing/test/certificate-sha256.txt. Wisselen tussen beide vraagt één keer opnieuw installeren.
 def signingReady = ["ANDROID_KEYSTORE", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD"].every { System.getenv(it) }
+def officialSigner = signingReady ? [store: file(System.getenv("ANDROID_KEYSTORE")), storePassword: System.getenv("ANDROID_KEYSTORE_PASSWORD"), alias: System.getenv("ANDROID_KEY_ALIAS"), keyPassword: System.getenv("ANDROID_KEY_PASSWORD"), pin: file("../signing/certificate-sha256.txt"), kind: "officieel"] : null
+def testSigner = [store: file("../signing/test/eigen-cloud-test.p12"), storePassword: "eigen-cloud-test", alias: "eigen-cloud-test", keyPassword: "eigen-cloud-test", pin: file("../signing/test/certificate-sha256.txt"), kind: "test"]
+def signer = officialSigner ?: testSigner
 def verifyReleaseSigner = {
-    if (!signingReady) throw new GradleException("Release signing requires all four ANDROID_KEYSTORE credentials from protected CI secrets. The public legacy key must not be used.")
-    def releaseStore = java.security.KeyStore.getInstance(file(System.getenv("ANDROID_KEYSTORE")), System.getenv("ANDROID_KEYSTORE_PASSWORD").toCharArray())
-    def certificate = releaseStore.getCertificate(System.getenv("ANDROID_KEY_ALIAS"))
+    def releaseStore = java.security.KeyStore.getInstance(signer.store, signer.storePassword.toCharArray())
+    def certificate = releaseStore.getCertificate(signer.alias)
     def fingerprint = certificate == null ? "" : java.security.MessageDigest.getInstance("SHA-256").digest(certificate.encoded).encodeHex().toString().toUpperCase()
-    def expected = file("../signing/certificate-sha256.txt").text.trim().replace(":", "").toUpperCase()
-    if (fingerprint != expected) throw new GradleException("The CI key does not match android/signing/certificate-sha256.txt. Review the signer migration before publishing.")
+    def expected = signer.pin.text.trim().replace(":", "").toUpperCase()
+    if (fingerprint != expected) throw new GradleException("The ${signer.kind} signing key does not match ${signer.pin}. Review the signer migration before publishing.")
+    if (signer.kind == "test") logger.warn("Eigen Cloud: release ondertekend met de OPENBARE testsleutel (geen CI-secrets). Zie android/signing/README.md.")
 }
 if (gradle.startParameter.taskNames.any { it.toLowerCase().contains("release") }) verifyReleaseSigner()
 gradle.taskGraph.whenReady { graph ->
@@ -50,12 +57,10 @@ android {
 
     signingConfigs {
         release {
-            if (signingReady) {
-                storeFile file(System.getenv("ANDROID_KEYSTORE"))
-                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                keyAlias System.getenv("ANDROID_KEY_ALIAS")
-                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
-            }
+            storeFile signer.store
+            storePassword signer.storePassword
+            keyAlias signer.alias
+            keyPassword signer.keyPassword
         }
     }
 

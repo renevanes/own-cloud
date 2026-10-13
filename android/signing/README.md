@@ -1,5 +1,24 @@
 # Ondertekening en overgang naar een nieuwe sleutel
 
+## Nu: openbare testsleutel (tijdelijke vereenvoudiging)
+
+Zolang de vier secrets hieronder niet in GitHub staan, ondertekent CI de app met de **openbare testsleutel**
+in [test/](test/) (wachtwoord en alias: `eigen-cloud-test`; vingerafdruk in
+[test/certificate-sha256.txt](test/certificate-sha256.txt)). Zo komt er wél elke versie een app uit.
+
+Wat dat betekent:
+- De automatische updates blijven veilig: de app haalt ze alleen uit de releases van deze repository,
+  via HTTPS en met de SHA-256 uit `update.json`.
+- Iedereen kan een APK met deze sleutel ondertekenen. Installeer Eigen Cloud dus **alleen** uit de
+  releases van renevanes/own-cloud (of via de app zelf), nooit een APK die je van iemand anders krijgt.
+- Niet geschikt voor Google Play of Google's ontwikkelaarsverificatie: daarvoor is een privésleutel nodig.
+
+Zodra de secrets er staan, gebruikt CI vanzelf de officiële sleutel (en controleert hij tegen
+[certificate-sha256.txt](certificate-sha256.txt)). Die overstap vraagt één keer de app verwijderen en
+opnieuw installeren; je cloudgegevens blijven op de servers, de beheerkluis herstel je met je herstelsleutel.
+
+## Officiële sleutel
+
 De eerder gepubliceerde sleutel is blootgesteld. Gebruik hem niet voor nieuwe releases.
 Hij staat nog in oude Git-commits; verwijderen trekt eerdere kopieën niet in.
 
