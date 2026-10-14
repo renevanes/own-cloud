@@ -6,14 +6,18 @@ adressendienst (zie ROLLEN.md).
 
 ## Een wijziging voorstellen
 
-1. Maak een fork van `renevanes/own-cloud` en een branch voor je wijziging.
-2. Werk zoals in CLAUDE.md staat: tests erbij, `npm run typecheck`, `npm test`, `android/compile-check.sh` en,
+Mensen en agents (Claude, OpenAI Codex, …) werken hier tegelijk; de afspraken staan in [AGENTS.md](AGENTS.md).
+
+1. Maak een fork van `renevanes/own-cloud` (of, met schrijfrechten, een branch) voor je wijziging.
+2. Werk zoals in AGENTS.md staat: tests erbij, `npm run typecheck`, `npm test`, `android/compile-check.sh` en,
    als je de Java-kern raakt, `android/core/test.sh`.
 3. Raakt je wijziging de beheerconsole (`src/console`), dan hoort dezelfde wijziging in de Java-kern van de app
    (`android/core`): beide gebruiken dezelfde schermen.
 4. Teksten voor gebruikers zijn Nederlands, gewone taal, zonder technische termen.
-5. Open een pull request. Verhoog **niet** zelf de versie: de beheerders van de repository doen dat bij het samenvoegen
-   (`scripts/bump.sh`, `scripts/publish.sh`), zodat elke versie één nummer en één regel in het wijzigingslog krijgt.
+5. Beschrijf je wijziging met `scripts/wijziging.sh "wat de gebruiker merkt"` (een eigen bestand in `wijzigingen/`)
+   en open een pull request. Kies **niet** zelf een versie: na samenvoegen kent de CI het volgende nummer toe en
+   publiceert hij de versie. Met pushrechten kan het ook direct: `scripts/publish.sh` kiest het nummer vlak voor het
+   pushen en probeert het opnieuw als iemand anders net eerder was.
 
 De beheerders van de repository beoordelen elk voorstel. Wat zij samenvoegen, komt in de volgende versie bij iedereen:
 de app werkt zichzelf bij en clouds en diensten volgen met de rollende updates.

@@ -1,5 +1,12 @@
 [
   {
+    "version": "1.20",
+    "date": "2026-10-14",
+    "changes": [
+      "Achter de schermen: meerdere ontwikkelaars en AI-assistenten (zoals Claude en Codex) kunnen nu tegelijk verbeteringen maken en publiceren zonder elkaar in de weg te zitten"
+    ]
+  },
+  {
     "version": "1.19",
     "date": "2026-10-13",
     "changes": [

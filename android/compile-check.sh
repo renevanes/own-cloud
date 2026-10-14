@@ -5,6 +5,12 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 JAR="${ANDROID_JAR:-${ANDROID_HOME:-$HOME/Android/Sdk}/platforms/android-34/android.jar}"
+# Zonder Android SDK (bijv. in de sandbox van een agent): overslaan met een waarschuwing; de CI bouwt de app altijd
+# echt (gradle lint + assemble). REQUIRE_ANDROID_JAR=1 maakt een ontbrekende SDK een fout.
+if [ ! -f "$JAR" ]; then
+  if [ "${REQUIRE_ANDROID_JAR:-}" = "1" ]; then echo "FAIL compile-check: $JAR ontbreekt"; exit 1; fi
+  echo "OVERGESLAGEN compile-check: geen android.jar ($JAR). De CI controleert de app."; exit 0
+fi
 OUT="$HERE/build/compile-check"
 rm -rf "$OUT"; mkdir -p "$OUT/stubs-src/nl/eigencloud/app" "$OUT/classes"
 cat > "$OUT/stubs-src/nl/eigencloud/app/R.java" <<'J'

@@ -1,6 +1,7 @@
 # Eén pijplijn voor alles. Bij elke push naar main:
-#   0. versie: elke push is een nieuwe versie (VERSION + changelog.json, zie scripts/bump.sh en scripts/publish.sh);
-#      bestaat versie X.Y al bij een andere commit, dan stopt alles hier
+#   0. versie: elke push is een nieuwe versie. scripts/publish.sh kiest het nummer vlak voor het pushen; een
+#      samengevoegd voorstel met wijzigingen/*.txt krijgt hier zijn nummer (zie AGENTS.md). Bestaat versie X.Y al bij
+#      een andere commit en beschrijft de push niets, dan stopt alles hier
 #   1. testen (Node en de Java-kern van de app)
 #   2. de Android-app bouwen en ondertekenen (vaste sleutel, zie android/signing/README.md)
 #   3. de app publiceren als pakket op ghcr.io (eigen-cloud-app) — daar haalt de app zelf zijn updates op
@@ -26,21 +27,46 @@ jobs:
   versie:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write   # alleen om een versiecommit te maken voor een samengevoegd voorstel (zie hieronder)
+      actions: write    # en daarna deze pijplijn opnieuw te starten voor die commit
     outputs:
       name: ${{ steps.v.outputs.name }}
       code: ${{ steps.v.outputs.code }}
+      skip: ${{ steps.toekennen.outputs.skip }}
     steps:
       - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
+      # Meerdere agents en mensen werken tegelijk (AGENTS.md). Een samengevoegd voorstel (pull request) of een push
+      # met beschreven wijzigingen (wijzigingen/*.txt) maar zonder versie krijgt hier zijn versie: één commit
+      # "Versie X.Y" bovenop main, daarna start deze pijplijn opnieuw voor die commit en stopt deze run.
+      # Publiceerde iemand anders intussen, dan lukt het pushen niet; zijn run neemt deze wijzigingen dan mee.
+      - id: toekennen
+        name: Versie toekennen aan beschreven wijzigingen
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          if ! ls wijzigingen/*.txt >/dev/null 2>&1; then echo "skip=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          RES=$(python3 scripts/release.py apply --message-file "$RUNNER_TEMP/msg")
+          git add -A && git commit -q -F "$RUNNER_TEMP/msg"
+          if git push -q origin HEAD:main; then
+            gh workflow run ci.yml --ref main
+            echo "::notice::Versie ${RES% *} toegekend; de pijplijn start opnieuw voor die commit."
+          else
+            echo "::notice::Iemand publiceerde intussen; die run neemt deze wijzigingen mee."
+          fi
+          echo "skip=true" >> "$GITHUB_OUTPUT"
       - id: v
         name: Nieuwe versie?
+        if: steps.toekennen.outputs.skip != 'true'
         run: |
           source VERSION
           TOP=$(python3 -c "import json;print(json.load(open('changelog.json',encoding='utf-8'))[0]['version'])")
-          if [ "$TOP" != "$VERSION_NAME" ]; then echo "::error::Het wijzigingslog begint bij $TOP, maar VERSION zegt $VERSION_NAME. Gebruik scripts/bump.sh."; exit 1; fi
+          if [ "$TOP" != "$VERSION_NAME" ]; then echo "::error::Het wijzigingslog begint bij $TOP, maar VERSION zegt $VERSION_NAME. Pas die twee niet zelf aan: zie AGENTS.md."; exit 1; fi
           TAGGED=$(git ls-remote --tags origin "refs/tags/v$VERSION_NAME" | cut -f1)
           if [ -n "$TAGGED" ] && [ "$TAGGED" != "$GITHUB_SHA" ]; then
-            echo "::error::Versie $VERSION_NAME bestaat al (commit ${TAGGED:0:7}). Elke wijziging is een nieuwe versie: scripts/bump.sh \"wat er veranderd is\"."; exit 1
+            echo "::error::Versie $VERSION_NAME bestaat al (commit ${TAGGED:0:7}) en deze push beschrijft geen wijziging. Beschrijf je wijziging met scripts/wijziging.sh \"wat de gebruiker merkt\" en publiceer met scripts/publish.sh (zie AGENTS.md)."; exit 1
           fi
           echo "name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
           echo "code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
@@ -48,6 +74,7 @@ jobs:
 
   test:
     needs: versie
+    if: needs.versie.outputs.skip != 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -62,6 +89,7 @@ jobs:
 
   core:
     needs: versie
+    if: needs.versie.outputs.skip != 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7

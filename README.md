@@ -199,8 +199,9 @@ android/compile-check.sh  # app-code compileren tegen de Android-API (zonder And
 
 Eén versienummer voor de app en de servers, en bij elke wijziging omhoog: 1.1, 1.2, … Wat er per versie nieuw is
 staat in [changelog.json](changelog.json); de app toont het na een update. Elke versie heeft een eigen
-[release](https://github.com/renevanes/own-cloud/releases) met de APK. Werkwijze: `scripts/bump.sh "wat er veranderd is"`
-en daarna `scripts/publish.sh` (zie [android/README.md](android/README.md#versies)).
+[release](https://github.com/renevanes/own-cloud/releases) met de APK. Werkwijze: `scripts/wijziging.sh "wat er veranderd is"`
+en daarna `scripts/publish.sh`, of een pull request. Meerdere agents (Claude, Codex, …) en mensen kunnen dat tegelijk
+doen zonder te botsen; zie [AGENTS.md](AGENTS.md).
 
 ## Gezin en extra gebruikers
 

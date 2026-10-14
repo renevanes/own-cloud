@@ -7,6 +7,24 @@ concurrency:
   group: checks-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 jobs:
+  # Werken meerdere agents tegelijk, dan botsen voorstellen die zelf VERSION of changelog.json aanpassen.
+  # Een voorstel beschrijft zijn wijziging in wijzigingen/*.txt; het nummer komt bij het samenvoegen (AGENTS.md).
+  wijziging:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - name: Wijziging beschreven, zonder zelf een versie te kiezen?
+        env: { BASE: "${{ github.event.pull_request.base.sha }}" }
+        run: |
+          CHANGED=$(git diff --name-only "$BASE"...HEAD)
+          if echo "$CHANGED" | grep -qxE "VERSION|changelog.json"; then
+            echo "::warning::Dit voorstel past VERSION of changelog.json zelf aan. Beschrijf je wijziging liever met scripts/wijziging.sh; het nummer komt bij het samenvoegen. Zo botst het niet met anderen."
+          fi
+          if ! echo "$CHANGED" | grep -qE "^wijzigingen/.+\.txt$"; then
+            echo "::warning::Geen beschreven wijziging (wijzigingen/*.txt). Zonder beschrijving krijgt dit voorstel na samenvoegen geen eigen versie; voeg er een toe met scripts/wijziging.sh \"wat de gebruiker merkt\"."
+          fi
+          python3 scripts/release.py check || true
   node:
     runs-on: ubuntu-24.04
     steps:

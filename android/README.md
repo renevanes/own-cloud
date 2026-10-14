@@ -32,12 +32,12 @@ staat het hele overzicht. Elke versie is één commit *Versie X.Y* en krijgt een
 `Eigen-Cloud-vX.Y.apk`.
 
 ```sh
-scripts/bump.sh "Wat er voor de gebruiker veranderd is" "Nog iets"   # versie +0.1 en regels in het wijzigingslog
-scripts/publish.sh                                                    # tests, commit "Versie X.Y", push naar main
+scripts/wijziging.sh "Wat er voor de gebruiker veranderd is" "Nog iets"   # regels voor het wijzigingslog (wijzigingen/)
+scripts/publish.sh                                                        # tests, kiest het nummer, commit "Versie X.Y", push
 ```
-`publish.sh` stopt als het wijzigingslog niet bij `VERSION` past of als er intussen een nieuwere versie op GitHub
-staat (een andere sessie): eerst `git pull --rebase`, dan opnieuw `scripts/bump.sh`. De CI weigert een push waarvan de
-versie al bestaat.
+Het versienummer wordt pas bij het publiceren gekozen. Publiceerde een andere agent of sessie intussen, dan zet
+`publish.sh` je werk erbovenop en neemt het het volgende nummer; alleen bij een echt conflict stopt het, zonder iets te
+veranderen. Via een pull request kan ook: na samenvoegen kent de CI het nummer toe. Zie [AGENTS.md](../AGENTS.md).
 
 ## Automatische updates
 
