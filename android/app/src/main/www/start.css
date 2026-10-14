@@ -21,3 +21,5 @@
 #about #dienstForm .actions { margin: 0; }
 .start .choices { display: grid; gap: 12px; }
 .start .choice b { overflow-wrap: anywhere; }
+.start .onphone { margin-top: 30px; }
+.start .onphone h2 { font-size: var(--fs-1); margin: 0 0 10px; }

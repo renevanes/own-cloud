@@ -1,6 +1,7 @@
 // Eigen Cloud — beheerconsole
 import { europeMap, MAP_CSS } from "/shared/europe.js";
 import { renderNodig, regelVenster, verhuisVenster, NODIG_CSS } from "./nodig.js";
+import { generatePassword, normalizeSecret } from "./secrets.js";
 document.head.insertAdjacentHTML("beforeend", `<style>${MAP_CSS}${NODIG_CSS}</style>`);
 
 const $ = (s, el = document) => el.querySelector(s);
@@ -51,7 +52,7 @@ async function api(path, opts = {}) {
     r = await fetch(path, { method: opts.method ?? "GET", headers: opts.body ? { "content-type": "application/json" } : {}, body: opts.body ? JSON.stringify(opts.body) : undefined });
     j = r.headers.get("content-type")?.includes("json") ? await r.json() : null;
   }
-  if (r.status === 401 && path !== "/api/unlock" && path !== "/api/unlock/biometric") {
+  if (r.status === 401 && path !== "/api/unlock" && path !== "/api/unlock/biometric" && path !== "/api/unlock/device") {
     // Op slot (verlopen of in een andere browser geopend): slotscherm tonen, niet opnieuw proberen.
     if (state) { state.unlocked = false; clearInterval(timer); $("#lockBtn").hidden = true; renderLock(); }
     throw new Error("De kluis is op slot");
@@ -118,6 +119,8 @@ async function render() {
   void updateDienstLink();
   // De herstelsleutel bekijken of controleren (ook vanaf de herinnering op het overzicht).
   if (hash === "sleutelcontrole" || hash === "herstelsleutel") return stepKey(!!config.alleenDienst, hash === "sleutelcontrole" ? "check" : "show");
+  // Kluis op deze telefoon: vingerafdruk, wachtwoordzin, en het wachtwoord van je cloud.
+  if (hash === "kluis") return renderKluis();
   if (config.alleenDienst) {
     // Kluis alleen voor een Dienst: eerst de herstelsleutel, daarna "Je dienst". "#jij": toch een eigen cloud erbij.
     if (state.step === "sleutel") return stepKey(true);
@@ -191,6 +194,167 @@ document.addEventListener("click", async (e) => {
   } catch (err) { box.innerHTML = `<p class="msg err">${esc(err.message)}</p>`; }
 });
 
+// ═════════ Kluis: vingerafdruk of wachtwoordzin ═════════
+
+/** Wat de telefoon kan (vingerafdruk, pincode); null op de computer. */
+const deviceInfo = () => (NATIVE ? state?.device ?? null : null);
+const ICON_FINGER = `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 11.2v2.6a8 8 0 0 1-1.4 4.6"/><path d="M8.6 14.2v-2.9a3.4 3.4 0 0 1 6.8 0v1.8a12.5 12.5 0 0 1-1 4.9"/><path d="M5.6 15.6v-4.3a6.4 6.4 0 0 1 11.3-4.1"/><path d="M18.3 10.2c.1.4.1.7.1 1.1v2a15.5 15.5 0 0 1-.7 4.4"/><path d="M6.3 5.6a9 9 0 0 1 14.1 3.3"/><path d="M3.6 8.6A9.6 9.6 0 0 1 4.9 6.3"/></svg>`;
+const ICON_KEY = `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4.2"/><path d="M11 12l8.5-8.5"/><path d="M16.2 7.3l2.3 2.3"/><path d="M13.9 9.6l1.8 1.8"/></svg>`;
+const DEVICE_REASONS = {
+  android: "Met je vingerafdruk kan vanaf Android 9. Op deze telefoon kies je een wachtwoordzin.",
+  "geen-slot": "Je telefoon heeft nog geen schermvergrendeling. Stel een pincode en je vingerafdruk in, dan hoef je geen wachtwoordzin te bedenken.",
+  "geen-vinger": "Er staat nog geen vingerafdruk op deze telefoon. Stel er een in, dan hoef je geen wachtwoordzin te bedenken.",
+  hardware: "De app kan de vingerafdruklezer van deze telefoon niet gebruiken. Kies een wachtwoordzin.",
+};
+const canFixDevice = (d) => !!(NATIVE?.openSecuritySettings && d && (d.reason === "geen-slot" || d.reason === "geen-vinger"));
+/** "je vingerafdruk" of "je vingerafdruk of de pincode van je telefoon". */
+const unlockWords = (d) => (d?.pin ? "je vingerafdruk of de pincode van je telefoon" : "je vingerafdruk");
+/** Melding bij een fout van de vingerafdruk (geannuleerd of niet mogelijk) in gewone taal. */
+const deviceMsg = (err) => (err?.data?.cancelled ? "Geannuleerd. Probeer het nog eens, of kies een wachtwoordzin." : err.message);
+
+/** "Kluis op dit toestel" in een formulier; daarna `wireVault(form)`. */
+function vaultBlock({ title = `Kluis op ${DEVICE}`, what = "je sleutels en API-tokens", passLabel = "Wachtwoordzin", repeat = true } = {}) {
+  return `<div class="vaultblock" data-vault data-what="${esc(what)}" data-pass-label="${esc(passLabel)}" data-repeat="${repeat ? 1 : 0}"><h2>${esc(title)}</h2><div class="vb"></div></div>`;
+}
+
+/**
+ * Op de telefoon standaard met je vingerafdruk (geen wachtwoordzin te bedenken); "Liever een wachtwoordzin" als
+ * alternatief. Op de computer, of als de telefoon het niet kan: een wachtwoordzin. Geeft een functie die
+ * {body} (vault + passphrase) of {error} teruggeeft.
+ */
+function wireVault(form) {
+  const box = $("[data-vault]", form);
+  if (!box) return () => ({ body: {} });
+  let mode = deviceInfo()?.available ? "device" : "passphrase";
+  let couldDevice = !!deviceInfo()?.available;
+  const draw = () => {
+    const d = deviceInfo();
+    if (mode === "device" && !d?.available) mode = "passphrase";
+    const what = box.dataset.what;
+    const vb = $(".vb", box);
+    if (mode === "device") {
+      vb.innerHTML = `<div class="finger">${ICON_FINGER}<div><b>Met je vingerafdruk</b><span class="muted">De console bewaart ${esc(what)} versleuteld op deze telefoon, achter ${unlockWords(d)}. Je hoeft geen wachtwoordzin te bedenken.</span></div></div>
+        <p class="alt"><button type="button" class="link" data-vmode="passphrase">Liever een wachtwoordzin</button></p>`;
+      return;
+    }
+    const why = d && !d.available ? DEVICE_REASONS[d.reason] ?? "" : "";
+    vb.innerHTML = `${why ? `<div class="note warn">${esc(why)}${canFixDevice(d) ? `<div class="actions" style="margin:10px 0 0"><button type="button" class="btn" data-vsettings>Vingerafdruk instellen</button></div>` : ""}</div>` : ""}
+      <p class="muted" style="margin:0">De console bewaart ${esc(what)} versleuteld op ${DEVICE}. Kies een wachtwoordzin die je nergens anders gebruikt, bijvoorbeeld vier losse woorden.</p>
+      <div class="row"><label>${esc(box.dataset.passLabel)}<input type="password" name="pass" minlength="12" autocomplete="new-password" required></label>
+      ${box.dataset.repeat === "1" ? `<label>Nog een keer<input type="password" name="pass2" minlength="12" autocomplete="new-password" required></label>` : ""}</div>
+      ${d?.available ? `<p class="alt"><button type="button" class="link" data-vmode="device">Toch met je vingerafdruk</button></p>` : ""}`;
+  };
+  box.onclick = (e) => {
+    const m = e.target.closest?.("[data-vmode]")?.dataset.vmode;
+    if (m) { mode = m; draw(); if (m === "passphrase") form.pass?.focus(); return; }
+    if (e.target.closest?.("[data-vsettings]")) NATIVE.openSecuritySettings();
+  };
+  // Terug uit de instellingen van Android: is er nu een vingerafdruk? Dan meteen die keuze.
+  box._refresh = () => {
+    const now = !!deviceInfo()?.available;
+    if (now !== couldDevice) { couldDevice = now; mode = now ? "device" : "passphrase"; draw(); }
+  };
+  draw();
+  return () => {
+    if (mode === "device") return { body: { vault: "device" } };
+    if (form.pass2 && form.pass.value !== form.pass2.value) return { error: "De wachtwoordzinnen zijn niet gelijk" };
+    return { body: { vault: "passphrase", passphrase: form.pass.value } };
+  };
+}
+
+/** Terug in de app (bijv. uit de beveiligingsinstellingen van Android): kijken wat de telefoon nu kan. */
+window.__eigenResume = async () => {
+  if (!state || !$("[data-vault]")) return;
+  try { const s = await api("/api/state"); state.device = s.device; $$("[data-vault]").forEach((b) => b._refresh?.()); } catch { /* later */ }
+};
+
+/** Het wachtwoord om in je cloud in te loggen: op de telefoon maakt de app het (standaard), op de computer typ je het of laat je het maken. */
+const pwBlock = () => `<div class="pwblock" data-pw></div>`;
+function wirePw(form) {
+  const box = $("[data-pw]", form);
+  let auto = !!NATIVE;
+  const draw = () => {
+    box.innerHTML = auto
+      ? `<span class="lbl">Wachtwoord om in je cloud in te loggen</span>
+        <div class="finger slim">${ICON_KEY}<div><b>De app maakt een sterk wachtwoord</b><span class="muted">Het staat in de kluis en de app logt er zelf mee in. Nodig voor een andere app? Dan toon je het later met ${unlockWords(deviceInfo())}.</span></div></div>
+        <p class="alt"><button type="button" class="link" data-pwmode="own">Zelf een wachtwoord kiezen</button></p>`
+      : `<label>Wachtwoord om in je cloud in te loggen<input type="password" name="appPassword" minlength="10" autocomplete="new-password" spellcheck="false" autocapitalize="off" required><small>Minstens 10 tekens. ${NATIVE ? "De app onthoudt het in de kluis en logt er zelf mee in." : "Dit gebruik je dagelijks, ook op je telefoon."}</small></label>
+        <div class="actions" style="margin:0"><button type="button" class="btn" data-pwgen>Genereer een sterk wachtwoord</button>${NATIVE ? `<button type="button" class="link" data-pwmode="auto">Laat de app er een maken</button>` : ""}</div>
+        <p class="muted pwnote" hidden></p>`;
+  };
+  box.onclick = async (e) => {
+    const m = e.target.closest?.("[data-pwmode]")?.dataset.pwmode;
+    if (m) { auto = m === "auto"; draw(); if (!auto) form.appPassword.focus(); return; }
+    if (e.target.closest?.("[data-pwgen]")) {
+      const inp = form.appPassword;
+      inp.value = generatePassword();
+      inp.type = "text";
+      const note = $(".pwnote", box);
+      note.hidden = false;
+      note.hidden = !!NATIVE;
+      note.innerHTML = NATIVE
+        ? ""
+        : `Zet dit wachtwoord in je wachtwoordmanager of schrijf het op: je logt ermee in op je cloud. De console bewaart alleen een versleutelde controle, niet het wachtwoord zelf. <button type="button" class="link" data-pwcopy>Kopiëren</button>`;
+      return;
+    }
+    if (e.target.closest?.("[data-pwcopy]")) {
+      try { await navigator.clipboard.writeText(form.appPassword.value); e.target.textContent = "Gekopieerd"; } catch { form.appPassword.select(); e.target.textContent = "Selecteer en kopieer zelf"; }
+    }
+  };
+  draw();
+  return () => (auto ? { generatePassword: true } : { appPassword: form.appPassword.value });
+}
+
+// ═════════ Plakken bij geheime velden ═════════
+
+/** Velden voor sleutels en tokens van aanbieders (niet je wachtwoordzin of het wachtwoord van je cloud). */
+const PASTE_FIELDS = 'input[type="password"][autocomplete="off"], input[name="accessKey"], input[name="bAccess"], input[data-secret]';
+
+/** Het klembord lezen (en in de app daarna leegmaken): {text, cleared}. */
+async function takeClipboard() {
+  if (NATIVE?.takeClipboard) { try { return JSON.parse(NATIVE.takeClipboard()); } catch { return { text: "", cleared: false }; } }
+  try { return { text: normalizeSecret(await navigator.clipboard.readText()), cleared: false }; } catch { return { text: "", cleared: false, denied: true }; }
+}
+
+/** Zet een knop "Plakken" naast elk geheim veld dat er nog geen heeft. */
+function addPasteButtons(el) {
+  if (!NATIVE?.takeClipboard && !navigator.clipboard?.readText) return;
+  el.querySelectorAll(PASTE_FIELDS).forEach((inp) => {
+    if (inp.closest(".paste") || inp.dataset.noPaste !== undefined) return;
+    const wrap = document.createElement("div");
+    wrap.className = "paste";
+    inp.replaceWith(wrap);
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn";
+    b.dataset.pasteInto = "";
+    b.textContent = "Plakken";
+    wrap.append(inp, b);
+  });
+}
+new MutationObserver(() => addPasteButtons(document.body)).observe(document.body, { childList: true, subtree: true });
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest?.("[data-paste-into]");
+  if (!b) return;
+  const inp = b.parentElement.querySelector("input");
+  const wrap = b.parentElement;
+  const { text, cleared, denied } = await takeClipboard();
+  wrap.parentElement.querySelector(".pasted")?.remove();
+  const note = document.createElement("small");
+  note.className = "pasted" + (text ? "" : " err");
+  note.setAttribute("role", "status");
+  if (text) {
+    inp.value = text;
+    inp.dispatchEvent(new Event("input", { bubbles: true }));
+    inp.dispatchEvent(new Event("change", { bubbles: true }));
+    note.textContent = cleared ? "Geplakt. Het klembord is daarna leeggemaakt." : "Geplakt.";
+  } else {
+    note.textContent = denied ? "Plakken mag hier niet; plak met lang drukken of Ctrl+V in het veld." : "Het klembord is leeg. Kopieer eerst de sleutel bij je aanbieder.";
+  }
+  wrap.insertAdjacentElement("afterend", note);
+  setTimeout(() => note.remove(), 6000);
+});
+
 // ═════════ Start, slot, herstel ═════════
 
 function renderStart() {
@@ -221,27 +385,134 @@ function renderAanbiederCreate() {
       </ul>
       <small class="muted">Een eigen cloud is niet nodig. Die kun je later altijd nog maken.</small></div>
     <form class="fields" id="f">
-      <h2 style="margin:0">Kluis op ${DEVICE}</h2>
-      <p class="muted" style="margin:0">De console bewaart de sleutels van je Dienst versleuteld op ${DEVICE}. Kies een wachtwoordzin die je nergens anders gebruikt, bijvoorbeeld vier losse woorden.</p>
-      <div class="row"><label>Wachtwoordzin<input type="password" name="pass" minlength="12" autocomplete="new-password" required></label>
-      <label>Nog een keer<input type="password" name="pass2" minlength="12" autocomplete="new-password" required></label></div>
+      ${vaultBlock({ what: "de sleutels van je Dienst" })}
       <p class="msg"></p>
       <div class="actions" style="margin:0"><button class="btn primary">Verder</button><button type="button" class="btn quiet" id="back">Terug</button></div>
     </form></section>`;
   $("#back").onclick = () => { location.hash = ""; renderStart(); };
   const f = $("#f");
+  const vaultChoice = wireVault(f);
   f.onsubmit = async (e) => {
     e.preventDefault();
-    if (f.pass.value !== f.pass2.value) return formMsg(f, "De wachtwoordzinnen zijn niet gelijk");
+    const v = vaultChoice();
+    if (v.error) return formMsg(f, v.error);
     try {
-      await busy($("button.primary", f), () => api("/api/setup/aanbieder", { method: "POST", body: { passphrase: f.pass.value } }));
+      await busy($("button.primary", f), () => api("/api/setup/aanbieder", { method: "POST", body: v.body }));
       location.hash = "aanbieder";
       boot();
-    } catch (err) { formMsg(f, err.message); }
+    } catch (err) { formMsg(f, deviceMsg(err)); }
+  };
+}
+
+/** Kluis wissen en terug naar de start (daar: "Ik heb al een Eigen Cloud" → herstellen met je herstelsleutel). */
+async function wipeVault(btn, then = renderRecover) {
+  await busy(btn, () => api("/api/vault/forget", { method: "POST", body: { confirm: true } }));
+  location.hash = "";
+  state = await api("/api/state");
+  then();
+}
+
+/** Venster "Lukt het niet?" bij een kluis achter de vingerafdruk. */
+function deviceTrouble() {
+  const d = deviceInfo() ?? {};
+  const dlg = document.createElement("dialog");
+  dlg.className = "confirm";
+  dlg.innerHTML = `<h2>Lukt het niet met je vingerafdruk?</h2>
+    <p>${d.pin ? "Gebruik dan de pincode, het patroon of het wachtwoord van je telefoon. " : ""}${state.vaultPassphrase ? "Je kunt ook je wachtwoordzin gebruiken." : ""}</p>
+    <p>Lukt dat ook niet, dan wis je de kluis op ${DEVICE} en zet je hem terug met je <b>herstelsleutel</b> (op je herstelblad). Je cloud blijft gewoon draaien.</p>
+    <p class="msg"></p>
+    <div class="row"><button class="btn danger" data-r="wipe">Kluis wissen en herstellen</button><button class="btn quiet" data-r="cancel">Annuleren</button></div>`;
+  document.body.append(dlg);
+  dlg.showModal();
+  dlg.addEventListener("cancel", () => dlg.remove());
+  dlg.onclick = async (e) => {
+    const r = e.target.dataset?.r;
+    if (r === "cancel") { dlg.close(); dlg.remove(); }
+    if (r === "wipe") {
+      try { await wipeVault(e.target); dlg.close(); dlg.remove(); }
+      catch (err) { const m = dlg.querySelector(".msg"); m.textContent = err.message; m.className = "msg err"; }
+    }
+  };
+}
+
+/** Na ontgrendelen met de wachtwoordzin terwijl de vingerafdruk niet meer werkte: meteen een nieuwe sleutel in de telefoon. */
+async function rearmDevice() {
+  if (state?.vaultMode !== "device" || !deviceInfo()?.invalidated || !deviceInfo()?.available) return;
+  try { await api("/api/vault/device", { method: "POST" }); } catch { /* later via Kluis op deze telefoon */ }
+}
+
+/** Slot van een kluis achter de vingerafdruk: de vingerafdruk meteen, pincode en wachtwoordzin als alternatief. */
+function renderDeviceLock(msg = "") {
+  const d = deviceInfo() ?? {};
+  if (d.invalidated) return renderInvalidated();
+  root.innerHTML = `<section class="center lock">
+    <h1>Welkom terug</h1>
+    <p class="lead">Ontgrendel de kluis met ${unlockWords(d)}.</p>
+    <p><button class="btn primary big" id="dev">${ICON_FINGER}Ontgrendelen</button></p>
+    <div class="lockalt">${d.pin ? `<button class="btn" id="pin">Pincode van je telefoon</button>` : ""}${state.vaultPassphrase ? `<button class="btn" id="usePass">Wachtwoordzin gebruiken</button>` : ""}</div>
+    <form class="fields" id="f" hidden>
+      <label>Wachtwoordzin<input type="password" name="pass" autocomplete="current-password" required></label>
+      <div><button class="btn primary">Ontgrendelen</button></div>
+    </form>
+    <p class="msg" id="lmsg" role="status">${esc(msg)}</p>
+    <p style="margin-top:28px"><button class="link quiet" id="trouble">Lukt het niet?</button></p></section>`;
+  const lmsg = $("#lmsg");
+  const say = (t) => { lmsg.textContent = t; lmsg.className = "msg err"; };
+  const unlock = async (btn, via) => {
+    try { await busy(btn, () => api("/api/unlock/device", { method: "POST", body: via ? { via } : {} })); boot(); }
+    catch (err) {
+      if (err.data?.invalidated) { state.device = { ...d, invalidated: true }; return renderInvalidated(); }
+      say(err.data?.cancelled ? "" : err.message);
+    }
+  };
+  $("#dev").onclick = (e) => unlock(e.currentTarget);
+  $("#pin")?.addEventListener("click", (e) => unlock(e.currentTarget, "pin"));
+  $("#usePass")?.addEventListener("click", () => { $("#f").hidden = false; $("#f").pass.focus(); });
+  $("#trouble").onclick = deviceTrouble;
+  $("#f").onsubmit = async (e) => {
+    e.preventDefault();
+    try { await busy($("button", e.target), () => api("/api/unlock", { method: "POST", body: { passphrase: e.target.pass.value } })); boot(); }
+    catch (err) { say(err.message); }
+  };
+  if (state.biometric?.auto && !msg) $("#dev").click();
+}
+
+/** De vingerafdrukken zijn veranderd: Android heeft de sleutel van de kluis uitgezet. Uitleggen en de weg terug wijzen. */
+function renderInvalidated() {
+  root.innerHTML = `<section class="center lock">
+    <h1>Je vingerafdrukken zijn veranderd</h1>
+    <p class="lead">Er is een vingerafdruk bijgekomen, of de schermvergrendeling van je telefoon is gewijzigd. Android zet de sleutel van je kluis dan voor de zekerheid uit. Je cloud draait gewoon door.</p>
+    ${deviceInfo()?.pin ? `<p><button class="btn primary big" id="pin">Pincode van je telefoon</button></p><p class="muted" style="margin-top:0"><small>Werkt de sleutel nog met je pincode, dan stel je je vingerafdruk daarna meteen opnieuw in.</small></p><div class="or"><span>of</span></div>` : ""}
+    ${state.vaultPassphrase ? `<form class="fields" id="f">
+      <label>Wachtwoordzin<input type="password" name="pass" autocomplete="current-password" required></label>
+      <p class="msg"></p>
+      <div><button class="btn ${deviceInfo()?.pin ? "" : "primary"}">Ontgrendelen met je wachtwoordzin</button></div>
+      <p class="muted" style="margin:0"><small>Daarna stel je je vingerafdruk meteen opnieuw in.</small></p>
+    </form><div class="or"><span>of</span></div>` : ""}
+    <div class="panel"><div><b>Met je herstelblad</b><br><span class="muted">Pak je herstelblad erbij. De console haalt je instellingen terug en beveiligt de kluis weer met je vingerafdruk.</span></div>
+      <div><button class="btn ${state.vaultPassphrase || deviceInfo()?.pin ? "" : "primary"}" id="recoverKey">Herstellen met je herstelsleutel</button></div></div>
+    <p class="msg" id="lmsg"></p></section>`;
+  $("#f")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { await busy($("button", e.target), () => api("/api/unlock", { method: "POST", body: { passphrase: e.target.pass.value } })); await rearmDevice(); boot(); }
+    catch (err) { formMsg(e.target, err.message); }
+  });
+  // Soms werkt de sleutel nog wel met de pincode (alleen de vingerafdruk is vervallen): proberen, daarna opnieuw instellen.
+  $("#pin")?.addEventListener("click", async (e) => {
+    try { await busy(e.currentTarget, () => api("/api/unlock/device", { method: "POST", body: { via: "pin" } })); await rearmDevice(); boot(); }
+    catch (err) {
+      if (!err.data?.cancelled) { $("#lmsg").textContent = err.data?.invalidated ? "Ook met de pincode werkt deze sleutel niet meer. Gebruik je wachtwoordzin of je herstelsleutel." : err.message; $("#lmsg").className = "msg err"; }
+      if (err.data?.invalidated) e.target.closest("p").hidden = true;
+    }
+  });
+  $("#recoverKey").onclick = async (e) => {
+    if (!confirm(`De kluis op ${DEVICE} wissen en herstellen met je herstelsleutel?\n\nJe cloud blijft draaien. Je hebt je herstelsleutel nodig, en de toegang tot je opslag of het e-mailadres van je pakket bij de dienst.`)) return;
+    try { await wipeVault(e.currentTarget); } catch (err) { $("#lmsg").textContent = err.message; $("#lmsg").className = "msg err"; }
   };
 }
 
 function renderLock() {
+  if (state?.vaultMode === "device") return renderDeviceLock();
   const bio = state?.biometric ?? {};
   root.innerHTML = `<section class="center">
     <h1>Welkom terug</h1>
@@ -359,16 +630,14 @@ function renderCreate(upgrade = false) {
       <label><span id="domTitle">Domeinnaam</span><div class="suffix"><input name="domain" placeholder="vanes.nl" autocomplete="off" autocapitalize="off" required><span id="domSuffix" hidden>.dedyn.io</span></div><small id="domHint"></small></label>
       <p class="msg" id="avail" style="margin:-6px 0 0"></p>
       <label>Je e-mailadres<div class="suffix"><input name="mailbox" placeholder="rene" autocapitalize="off" required><span id="at">@…</span></div></label>
-      <label>Wachtwoord om in je cloud in te loggen<input type="password" name="appPassword" minlength="10" autocomplete="new-password" required><small>Minstens 10 tekens. Dit gebruik je dagelijks, ook op je telefoon.</small></label>
+      ${pwBlock()}
       <label>Meldingen bij problemen naar<input type="email" name="alertEmail" placeholder="een adres bij een andere aanbieder"><small id="alertHint">Kies een adres buiten je nieuwe domein, zodat een melding ook aankomt als je mail stuk is.</small></label>
-      ${upgrade ? "" : `<h2>Kluis van deze console</h2>
-      <p class="muted" style="margin:0">De console bewaart je sleutels en API-tokens versleuteld op ${DEVICE}. Kies een wachtwoordzin die je nergens anders gebruikt, bijvoorbeeld vier losse woorden.</p>
-      <div class="row"><label>Wachtwoordzin<input type="password" name="pass" minlength="12" autocomplete="new-password" required></label>
-      <label>Nog een keer<input type="password" name="pass2" minlength="12" autocomplete="new-password" required></label></div>`}
+      ${upgrade ? "" : vaultBlock({ title: "Kluis van deze console" })}
       <p class="msg"></p>
       <div class="next"><button class="btn primary">Verder</button></div>
     </form>`);
   const f = $("#f");
+  const pwChoice = wirePw(f), vaultChoice = wireVault(f);
   const full = () => { const v = f.domain.value.trim().toLowerCase(); return f.domainMode.value === "free" ? (v ? v.replace(/\.dedyn\.io$/, "") + ".dedyn.io" : "") : v; };
   let checkTimer = null;
   const upd = () => {
@@ -398,7 +667,7 @@ function renderCreate(upgrade = false) {
   upd();
   f.onsubmit = async (e) => {
     e.preventDefault();
-    const body = { domain: f.domain.value, domainMode: f.domainMode.value, mailbox: f.mailbox.value, appPassword: f.appPassword.value, alertEmail: f.alertEmail.value };
+    const body = { domain: f.domain.value, domainMode: f.domainMode.value, mailbox: f.mailbox.value, ...pwChoice(), alertEmail: f.alertEmail.value };
     if (upgrade) {
       try {
         const r = await busy($("button.primary", f), () => api("/api/setup/cloud", { method: "POST", body }));
@@ -408,12 +677,13 @@ function renderCreate(upgrade = false) {
       } catch (err) { formMsg(f, err.message); }
       return;
     }
-    if (f.pass.value !== f.pass2.value) return formMsg(f, "De wachtwoordzinnen zijn niet gelijk");
+    const v = vaultChoice();
+    if (v.error) return formMsg(f, v.error);
     try {
-      await busy($("button.primary", f), () => api("/api/setup/create", { method: "POST", body: { ...body, passphrase: f.pass.value } }));
+      await busy($("button.primary", f), () => api("/api/setup/create", { method: "POST", body: { ...body, ...v.body } }));
       location.hash = "sleutel";
       boot();
-    } catch (err) { formMsg(f, err.message); }
+    } catch (err) { formMsg(f, deviceMsg(err)); }
   };
 }
 
@@ -446,13 +716,13 @@ function renderRecover() {
       <h2 style="margin:8px 0 0">Een opslag waar je back-ups staan</h2>
       ${storeFields(offers)}
       <label>Bucket<input name="bucket"><small>Weet je het niet meer? Laat leeg, dan zoekt de console zelf.</small></label>
-      <h2 style="margin:8px 0 0">Nieuwe kluis op ${DEVICE}</h2>
-      <label>Wachtwoordzin<input type="password" name="pass" minlength="12" required></label>
+      ${vaultBlock({ title: `Nieuwe kluis op ${DEVICE}`, repeat: false })}
       <p class="msg"></p>
       <div><button class="btn primary">Herstellen</button> <button type="button" class="link" id="back">Terug</button></div>
     </form></section>`;
   const f = $("#f");
   wireStoreFields(f, offers);
+  const vaultChoice = wireVault(f);
   $("#back").onclick = renderStart;
   if ($("#viaDienst")) $("#viaDienst").onclick = renderRecoverDienst;
   f.onsubmit = async (e) => {
@@ -462,8 +732,10 @@ function renderRecover() {
     const store = o.id === "localfs"
       ? { name: "herstel", type: "fs", purpose: "replica", dir: f.bucket.value }
       : { name: "herstel", type: "s3", purpose: "replica", endpoint: o.customEndpoint ? f.endpoint.value : r.endpoint, region: r.id, bucket: f.bucket.value, accessKey: f.accessKey.value, secretKey: f.secretKey.value };
-    try { await busy($("button", f), () => api("/api/setup/recover", { method: "POST", body: { masterKey: f.key.value, passphrase: f.pass.value, store } })); location.hash = ""; boot(); }
-    catch (err) { formMsg(f, err.message); }
+    const v = vaultChoice();
+    if (v.error) return formMsg(f, v.error);
+    try { await busy($("button.primary", f), () => api("/api/setup/recover", { method: "POST", body: { masterKey: f.key.value, ...v.body, store } })); location.hash = ""; boot(); }
+    catch (err) { formMsg(f, deviceMsg(err)); }
   };
 }
 
@@ -483,11 +755,12 @@ function renderRecoverDienst() {
     </form>
     <form class="fields" id="f3" hidden>
       <label>Herstelsleutel<input name="key" placeholder="8 groepen van 8 tekens" autocomplete="off" required><small>Spaties maken niet uit.</small></label>
-      <label>Nieuwe wachtwoordzin voor ${DEVICE}<input type="password" name="pass" minlength="12" required></label>
+      ${vaultBlock({ title: `Nieuwe kluis op ${DEVICE}`, passLabel: `Nieuwe wachtwoordzin voor ${DEVICE}`, repeat: false })}
       <p class="msg"></p>
       <div><button class="btn primary">Herstellen</button></div>
     </form></section>`;
   const f1 = $("#f1"), f2 = $("#f2"), f3 = $("#f3");
+  const vaultChoice = wireVault(f3);
   $("#back").onclick = renderRecover;
   f1.onsubmit = async (e) => {
     e.preventDefault();
@@ -501,8 +774,10 @@ function renderRecoverDienst() {
   };
   f3.onsubmit = async (e) => {
     e.preventDefault();
-    try { await busy($("button", f3), () => api("/api/setup/recover-dienst", { method: "POST", body: { masterKey: f3.key.value, passphrase: f3.pass.value } })); location.hash = ""; boot(); }
-    catch (err) { formMsg(f3, err.message); }
+    const v = vaultChoice();
+    if (v.error) return formMsg(f3, v.error);
+    try { await busy($("button.primary", f3), () => api("/api/setup/recover-dienst", { method: "POST", body: { masterKey: f3.key.value, ...v.body } })); location.hash = ""; boot(); }
+    catch (err) { formMsg(f3, deviceMsg(err)); }
   };
 }
 
@@ -759,6 +1034,8 @@ function fillKeys(f, text) {
 }
 
 async function readClipboard() {
+  // In de app: lezen en daarna leegmaken (de hele tekst: er kunnen twee sleutels in staan).
+  if (NATIVE?.takeClipboard) { try { const r = JSON.parse(NATIVE.takeClipboard()); return r.raw ?? r.text ?? ""; } catch { return ""; } }
   if (NATIVE?.clipboard) return NATIVE.clipboard();
   try { return await navigator.clipboard.readText(); } catch { return ""; }
 }
@@ -780,7 +1057,7 @@ function wireQuick() {
   if (NATIVE?.clipboard) {
     window.removeEventListener("focus", quickWatch);
     document.removeEventListener("visibilitychange", quickWatch);
-    quickWatch = () => { if (document.visibilityState === "visible" && $("#qf")) fillKeys($("#qf"), NATIVE.clipboard()); };
+    quickWatch = () => { if (document.visibilityState === "visible" && $("#qf") && fillKeys($("#qf"), NATIVE.clipboard())) NATIVE.clearClipboard?.(); };
     window.addEventListener("focus", quickWatch);
     document.addEventListener("visibilitychange", quickWatch);
   }
@@ -1935,7 +2212,7 @@ async function renderHub(hash, msg) {
   let a;
   try { a = await api("/api/aanbieder"); } catch (err) { root.innerHTML = `<section class="center"><p class="msg err">${esc(err.message)}</p></section>`; return; }
   rememberDienst(a);
-  const back = config?.alleenDienst ? "" : `<a class="link" href="#">${state.done ? "Naar je cloud" : "Terug naar je cloud opzetten"}</a>`;
+  const back = (config?.alleenDienst ? "" : `<a class="link" href="#">${state.done ? "Naar je cloud" : "Terug naar je cloud opzetten"}</a>`) + (NATIVE ? `<a class="link" href="#kluis">Kluis</a>` : "");
   if (!a.hub || a.step !== "klaar") {
     const exists = a.server || a.removed;
     root.innerHTML = `<div class="hubwrap setup"><header class="hubhead"><div><h1>${exists ? "Je dienst wijzigen" : a.started ? "Je dienst opzetten" : "Aanbieder worden"}</h1>
@@ -2436,6 +2713,90 @@ async function renderAanbiederTeaser() {
   wireVerhuis(box, a, () => renderAanbiederTeaser());
 }
 
+// ═════════ Kluis op deze telefoon ═════════
+
+/** Op het overzicht (in de app): hoe de kluis open gaat, met een link naar "Kluis op deze telefoon". */
+function vaultSummary() {
+  if (!NATIVE) return "";
+  const d = deviceInfo() ?? {};
+  const dev = state.vaultMode === "device";
+  const how = dev ? (d.invalidated ? "Je vingerafdruk werkt niet meer voor de kluis" : `Opent met ${unlockWords(d)}${state.vaultPassphrase ? " of je wachtwoordzin" : ""}`)
+    : `Opent met je wachtwoordzin${state.biometric?.enrolled ? " of je vingerafdruk" : ""}`;
+  return `<div id="vaultSum"><h2>Kluis op deze telefoon</h2><ul class="items"><li><span class="flag">${dev ? ICON_FINGER : ICON_KEY}</span><b>${esc(how)}</b>
+    <span class="sub">${config?.appLogin?.stored ? "De app logt zelf in bij je cloud." : "Je herstelsleutel blijft de weg terug."}</span><span class="end"><a class="btn" href="#kluis">Bekijken</a></span></li></ul></div>`;
+}
+
+/** Het inlogwachtwoord van je cloud tonen (na je vingerafdruk), met advies voor andere apps. */
+async function showAppPassword(btn, box, passphrase) {
+  let r;
+  try { r = await busy(btn, () => api("/api/app-password/show", { method: "POST", body: passphrase ? { passphrase } : {} })); }
+  catch (err) {
+    if (err.data?.passphraseRequired) {
+      box.innerHTML = `<form class="fields" id="pwAsk"><label>Wachtwoordzin van de kluis<input type="password" name="pass" autocomplete="current-password" required></label><p class="msg"></p><div><button class="btn primary">Wachtwoord tonen</button></div></form>`;
+      $("#pwAsk").onsubmit = (e) => { e.preventDefault(); showAppPassword($("#pwAsk button"), box, e.target.pass.value); };
+      return;
+    }
+    box.innerHTML = `<p class="msg err">${esc(err.data?.cancelled ? "Geannuleerd." : err.message)}</p>`;
+    return;
+  }
+  box.innerHTML = `<div class="panel"><div><span class="muted">Inlognaam</span><div class="pwshow">${esc(r.user ?? "")}</div></div>
+    <div><span class="muted">Wachtwoord</span><div class="pwshow" id="pwShown">${esc(r.password)}</div></div>
+    <div class="actions" style="margin:0">${NATIVE?.copySecret ? `<button type="button" class="btn" id="pwCopy">Kopiëren</button>` : ""}<button type="button" class="btn quiet" id="pwHide">Verbergen</button></div>
+    <p class="muted" style="margin:0"><small>Een agenda- of contactenapp? Maak daarvoor in je cloud liever een apart sync-wachtwoord (Instellingen → Account → Agenda en contacten synchroniseren). Dat trek je los in, zonder dit wachtwoord te veranderen.</small></p></div>`;
+  const hide = () => { box.innerHTML = ""; };
+  const t = setTimeout(hide, 60_000);
+  $("#pwHide").onclick = () => { clearTimeout(t); hide(); };
+  $("#pwCopy")?.addEventListener("click", (e) => { NATIVE.copySecret(r.password); e.target.textContent = "Gekopieerd (een minuut op het klembord)"; });
+}
+
+/** Kluis op deze telefoon: hoe hij beveiligd is, een wachtwoordzin erbij, de vingerafdruk (opnieuw) instellen, en je cloud-wachtwoord. */
+async function renderKluis(msg) {
+  try { const s = await api("/api/state"); state = { ...state, ...s }; config = await api("/api/config"); } catch { /* oude stand */ }
+  const d = deviceInfo() ?? {};
+  const dev = state.vaultMode === "device";
+  const back = config?.alleenDienst ? `<a class="link" href="#aanbieder">Terug naar je dienst</a>` : `<a class="link" href="#">Terug naar het overzicht</a>`;
+  const how = dev
+    ? (d.invalidated
+      ? `<div class="note warn"><b>Je vingerafdruk werkt niet meer voor de kluis.</b> Er is een vingerafdruk bijgekomen of je schermvergrendeling is veranderd. Stel hem opnieuw in; je hoeft niets over te typen.<div class="actions" style="margin:10px 0 0"><button class="btn primary" id="rearm">Vingerafdruk opnieuw instellen</button></div></div>`
+      : `<div class="finger">${ICON_FINGER}<div><b>Met ${unlockWords(d)}</b><span class="muted">${state.vaultPassphrase ? "Je wachtwoordzin werkt ook." : "Er is geen wachtwoordzin nodig."}</span></div></div>`)
+    : `<div class="finger slim">${ICON_KEY}<div><b>Met je wachtwoordzin${state.biometric?.enrolled ? " of je vingerafdruk" : ""}</b><span class="muted">${d.available ? "Liever zonder typen? Dan wordt je vingerafdruk de standaard; je wachtwoordzin blijft werken." : esc(DEVICE_REASONS[d.reason] ?? "")}</span></div></div>
+      ${d.available ? `<div class="actions"><button class="btn primary" id="toDevice">Vingerafdruk als standaard</button></div>` : canFixDevice(d) ? `<div class="actions"><button class="btn" id="settings">Vingerafdruk instellen</button></div>` : ""}`;
+  root.innerHTML = `<section class="center kluis" style="max-width:620px"><p>${back}</p>
+    <h1>Kluis op deze telefoon</h1>
+    <p class="lead">Hierin staan je herstelsleutel, je sleutels bij de aanbieders${config?.appLogin?.stored ? " en het wachtwoord van je cloud" : ""}, versleuteld.</p>
+    <p class="msg ${msg?.ok ? "ok" : msg ? "err" : ""}" id="kmsg" role="status">${esc(msg?.text ?? "")}</p>
+    <h2>Ontgrendelen</h2>${how}
+    ${dev ? `<h2>Wachtwoordzin</h2>
+      <p class="muted" style="margin-top:0">${state.vaultPassphrase ? "Je kunt de kluis ook met je wachtwoordzin openen. Hier kies je een nieuwe." : "Handig als je vingerafdrukken veranderen: dan open je de kluis hiermee, zonder je herstelsleutel. Niet nodig; kies er alleen een als je hem goed bewaart."}</p>
+      <form class="fields" id="pf" hidden><div class="row"><label>Wachtwoordzin<input type="password" name="pass" minlength="12" autocomplete="new-password" required></label><label>Nog een keer<input type="password" name="pass2" minlength="12" autocomplete="new-password" required></label></div>
+        <p class="msg"></p><div><button class="btn">${state.vaultPassphrase ? "Nieuwe wachtwoordzin opslaan" : "Ook een wachtwoordzin instellen"}</button></div></form>
+      <p><button class="btn" id="newPass">${state.vaultPassphrase ? "Andere wachtwoordzin kiezen" : "Ook een wachtwoordzin instellen"}</button></p>` : ""}
+    <h2>Herstelsleutel</h2>
+    <p class="muted" style="margin-top:0">Je herstelsleutel blijft de weg terug: op een nieuwe telefoon, of als ${dev ? "je vingerafdruk en wachtwoordzin" : "je wachtwoordzin"} niet meer werken. Bewaar je herstelblad op papier.</p>
+    <p><a class="btn" href="/api/recovery-sheet" target="_blank" rel="noopener">Herstelblad</a></p>
+    ${config?.appLogin?.stored ? `<h2>Inloggen in je cloud</h2>
+      <p class="muted" style="margin-top:0">De app logt zelf in als <b>${esc(config.mailFrom ?? "")}</b>${config.appLogin.generated ? ", met een sterk wachtwoord dat de app heeft gemaakt" : ""}. Nodig voor een andere app? Toon het met ${unlockWords(d.available ? d : null)}.</p>
+      <p><button class="btn" id="showPw">Wachtwoord tonen</button></p><div id="pwBox"></div>` : ""}
+  </section>`;
+  const kmsg = (text, ok = false) => { const m = $("#kmsg"); m.textContent = text; m.className = "msg " + (ok ? "ok" : "err"); m.scrollIntoView({ block: "nearest" }); };
+  const arm = async (btn, okText) => {
+    try { await busy(btn, () => api("/api/vault/device", { method: "POST" })); renderKluis({ ok: true, text: okText }); }
+    catch (err) { kmsg(deviceMsg(err)); }
+  };
+  $("#rearm")?.addEventListener("click", (e) => arm(e.currentTarget, "Je vingerafdruk werkt weer."));
+  $("#toDevice")?.addEventListener("click", (e) => arm(e.currentTarget, "Voortaan opent de kluis met je vingerafdruk. Je wachtwoordzin werkt ook nog."));
+  $("#settings")?.addEventListener("click", () => NATIVE.openSecuritySettings());
+  $("#newPass")?.addEventListener("click", (e) => { $("#pf").hidden = false; e.target.hidden = true; $("#pf").pass.focus(); });
+  $("#pf")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    if (f.pass.value !== f.pass2.value) return formMsg(f, "De wachtwoordzinnen zijn niet gelijk");
+    try { await busy($("button", f), () => api("/api/vault/passphrase", { method: "POST", body: { passphrase: f.pass.value } })); renderKluis({ ok: true, text: "Je wachtwoordzin is ingesteld. Bewaar hem goed." }); }
+    catch (err) { formMsg(f, err.message); }
+  });
+  $("#showPw")?.addEventListener("click", (e) => showAppPassword(e.currentTarget, $("#pwBox")));
+}
+
 /** Op het overzicht: alle gekoppelde sleutels (servers, DNS, opslag), elk met "Sleutels controleren". */
 function keysSection() {
   if (!config) return "";
@@ -2483,7 +2844,7 @@ async function renderKosten(msg) {
 }
 
 async function renderDash() {
-  root.innerHTML = `<div class="dash"><div class="mapwrap" id="map"></div><section>${keyReminder()}<div id="side"><p class="muted">Status ophalen…</p></div>${config?.dienst?.orderId ? "" : `<div id="kosten"></div>`}${keysSection()}${config?.dienst?.orderId ? `<div id="abo"></div>` : ""}<div id="aanbiederTeaser"></div></section></div>`;
+  root.innerHTML = `<div class="dash"><div class="mapwrap" id="map"></div><section>${keyReminder()}<div id="side"><p class="muted">Status ophalen…</p></div>${config?.dienst?.orderId ? "" : `<div id="kosten"></div>`}${keysSection()}${vaultSummary()}${config?.dienst?.orderId ? `<div id="abo"></div>` : ""}<div id="aanbiederTeaser"></div></section></div>`;
   if (config?.dienst?.orderId) renderAbo(); else renderKosten();
   renderAanbiederTeaser();
   const draw = async () => {

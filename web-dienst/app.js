@@ -228,6 +228,8 @@ function renderLogin(step = "email", extra = {}) {
         loggedIn(await api("/v1/admin/auth/device", { body: { pending: login.pending, signature, publicKey }, login: true }));
       } catch (err) { setMsg($("#m"), err.message); }
     });
+    // In de app: meteen om de vingerafdruk vragen (één keer per inlogpoging); de code blijft het alternatief.
+    if (dev && login.autoFp !== login.pending) { login.autoFp = login.pending; $("#fp").click(); }
     if (totp) {
       if (!dev) $("#f input").focus();
       $("#f").onsubmit = async (e) => {

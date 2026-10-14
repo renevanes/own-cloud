@@ -27,7 +27,7 @@ import nl.eigencloud.core.Json;
 final class CalendarSync {
     private CalendarSync() {}
 
-    private static final String ACCOUNT = "Eigen Cloud";
+    static final String ACCOUNT = "Eigen Cloud";
     private static final long PAST = 60L * 86_400_000, FUTURE = 330L * 86_400_000;
 
     static boolean permitted(Context c) {
@@ -77,6 +77,21 @@ final class CalendarSync {
         long now = System.currentTimeMillis();
         List<Object> events = Json.asList(api.getJson("/api/events?from=" + (now - PAST) + "&to=" + (now + FUTURE)));
         if (events == null) throw new IOException("Onverwacht antwoord van /api/events");
+        // Staat Google Agenda zelf al op de telefoon (Android synchroniseert hem), dan de in de cloud gevolgde
+        // Google-agenda's ("Google: …") niet nog eens als Eigen Cloud tonen: anders staat alles dubbel.
+        java.util.Set<Object> skip = new java.util.HashSet<>();
+        if (OnPhonePrefs.flag(c, OnPhonePrefs.CAL_SKIP_FOLLOWED) && PhoneCalendar.googleSynced(c)) {
+            List<Object> cals = Json.asList(api.getJson("/api/calendars"));
+            if (cals != null) for (Object o : cals) {
+                String name = Json.str(o, "name");
+                if (name != null && name.startsWith("Google: ")) skip.add(Json.jsString(Json.path(o, "id")));
+            }
+        }
+        if (!skip.isEmpty()) {
+            List<Object> kept = new ArrayList<>();
+            for (Object o : events) if (!skip.contains(Json.jsString(Json.path(o, "calendar_id")))) kept.add(o);
+            events = kept;
+        }
         ContentResolver cr = c.getContentResolver();
         long cal = calendarId(cr, true);
         if (cal < 0) throw new IOException("Agenda aanmaken op de telefoon lukt niet");

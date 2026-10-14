@@ -38,6 +38,12 @@ export interface ConsoleState {
   preset?: string;
   firstLaunch?: { at: number; nodeId: string; provider: string; region: string; clusterUrl?: string; apiUrl?: string };
   appPasswordHash?: string;
+  /**
+   * Alleen in de app: het inlogwachtwoord van de cloud zelf (gemaakt door de app, of zelf gekozen), zodat de app
+   * zelf inlogt en het achter de vingerafdruk kan tonen. De computer bewaart alleen de hash.
+   */
+  appPassword?: string;
+  appPasswordGenerated?: boolean;
   alertEmail?: string;
   /** Budget in euro per maand voor de kostenschatting (Kosten op het overzicht); weg = geen budget. */
   budget?: number;
@@ -82,6 +88,14 @@ export class Vault {
     this.key = derive(pass, this.salt);
     this.config = cfg;
     this.save();
+  }
+
+  /**
+   * Hoe de kluis beveiligd is (zoals Vault.describe() in de app). Op de computer altijd met een wachtwoordzin; een kluis
+   * achter de vingerafdruk bestaat alleen in de app (zie TRUST.md).
+   */
+  describe(): { mode: "passphrase" | "device"; passphrase: boolean } | null {
+    return this.exists() ? { mode: "passphrase", passphrase: true } : null;
   }
 
   /** Opnieuw beginnen: kluisbestand weg (de herstelsleutel is daarmee ook van dit toestel weg). */

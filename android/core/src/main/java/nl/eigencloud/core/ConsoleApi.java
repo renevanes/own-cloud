@@ -17,7 +17,15 @@ import java.util.regex.Pattern;
  */
 public final class ConsoleApi {
     /** Notified when a launched cloud is reachable on its public address. */
-    public interface Listener { void cloudReady(String appUrl); }
+    public interface Listener {
+        void cloudReady(String appUrl);
+
+        /**
+         * After {@link #cloudReady}: the login stored in the vault (the generated or chosen cloud password), so the app
+         * can log itself in without anyone typing it.
+         */
+        default void cloudLogin(String appUrl, String user, String password) {}
+    }
     public static final class Reply {
         public final int status;
         public final String body;
@@ -40,6 +48,8 @@ public final class ConsoleApi {
 
     /** Base URL of the Eigen Cloud Dienst (central paid service); empty = not offered. */
     public volatile String dienstUrl = "";
+    /** The phone's own lock (Android Keystore + fingerprint), set by the app; null = passphrase only (like the desktop). */
+    public volatile DeviceLock deviceLock;
     /** The vault locks itself after this much idle time (ms). */
     public long idleMs = 15 * 60_000L;
 
@@ -164,7 +174,14 @@ public final class ConsoleApi {
             if (gen != launchGen) return;
             launch.put("done", true);
         }
-        if (listener != null && url != null) listener.cloudReady(url);
+        if (listener != null && url != null) {
+            listener.cloudReady(url);
+            // Zelf inloggen met het wachtwoord uit de kluis: niemand hoeft het te typen.
+            String pw = Json.str(c, "console", "appPassword");
+            if (pw != null && !pw.isEmpty()) {
+                try { listener.cloudLogin(url, Json.str(c, "appEnv", "MAIL_FROM"), pw); } catch (RuntimeException ignored) { /* dan logt de eigenaar zelf in */ }
+            }
+        }
     }
 
     // ───────── Hulpjes ─────────
@@ -260,7 +277,101 @@ public final class ConsoleApi {
                 "maxUsers", con == null || con.get("maxUsers") == null ? (Object) 0L : con.get("maxUsers"),
                 "overstap", Json.map(con, "overstap") == null ? null : Json.obj("naar", Json.path(con, "overstap", "naar"), "stap", Json.path(con, "overstap", "stap")),
                 "alleenDienst", Json.truthy(Json.path(con, "alleenDienst")),
-                "keyCheck", Console.keyCheckState(c));
+                "keyCheck", Console.keyCheckState(c),
+                "appLogin", appLoginJson(c));
+    }
+
+    /** Is het inlogwachtwoord van de cloud in de kluis bewaard (alleen op de telefoon), en door de app gemaakt? */
+    static Map<String, Object> appLoginJson(Map<String, Object> c) {
+        String pw = Json.str(c, "console", "appPassword");
+        return Json.obj("stored", pw != null && !pw.isEmpty(), "generated", Json.truthy(Json.path(c, "console", "appPasswordGenerated")));
+    }
+
+    /**
+     * Het inloggen bij je cloud zoals de kluis het kent (voor de app: zelf inloggen zonder typen):
+     * {@code {url, user, password}}, of null als de kluis op slot is of er geen wachtwoord in staat.
+     */
+    public synchronized Map<String, Object> appLogin() {
+        if (!unlocked()) return null;
+        Map<String, Object> c = cfg();
+        String pw = Json.str(c, "console", "appPassword");
+        if (pw == null || pw.isEmpty() || Console.appUrl(c) == null) return null;
+        return Json.obj("url", Console.appUrl(c), "user", Json.str(c, "appEnv", "MAIL_FROM"), "password", pw);
+    }
+
+    // ───────── Kluis: wachtwoordzin of vingerafdruk ─────────
+
+    /**
+     * Wachtwoord voor je cloud uit het formulier: zelf gekozen ({@code appPassword}) of door de app gemaakt
+     * ({@code generatePassword: true}, alleen op de telefoon). {password, "1" als gemaakt}.
+     */
+    private String[] appPasswordFrom(Map<String, Object> b) {
+        if (Boolean.TRUE.equals(b.get("generatePassword"))) {
+            if (deviceLock == null) throw new IllegalArgumentException("Kies een inlogwachtwoord van minstens 10 tekens");
+            return new String[] {Passwords.generate(), "1"};
+        }
+        return new String[] {Json.str(b, "appPassword"), null};
+    }
+
+    /** Op de telefoon onthoudt de kluis het wachtwoord, zodat de app zelf inlogt (de computer bewaart alleen de hash). */
+    private void rememberAppPassword(Map<String, Object> c, String[] pw) {
+        if (deviceLock == null || pw[0] == null) return;
+        Map<String, Object> con = Json.map(c, "console");
+        con.put("appPassword", pw[0]);
+        if (pw[1] != null) con.put("appPasswordGenerated", true);
+        else con.remove("appPasswordGenerated");
+    }
+
+    /** Vóór het (trage) herstellen: kan de gekozen beveiliging van de nieuwe kluis wel? Null = in orde. */
+    private Reply checkVaultChoice(Map<String, Object> b) {
+        if (Vault.DEVICE.equals(Json.str(b, "vault"))) {
+            DeviceLock l = deviceLock;
+            if (l == null) return err(400, "Met je vingerafdruk kan alleen in de app op je telefoon", "unavailable", true);
+            Map<String, Object> s = l.status();
+            if (!Json.truthy(s.get("available"))) return err(400, "Met je vingerafdruk kan nu niet op deze telefoon. Kies een wachtwoordzin.", "unavailable", true);
+            return null;
+        }
+        String p = Json.str(b, "passphrase");
+        if (p == null || p.length() < 12) return err(400, "Kies een wachtwoordzin van minstens 12 tekens");
+        return null;
+    }
+
+    /** Nieuwe kluis: {@code vault: "device"} (vingerafdruk, alleen in de app) of een wachtwoordzin. */
+    private void createVault(Map<String, Object> b, Map<String, Object> c) throws IOException {
+        if (Vault.DEVICE.equals(Json.str(b, "vault"))) vault.createDevice(c, deviceLock);
+        else vault.create(Json.str(b, "passphrase") == null ? "" : Json.str(b, "passphrase"), c);
+    }
+
+    /** Fout van de vingerafdruk als antwoord: geannuleerd, sleutel vervallen of niet mogelijk op deze telefoon. */
+    private Reply deviceError(IOException e) {
+        if (e instanceof DeviceLock.Invalidated) return err(409, e.getMessage(), "invalidated", true, "passphrase", vault.isUnlocked() ? vault.hasPassphrase() : Json.truthy(Json.path(vault.describe(), "passphrase")));
+        if (e instanceof DeviceLock.Cancelled) return err(400, e.getMessage(), "cancelled", true);
+        if (e instanceof DeviceLock.Unavailable) return err(400, e.getMessage(), "unavailable", true);
+        return err(400, e.getMessage());
+    }
+
+    /** Kluis wissen; de sleutel in de telefoon die bij een vingerafdruk-kluis hoorde, gaat ook weg. */
+    private void destroyVault() {
+        Map<String, Object> wrapped = vault.deviceWrap();
+        vault.destroy();
+        DeviceLock l = deviceLock;
+        if (wrapped != null && l != null) {
+            try { l.release(wrapped); } catch (RuntimeException ignored) { /* dan blijft er een ongebruikte sleutel staan */ }
+        }
+    }
+
+    /** Wat /api/state over de kluis zegt: hoe hij beveiligd is, en (telefoon) wat de vingerafdruk kan. */
+    private void vaultState(Map<String, Object> st) {
+        Map<String, Object> d = vault.describe();
+        st.put("vaultMode", d == null ? null : d.get("mode"));
+        st.put("vaultPassphrase", d != null && Json.truthy(d.get("passphrase")));
+        DeviceLock l = deviceLock;
+        if (l == null) return;
+        Map<String, Object> dev;
+        try { dev = Json.copy(l.status()); } catch (RuntimeException e) { dev = Json.obj("available", false, "reason", "hardware"); }
+        Map<String, Object> wrapped = vault.deviceWrap();
+        dev.put("invalidated", wrapped != null && l.invalidated(wrapped));
+        st.put("device", dev);
     }
 
     /** What /api/state reports about biometric unlock (filled in by the app). */
@@ -363,14 +474,16 @@ public final class ConsoleApi {
             case "GET /api/state": {
                 warmAanbieders();
                 Map<String, Object> con = vault.isUnlocked() ? Json.map(cfg(), "console") : null;
-                return ok(Json.obj("vault", vault.exists(), "unlocked", unlocked(), "step", con == null ? null : con.get("step"),
+                Map<String, Object> st = Json.obj("vault", vault.exists(), "unlocked", unlocked(), "step", con == null ? null : con.get("step"),
                         "done", con != null && Json.truthy(con.get("done")), "domain", vault.isUnlocked() ? cfg().get("domain") : null,
                         "offers", Json.obj("stores", catalog.storeOffers(), "servers", catalog.serverOffers(), "dns", catalog.dnsOffers()),
                         "phone", true, "biometric", biometric,
                         "dienst", !Extras.defaultBase(dienstUrl).isEmpty() || Json.truthy(Json.path(con, "dienst", "url")) || knownAanbieders > 0,
                         "aanbieder", Json.path(con, "dienst", "url"),
                         "domainMode", con == null ? null : con.get("domainMode"),
-                        "scaleway", Json.obj("signup", Extras.SCW_SIGNUP_URL, "keys", Extras.SCW_KEYS_URL)));
+                        "scaleway", Json.obj("signup", Extras.SCW_SIGNUP_URL, "keys", Extras.SCW_KEYS_URL));
+                vaultState(st);
+                return ok(st);
             }
             case "GET /api/dienst/info":
                 return ok(Extras.dienstInfo(currentBase()));
@@ -398,23 +511,27 @@ public final class ConsoleApi {
                 String domain = Extras.normalizeDomain(Json.str(b, "domain"), mode);
                 String alert = Json.str(b, "alertEmail");
                 if ("free".equals(mode) && (alert == null || alert.isEmpty())) return err(400, "Vul een meldadres in; daarmee maakt de console je gratis deSEC-account aan");
-                Map<String, Object> c = Console.newAdminConfig(domain, Json.str(b, "mailbox"), alert, Json.str(b, "appPassword"));
+                String[] pw = appPasswordFrom(b);
+                Map<String, Object> c = Console.newAdminConfig(domain, Json.str(b, "mailbox"), alert, pw[0]);
                 Json.map(c, "console").put("domainMode", mode);
-                vault.create(Json.str(b, "passphrase"), c);
+                rememberAppPassword(c, pw);
+                try { createVault(b, c); } catch (DeviceLock.Cancelled | DeviceLock.Unavailable e) { return deviceError(e); }
                 touch();
                 return ok(Json.obj("ok", true));
             }
             case "POST /api/setup/aanbieder": {
                 // Aanbieder worden zonder eigen cloud: een kluis alleen voor de Dienst.
                 if (vault.exists()) return err(409, "Er is al een kluis. Ontgrendel hem.");
-                vault.create(Json.str(b, "passphrase") == null ? "" : Json.str(b, "passphrase"), Console.newDienstConfig());
+                try { createVault(b, Console.newDienstConfig()); } catch (DeviceLock.Cancelled | DeviceLock.Unavailable e) { return deviceError(e); }
                 touch();
                 return ok(Json.obj("ok", true));
             }
             case "POST /api/setup/recover": {
                 if (vault.exists()) return err(409, "Er is al een kluis op deze telefoon");
+                Reply bad = checkVaultChoice(b);
+                if (bad != null) return bad;
                 Map<String, Object> c = Console.recoverAdminConfig(Json.str(b, "masterKey"), Json.map(b, "store"));
-                vault.create(Json.str(b, "passphrase"), c);
+                try { createVault(b, c); } catch (DeviceLock.Cancelled | DeviceLock.Unavailable e) { return deviceError(e); }
                 touch();
                 return ok(Json.obj("ok", true));
             }
@@ -433,8 +550,10 @@ public final class ConsoleApi {
             case "POST /api/setup/recover-dienst": {
                 if (vault.exists()) return err(409, "Er is al een kluis op deze telefoon");
                 if (recoverToken == null) return err(400, "Log eerst in bij de dienst");
+                Reply bad = checkVaultChoice(b);
+                if (bad != null) return bad;
                 Map<String, Object> c = Extras.recoverViaDienst(recoverBase, dienstUrl, recoverEmail, recoverToken, Json.str(b, "masterKey"), catalog);
-                vault.create(Json.str(b, "passphrase"), c);
+                try { createVault(b, c); } catch (DeviceLock.Cancelled | DeviceLock.Unavailable e) { return deviceError(e); }
                 recoverEmail = null;
                 recoverToken = null;
                 recoverBase = null;
@@ -444,7 +563,7 @@ public final class ConsoleApi {
             case "POST /api/vault/forget": {
                 // Wachtwoordzin vergeten: de kluis van deze telefoon wissen (herstellen kan met de herstelsleutel).
                 if (!Boolean.TRUE.equals(b.get("confirm"))) return err(400, "Bevestig dat je de kluis wilt wissen");
-                vault.destroy();
+                destroyVault();
                 return ok(Json.obj("ok", true));
             }
             case "POST /api/unlock": {
@@ -452,6 +571,19 @@ public final class ConsoleApi {
                     vault.unlock(Json.str(b, "passphrase") == null ? "" : Json.str(b, "passphrase"));
                 } catch (SecurityException | IOException e) {
                     sleep(800);
+                    return err(401, e.getMessage());
+                }
+                touch();
+                return ok(Json.obj("ok", true));
+            }
+            case "POST /api/unlock/device": {
+                // Kluis met vingerafdruk: de telefoon vraagt erom ("via": "pin" = liever de pincode van de telefoon).
+                if (!vault.exists()) return err(400, "Er is nog geen kluis");
+                try {
+                    vault.unlockDevice(deviceLock, Json.str(b, "via"));
+                } catch (DeviceLock.Cancelled | DeviceLock.Invalidated | DeviceLock.Unavailable e) {
+                    return deviceError(e);
+                } catch (SecurityException e) {
                     return err(401, e.getMessage());
                 }
                 touch();
@@ -473,6 +605,34 @@ public final class ConsoleApi {
                 return ok(Json.obj("ok", true));
             case "GET /api/config":
                 return ok(sanitized(c));
+
+            // ── Kluis op deze telefoon ──
+            case "POST /api/vault/passphrase": {
+                // Vingerafdruk-kluis: ook een wachtwoordzin, voor als je vingerafdrukken veranderen.
+                if (!Vault.DEVICE.equals(vault.mode())) return err(409, "Je kluis heeft al een wachtwoordzin");
+                vault.addPassphrase(Json.str(b, "passphrase"));
+                return ok(Json.obj("ok", true));
+            }
+            case "POST /api/vault/device": {
+                // Vingerafdruk (opnieuw) instellen: een wachtwoordzin-kluis gaat over (de wachtwoordzin blijft werken), of na
+                // nieuwe vingerafdrukken een nieuwe sleutel in de telefoon.
+                try { vault.useDevice(deviceLock); } catch (DeviceLock.Cancelled | DeviceLock.Unavailable e) { return deviceError(e); }
+                return ok(Json.obj("ok", true));
+            }
+            case "POST /api/app-password/show": {
+                // Het inlogwachtwoord van je cloud tonen, alleen na je vingerafdruk (of je wachtwoordzin als die er niet is).
+                String pw = Json.str(c, "console", "appPassword");
+                if (pw == null || pw.isEmpty()) return err(404, "Het wachtwoord is niet op dit toestel bewaard");
+                DeviceLock l = deviceLock;
+                boolean viaDevice = l != null && Json.truthy(l.status().get("available"));
+                if (viaDevice) {
+                    try { l.confirm("Wachtwoord tonen"); } catch (DeviceLock.Cancelled | DeviceLock.Invalidated | DeviceLock.Unavailable e) { return deviceError(e); }
+                } else if (!vault.hasPassphrase() || !vault.checkPassphrase(Json.str(b, "passphrase"))) {
+                    sleep(800);
+                    return err(403, "Vul je wachtwoordzin in om het wachtwoord te zien", "passphraseRequired", true);
+                }
+                return ok(Json.obj("user", Json.str(c, "appEnv", "MAIL_FROM"), "password", pw, "generated", Json.truthy(Json.path(c, "console", "appPasswordGenerated"))));
+            }
             case "POST /api/step":
                 Json.map(c, "console").put("step", Json.str(b, "step"));
                 save();
@@ -591,7 +751,7 @@ public final class ConsoleApi {
                         left.add("Maildomein: " + e.getMessage());
                     }
                 }
-                vault.destroy();
+                destroyVault();
                 return ok(Json.obj("ok", true, "done", done, "left", left));
             }
 
@@ -991,7 +1151,9 @@ public final class ConsoleApi {
                 String domain = Extras.normalizeDomain(Json.str(b, "domain"), mode);
                 String alert = Json.str(b, "alertEmail");
                 if ("free".equals(mode) && (alert == null || alert.isEmpty())) return err(400, "Vul een meldadres in; daarmee maakt de console je gratis deSEC-account aan");
-                String step = Console.addCloud(c, domain, mode, Json.str(b, "mailbox"), alert, Json.str(b, "appPassword"));
+                String[] pw = appPasswordFrom(b);
+                String step = Console.addCloud(c, domain, mode, Json.str(b, "mailbox"), alert, pw[0]);
+                rememberAppPassword(c, pw);
                 save();
                 return ok(Json.obj("ok", true, "step", step));
             }

@@ -28,10 +28,27 @@ final class ConsoleBackend {
             } catch (IOException e) {
                 throw new IllegalStateException("catalog.json ontbreekt in de app", e);
             }
-            // Zodra een nieuw gestarte cloud bereikbaar is, weet de app waar hij is.
-            instance = new ConsoleApi(new File(new File(app.getFilesDir(), "beheer"), "kluis.json"), catalog, url -> {
-                if (Prefs.cloudUrl(app) == null) Prefs.setStr(app, Prefs.CLOUD_URL, url);
+            // Zodra een nieuw gestarte cloud bereikbaar is, weet de app waar hij is, en logt hij zelf in met het
+            // wachtwoord uit de kluis (niemand hoeft het te typen; daarna één tik met je vingerafdruk).
+            instance = new ConsoleApi(new File(new File(app.getFilesDir(), "beheer"), "kluis.json"), catalog, new ConsoleApi.Listener() {
+                @Override public void cloudReady(String url) {
+                    if (Prefs.cloudUrl(app) == null) Prefs.setStr(app, Prefs.CLOUD_URL, url);
+                }
+
+                @Override public void cloudLogin(String url, String user, String password) {
+                    try {
+                        String u = CloudApi.normalize(url);
+                        if (!u.equals(Prefs.cloudUrl(app))) return;
+                        if (CloudApi.sessionToken(u) == null) CloudLogin.login(u, user, password, null);
+                        CloudLogin.remember(app, u, user, password);
+                        SyncJob.schedule(app);
+                    } catch (IOException | RuntimeException ignored) {
+                        // Dan logt de eigenaar later zelf in (het inlogscherm van de app).
+                    }
+                }
             });
+            Biometrics.LOCK.init(app);
+            instance.deviceLock = Biometrics.LOCK;
             instance.dienstUrl = BuildConfig.DIENST_URL;
             // De lijst van aanbieders bij deze versie: gebruikt als de lijst op GitHub niet op te halen is.
             try (InputStream in = app.getAssets().open("www/aanbieders.json")) {

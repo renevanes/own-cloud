@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Op deze telefoon</title>
+  <link rel="stylesheet" href="/shared/tokens.css">
+  <link rel="stylesheet" href="/console.css">
+  <link rel="stylesheet" href="/telefoon.css">
+</head>
+<body>
+  <main class="tel">
+    <header class="tel-bar">
+      <button class="link quiet" id="back" type="button">Terug</button>
+      <h1 id="title">Op deze telefoon</h1>
+    </header>
+
+    <!-- Overzicht -->
+    <section id="v-home" class="view">
+      <p class="lead">Je agenda en foto's ook op je telefoon, ook zonder internet. Met een eigen reservekopie, los van Google.</p>
+      <div class="choices">
+        <a class="choice" href="#agenda"><b>Agenda op deze telefoon</b><span class="muted" id="sumAgenda">Even kijken…</span></a>
+        <a class="choice" href="#fotos"><b>Foto's op deze telefoon</b><span class="muted" id="sumFotos">Even kijken…</span></a>
+        <a class="choice" href="#opslag"><b>Opslag op deze telefoon</b><span class="muted" id="sumOpslag">Wat de app inneemt, en ruimte vrijmaken.</span></a>
+      </div>
+    </section>
+
+    <!-- Agenda -->
+    <section id="v-agenda" class="view" hidden>
+      <div id="agPerm" class="block" hidden>
+        <p>De app heeft toegang tot de agenda's op je telefoon nodig om je Google-agenda te tonen en er een reservekopie van te maken.</p>
+        <div class="actions"><button class="btn primary" data-act="perm-agenda">Toegang geven</button></div>
+        <p class="msg" id="agPermMsg"></p>
+      </div>
+      <div id="agMain" hidden>
+        <div class="block" id="agGoogle"></div>
+        <div class="block">
+          <div class="row-head"><h2>Afspraken</h2><button class="btn primary small" data-act="new-event" id="agNew">Nieuwe afspraak</button></div>
+          <div class="chips" id="agFilter"></div>
+          <div class="pager"><button class="btn small" data-act="ag-prev">Eerder</button><span id="agRange" class="muted"></span><button class="btn small" data-act="ag-next">Later</button></div>
+          <div id="agList" class="agenda-list"></div>
+        </div>
+        <div class="block" id="agBackup"></div>
+        <div class="block" id="agEigen" hidden></div>
+      </div>
+    </section>
+
+    <!-- Foto's -->
+    <section id="v-fotos" class="view" hidden>
+      <div class="block" id="fGallery"></div>
+      <div class="block" id="fTakeout"></div>
+      <div class="block" id="fCache"></div>
+    </section>
+
+    <!-- Foto's uit je cloud bekijken -->
+    <section id="v-galerij" class="view" hidden>
+      <p class="muted small" id="gInfo"></p>
+      <div id="gGrid" class="grid"></div>
+      <p class="center-text"><button class="btn" data-act="g-more" id="gMore" hidden>Meer laden</button></p>
+    </section>
+
+    <!-- Opslag -->
+    <section id="v-opslag" class="view" hidden>
+      <div id="oList"></div>
+    </section>
+  </main>
+
+  <!-- Venster voor formulieren en keuzes -->
+  <div class="sheet" id="sheet" hidden>
+    <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+      <h2 id="sheetTitle"></h2>
+      <div id="sheetBody"></div>
+    </div>
+  </div>
+
+  <!-- Foto bekijken -->
+  <div class="viewer" id="viewer" hidden>
+    <div class="viewer-bar">
+      <button class="btn small" data-act="v-close">Sluiten</button>
+      <span id="vInfo"></span>
+      <span class="viewer-nav"><button class="btn small" data-act="v-prev" aria-label="Vorige">‹</button><button class="btn small" data-act="v-next" aria-label="Volgende">›</button></span>
+    </div>
+    <div class="viewer-body" id="vBody"></div>
+  </div>
+
+  <script src="/telefoon.js"></script>
+</body>
+</html>

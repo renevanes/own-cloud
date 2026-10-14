@@ -197,6 +197,38 @@ test("Foto's: upload via API met EXIF-datum", async () => {
   assert.equal(new Date(p.taken_at).getUTCFullYear(), 2025);
 });
 
+test("Foto's: upload met gegevens uit Google Takeout (Android-app)", async () => {
+  const img = await sharp({ create: { width: 64, height: 48, channels: 3, background: "#996633" } })
+    .jpeg().withExif({ IFD0: { Make: "Pixel" }, IFD2: { DateTimeOriginal: "2025:08:15 14:20:00" } } as never).toBuffer();
+  const boundary = "----takeoutgrens";
+  const field = (name: string, value: string) => Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`);
+  const body = Buffer.concat([
+    field("lastModified", "1546300800000"), field("takenAt", "1546300800000"), field("lat", "41.9"), field("lon", "12.5"),
+    field("description", "Zon, zee en strand"), field("favorite", "1"), field("album", "Vakantie Rome"),
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="rome.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`), img,
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  ]);
+  const r = await app.inject({ method: "POST", url: "/api/photos/upload", headers: { ...auth, "content-type": `multipart/form-data; boundary=${boundary}` }, payload: body });
+  assert.equal(r.statusCode, 200, r.body);
+  const [res] = r.json();
+  assert.equal(res.duplicate, false);
+  const p = (await app.inject({ url: `/api/photos/${res.id}`, headers: auth })).json();
+  assert.equal(p.taken_at, 1546300800000, "datum uit Takeout gaat vóór EXIF");
+  assert.equal(p.lat, 41.9);
+  assert.equal(p.lon, 12.5);
+  assert.equal(p.description, "Zon, zee en strand");
+  assert.equal(p.is_favorite, 1);
+  assert.deepEqual(p.albums.map((a: { name: string }) => a.name), ["Vakantie Rome"]);
+  const caps = (await app.inject({ url: "/api/capabilities", headers: auth })).json();
+  assert.ok(caps.features.includes("photo-upload-meta"));
+
+  const { uploadMeta } = await import("../src/photos/routes.js");
+  const f = (v: Record<string, string>) => Object.fromEntries(Object.entries(v).map(([k, value]) => [k, { value }]));
+  assert.deepEqual(uploadMeta("x.jpg", f({ takenAt: "abc", lat: "100", lon: "5", favorite: "0", album: "  ", description: " " })), { filename: "x.jpg" }, "onzin wordt genegeerd");
+  assert.deepEqual(uploadMeta("x.jpg", f({ lat: "0", lon: "0" })), { filename: "x.jpg" }, "0,0 is geen plaats");
+  assert.deepEqual(uploadMeta("x.jpg", f({ lat: "52.1" })), { filename: "x.jpg" }, "alleen breedte is geen plaats");
+});
+
 test("findSidecar: varianten van Takeout-bestandsnamen", () => {
   assert.equal(findSidecar("/x/a.jpg", ["a.jpg.json"]), "a.jpg.json");
   assert.equal(findSidecar("/x/a.jpg", ["a.jpg.supplemental-metadata.json"]), "a.jpg.supplemental-metadata.json");

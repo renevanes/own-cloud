@@ -271,3 +271,31 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
 @media (max-width: 480px) { .brand span { display: none; } .bar { gap: 14px; } }
 /* Op de lijst: je regel zoals hij in aanbieders.json komt */
 .hubpane pre.regel { margin: 0; background: var(--bg); border: 1.5px solid var(--line); border-radius: var(--radius-s); padding: 10px 12px; font-size: 12.5px; white-space: pre-wrap; word-break: break-all; max-height: 260px; overflow: auto; }
+/* ── Kluis: vingerafdruk of wachtwoordzin, wachtwoord van je cloud, plakken ── */
+.ico { width: 40px; height: 40px; flex: 0 0 auto; fill: none; stroke: var(--accent); stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.finger { display: grid; grid-template-columns: 44px 1fr; gap: 14px; align-items: center; padding: 14px 16px; border: 1.5px solid var(--accent); border-radius: var(--radius-l); background: var(--accent-soft); }
+.finger b { display: block; font-size: var(--fs-1); }
+.finger .muted { display: block; margin-top: 2px; font-size: 14px; }
+.finger.slim { border-color: var(--line); background: var(--panel); }
+.vaultblock { display: grid; gap: 12px; }
+.vaultblock .vb, .pwblock { display: grid; gap: 10px; }
+.row > label { align-content: start; }
+.row > label:has(.paste) { flex: 1 1 260px; }
+.paste input { min-width: 0; }
+.kluis #kmsg:empty { min-height: 0; margin: 0; }
+.vaultblock h2 { margin: 14px 0 0; }
+.vaultblock .note { margin: 0; }
+.pwblock .lbl { font-size: 14px; }
+.alt { margin: 0; font-size: 14px; }
+.pwnote { margin: 0; font-size: 14px; }
+.pasted { display: block; color: var(--accent); margin-top: -6px; }
+.pasted.err { color: var(--danger); }
+.btn.big .ico { width: 26px; height: 26px; stroke: currentColor; }
+.lock .lockalt { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 14px; }
+.lock #f { margin-top: 8px; }
+.lock .or, .kluis .or { display: flex; align-items: center; gap: 12px; color: var(--muted); margin: 22px 0; }
+.lock .or::before, .lock .or::after { content: ""; flex: 1; border-top: 2.5px dotted var(--trail); }
+.lock .panel { margin-top: 0; }
+.kluis h2 { font-size: var(--fs-1); margin: 26px 0 10px; }
+.items .flag .ico { width: 26px; height: 26px; }
+.pwshow { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--fs-1); letter-spacing: .03em; padding: 10px 12px; margin-top: 4px; background: var(--sunk); border-radius: var(--radius-s); overflow-wrap: anywhere; user-select: all; }

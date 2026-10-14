@@ -3,7 +3,6 @@ package nl.eigencloud.app;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
-import android.hardware.biometrics.BiometricPrompt;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -279,40 +278,36 @@ public final class DienstActivity extends Activity {
         main.post(() -> prompt(sig, message));
     }
 
-    @android.annotation.TargetApi(28)
+    /**
+     * De vingerafdruk eerst (zoals bij de beheerkluis, zelfde vraag en meldingen via {@link Biometrics#ask}); de
+     * authenticator-app is het alternatief op de pagina. Bewust zonder pincode: dit is de tweede inlogstap voor
+     * medewerkers, en die moet meer zijn dan "de telefoon is ontgrendeld".
+     */
     private void prompt(Signature sig, byte[] message) {
         if (Build.VERSION.SDK_INT < 28) { deliver("eigenDienstSigned", null, "Gebruik een authenticator-app op deze Android-versie."); return; }
         if (isFinishing() || isDestroyed()) { deliver("eigenDienstSigned", null, "Afgebroken"); return; }
         if (prompting != null) prompting.cancel();
-        CancellationSignal cancel = new CancellationSignal();
-        prompting = cancel;
-        BiometricPrompt p = new BiometricPrompt.Builder(this)
-                .setTitle("Inloggen bij " + dienst.getHost())
-                .setSubtitle("Bevestig met je vingerafdruk")
-                .setNegativeButton("Annuleren", getMainExecutor(), (d, w) -> {
-                    if (prompting == cancel) prompting = null;
-                    deliver("eigenDienstSigned", null, "Geannuleerd");
-                })
-                .build();
-        p.authenticate(new BiometricPrompt.CryptoObject(sig), cancel, getMainExecutor(), new BiometricPrompt.AuthenticationCallback() {
-            @Override public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult result) {
-                if (prompting == cancel) prompting = null;
+        Biometrics.Ask q = new Biometrics.Ask("Inloggen bij " + dienst.getHost());
+        q.subtitle = "Bevestig met je vingerafdruk";
+        q.negative = "Authenticator-app gebruiken";
+        CancellationSignal[] mine = {null};
+        mine[0] = Biometrics.ask(this, q, sig, new Biometrics.Answer() {
+            @Override public void ok() {
+                if (prompting == mine[0]) prompting = null;
                 try {
-                    Signature s = result.getCryptoObject() != null && result.getCryptoObject().getSignature() != null ? result.getCryptoObject().getSignature() : sig;
-                    s.update(message);
-                    deliver("eigenDienstSigned", Bytes.base64(s.sign()), null);
-                } catch (Exception e) {
+                    sig.update(message);
+                    deliver("eigenDienstSigned", Bytes.base64(sig.sign()), null);
+                } catch (java.security.GeneralSecurityException | RuntimeException e) {
                     deliver("eigenDienstSigned", null, "Ondertekenen lukte niet: " + e.getMessage());
                 }
             }
 
-            @Override public void onAuthenticationError(int code, CharSequence msg) {
-                if (prompting == cancel) prompting = null;
-                deliver("eigenDienstSigned", null, code == BiometricPrompt.BIOMETRIC_ERROR_USER_CANCELED || code == BiometricPrompt.BIOMETRIC_ERROR_CANCELED
-                        ? "Geannuleerd" : code == BiometricPrompt.BIOMETRIC_ERROR_NO_BIOMETRICS
-                        ? "Stel eerst een vingerafdruk in op deze telefoon (Instellingen van Android)" : String.valueOf(msg));
+            @Override public void fail(String msg, boolean cancelled) {
+                if (prompting == mine[0]) prompting = null;
+                deliver("eigenDienstSigned", null, q.negative.equals(msg) ? "Vul dan de code uit je authenticator-app in." : cancelled ? "Geannuleerd" : msg);
             }
         });
+        prompting = mine[0];
     }
 
     /** Wat de beheerpagina's van de Dienst kunnen aanroepen (BROKER.md, "Brug met de app"). */

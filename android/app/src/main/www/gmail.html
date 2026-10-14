@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Gmail op deze telefoon</title>
+  <link rel="stylesheet" href="/shared/tokens.css">
+  <link rel="stylesheet" href="/console.css">
+  <link rel="stylesheet" href="/gmail.css">
+</head>
+<body class="gm">
+  <header class="gm-bar">
+    <button class="icon" id="menuBtn" aria-label="Mappen" aria-controls="drawer" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <h1 id="title">Gmail</h1>
+    <button class="icon" id="searchBtn" aria-label="Zoeken">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></svg>
+    </button>
+  </header>
+
+  <nav id="drawer" class="drawer" hidden>
+    <ul id="boxes" class="boxes"></ul>
+    <div class="drawer-foot">
+      <button class="link" id="toSettings">Instellingen</button>
+      <button class="link quiet" id="toApp">Terug naar Eigen Cloud</button>
+    </div>
+  </nav>
+  <div class="scrim" id="scrim" hidden></div>
+
+  <main class="gm-main">
+    <!-- Instellen: adres, app-wachtwoord bij Google, plakken. Niets typen. -->
+    <section id="setup" hidden>
+      <h2 class="big">Gmail op deze telefoon</h2>
+      <p class="lead">Een kopie van je Gmail op je telefoon, ook zonder internet te lezen. Wat je hier doet (lezen, ster, archiveren, verwijderen, versturen) gebeurt ook in Gmail, en andersom.</p>
+      <ol class="steps">
+        <li>
+          <b>Je Gmail-adres</b>
+          <div class="fields">
+            <button class="btn" id="pickAccount">Kies uit de Google-accounts op je telefoon</button>
+            <label>Of vul het in<input id="address" type="email" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" placeholder="jij@gmail.com"></label>
+          </div>
+        </li>
+        <li>
+          <b>Maak een app-wachtwoord bij Google</b>
+          <p class="muted">Google opent. Geef het wachtwoord een naam, bijvoorbeeld <i>Eigen Cloud telefoon</i>, en tik op <i>Maken</i>. Kopieer de 16 letters die Google laat zien. Lukt het niet? Dan moet bij Google eerst <i>verificatie in twee stappen</i> aan staan.</p>
+          <button class="btn" id="openGoogle">Naar Google</button>
+        </li>
+        <li>
+          <b>Terug hier: plakken</b>
+          <p class="muted">De app leest het wachtwoord van het klembord en test meteen de verbinding.</p>
+          <button class="btn primary" id="paste">Plakken en verbinden</button>
+          <p class="msg" id="setupMsg" role="status"></p>
+        </li>
+      </ol>
+      <p class="muted small">Je telefoon praat hiervoor rechtstreeks met Google; je cloud doet niet mee. Het app-wachtwoord staat versleuteld op deze telefoon. Intrekken kan altijd, bij Google onder App-wachtwoorden.</p>
+    </section>
+
+    <!-- Lijst -->
+    <section id="list" hidden>
+      <form id="searchForm" class="search" hidden>
+        <input id="q" type="search" placeholder="Zoeken in mail op de telefoon" autocomplete="off" enterkeyhint="search">
+        <button class="btn" type="button" id="remoteSearch">Ook bij Gmail</button>
+      </form>
+      <div id="status" class="status" role="status"></div>
+      <ul id="outbox" class="outbox"></ul>
+      <ul id="msgs" class="msgs"></ul>
+      <p class="center-text"><button class="btn" id="more" hidden>Meer laden</button></p>
+      <p class="empty muted" id="empty" hidden>Geen berichten.</p>
+      <button class="fab" id="composeBtn">Schrijven</button>
+    </section>
+
+    <!-- Lezen -->
+    <section id="read" hidden>
+      <div class="actions sticky">
+        <button class="btn" data-act="back">‹ Terug</button>
+        <span class="grow"></span>
+        <button class="btn" data-act="archive" id="archiveBtn">Archiveren</button>
+        <button class="btn" data-act="trash" id="trashBtn">Verwijderen</button>
+        <button class="btn" data-act="more" aria-label="Meer">⋯</button>
+      </div>
+      <div id="sheet" class="sheet" hidden></div>
+      <article id="message"></article>
+    </section>
+
+    <!-- Schrijven -->
+    <section id="compose" hidden>
+      <form id="composeForm" class="fields">
+        <div class="actions">
+          <button class="btn" type="button" id="cancelCompose">Annuleren</button>
+          <span class="grow"></span>
+          <button class="btn primary" id="sendBtn">Versturen</button>
+        </div>
+        <h2 id="composeTitle">Nieuw bericht</h2>
+        <label>Aan<input name="to" type="email" multiple autocomplete="email" autocapitalize="off" spellcheck="false"></label>
+        <p><button class="link" type="button" id="ccToggle">Cc en Bcc</button></p>
+        <div id="ccFields" class="fields" hidden>
+          <label>Cc<input name="cc" type="email" multiple autocapitalize="off" spellcheck="false"></label>
+          <label>Bcc<input name="bcc" type="email" multiple autocapitalize="off" spellcheck="false"></label>
+        </div>
+        <label>Onderwerp<input name="subject" autocomplete="off"></label>
+        <label>Bericht<textarea name="text" rows="12"></textarea></label>
+        <div>
+          <ul id="attachList" class="chips"></ul>
+          <button class="btn" type="button" id="addFile">Bijlage toevoegen</button>
+        </div>
+        <p class="msg" id="composeMsg" role="status"></p>
+      </form>
+    </section>
+
+    <!-- Instellingen -->
+    <section id="settings" hidden>
+      <p><button class="btn" id="settingsBack">‹ Terug</button></p>
+      <h2>Instellingen</h2>
+      <div class="block">
+        <h3>Account</h3>
+        <p id="accountLine"></p>
+        <div id="accountDetails" hidden>
+          <p class="muted">App-wachtwoord: <span id="pwMasked"></span></p>
+          <div class="row-actions">
+            <button class="btn" id="newPassword">Nieuw app-wachtwoord plakken</button>
+            <button class="btn danger" id="forget">Gmail van deze telefoon verwijderen</button>
+          </div>
+          <p class="msg" id="accountMsg" role="status"></p>
+        </div>
+        <button class="btn" id="showAccount">Accountgegevens tonen</button>
+        <p class="muted small">Daarvoor vraagt de app je vingerafdruk of de pincode van je telefoon.</p>
+      </div>
+      <div class="block">
+        <h3>Wat er op de telefoon staat</h3>
+        <p class="muted">Berichten uit deze periode staan er helemaal op, met bijlagen. Van oudere berichten alleen afzender, onderwerp en het begin; de rest haalt de app op als je ze opent (en die blijft dan bewaard).</p>
+        <fieldset class="radios" id="months">
+          <label class="check"><input type="radio" name="months" value="3"> 3 maanden</label>
+          <label class="check"><input type="radio" name="months" value="6"> 6 maanden</label>
+          <label class="check"><input type="radio" name="months" value="12"> 12 maanden</label>
+          <label class="check"><input type="radio" name="months" value="24"> 24 maanden</label>
+          <label class="check"><input type="radio" name="months" value="0"> Alles</label>
+        </fieldset>
+        <label>Bijlagen meteen ophalen tot
+          <select id="attachLimit"><option value="5">5 MB</option><option value="10">10 MB</option><option value="25">25 MB</option></select>
+        </label>
+        <label class="check"><input type="checkbox" id="mobileData"> <span>Ook via mobiele data alles ophalen <small class="muted">(anders alleen nieuwe, kleine berichten; de rest via wifi)</small></span></label>
+        <label class="check"><input type="checkbox" id="notify"> <span>Melding bij nieuwe mail</span></label>
+        <p class="msg" id="notifyMsg" role="status"></p>
+      </div>
+      <div class="block">
+        <h3>Opslag</h3>
+        <p id="storageLine"></p>
+        <div class="row-actions">
+          <button class="btn" id="free">Vrijmaken</button>
+          <button class="btn" id="syncNow">Nu bijwerken</button>
+        </div>
+        <p class="muted small">Vrijmaken haalt de inhoud weg van oudere berichten die je los hebt geopend. Afzender, onderwerp en het begin blijven; openen haalt ze weer op.</p>
+      </div>
+      <div class="block">
+        <h3>Privacy</h3>
+        <p class="muted small">Je telefoon praat rechtstreeks met Gmail (imap.gmail.com en smtp.gmail.com, versleuteld). Je cloud en de makers van de app zien niets. De kopie staat in de afgeschermde opslag van de app op deze telefoon, die Android versleutelt zolang de telefoon vergrendeld is geweest; de app versleutelt de berichten zelf niet nog eens. Het app-wachtwoord staat versleuteld met een sleutel in de beveiligde hardware van de telefoon.</p>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script src="/gmail.js"></script>
+</body>
+</html>

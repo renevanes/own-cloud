@@ -6,7 +6,7 @@ import { Transform } from "node:stream";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { db } from "../db.js";
 import { requireAuth, uid } from "../auth.js";
-import { addPhotoFromFile, isMediaFile } from "./store.js";
+import { addPhotoFromFile, isMediaFile, type PhotoMeta } from "./store.js";
 import { ensureLocal } from "../blobs.js";
 import { accessiblePhoto, resourceAccess } from "../sharing.js";
 import { boundedWork, reserveSpace } from "../work.js";
@@ -30,7 +30,31 @@ function sendFileRange(req: FastifyRequest, reply: FastifyReply, file: string, m
   return reply.send(fs.createReadStream(file));
 }
 
-const LIST_COLS = "id, filename, mime, width, height, taken_at, lat, lon, camera, description, is_video, is_favorite, (thumb_path IS NOT NULL) AS has_thumb";
+/**
+ * Optionele velden vóór het bestand, zoals de Android-app ze meestuurt bij "Uit Google Foto's halen" (uit de
+ * Takeout-JSON): takenAt (ms), lat + lon, description, favorite ("1"), album. Zelfde betekenis als bij de
+ * Takeout-import in de cloud (src/import/photos.ts): takenAt en plaats gaan vóór EXIF.
+ */
+export function uploadMeta(filename: string, fields: Record<string, unknown>): PhotoMeta {
+  const field = (k: string) => {
+    const f = fields[k] as { value?: unknown } | { value?: unknown }[] | undefined;
+    const v = (Array.isArray(f) ? f.at(-1) : f)?.value;
+    return typeof v === "string" ? v : undefined;
+  };
+  const meta: PhotoMeta = { filename };
+  const takenAt = Number(field("takenAt"));
+  if (Number.isFinite(takenAt) && takenAt > 0 && takenAt < 4_102_444_800_000) meta.takenAt = Math.round(takenAt);
+  const lat = Number(field("lat")), lon = Number(field("lon"));
+  if (field("lat") && field("lon") && Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && (lat !== 0 || lon !== 0)) { meta.lat = lat; meta.lon = lon; }
+  const description = field("description")?.trim();
+  if (description) meta.description = description.slice(0, 5000);
+  if (field("favorite") === "1" || field("favorite") === "true") meta.favorite = true;
+  const album = field("album")?.trim();
+  if (album) meta.albums = [album.slice(0, 200)];
+  return meta;
+}
+
+const LIST_COLS ="id, filename, mime, width, height, taken_at, lat, lon, camera, description, is_video, is_favorite, (thumb_path IS NOT NULL) AS has_thumb";
 
 export function photoRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireAuth);
@@ -109,7 +133,7 @@ export function photoRoutes(app: FastifyInstance) {
         const lastModified = Number((Array.isArray(lmField) ? lmField.at(-1) : lmField)?.value);
         if (lastModified > 0) fs.utimesSync(tmp, lastModified / 1000, lastModified / 1000);
         try {
-          const r = await addPhotoFromFile(tmp, { filename: part.filename }, { move: true, userId, reserved: true });
+          const r = await addPhotoFromFile(tmp, uploadMeta(part.filename, part.fields), { move: true, userId, reserved: true });
           results.push({ filename: part.filename, ...r });
         } catch (e) {
           results.push({ filename: part.filename, error: (e as Error).message });

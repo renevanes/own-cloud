@@ -1,6 +1,6 @@
 /**
  * Controleert met de TypeScript-code wat de Java-kern van de Android-app heeft gemaakt
- * (android/core/build/java-out/*.json, geschreven door CryptoGoldenTest en VaultTest):
+ * (android/core/build/java-out/*.json, geschreven door CryptoGoldenTest, VaultTest en DeviceVaultTest):
  * Java seal → TS open, Java sealMsg → TS openMsg, Java adminProof → TS verifyAdminProof, Java-kluis → Node,
  * en de handtekeningen van Exoscale/OVHcloud uit de Java-adapters → TS exoSign/ovhSign (FormatsGoldenTest).
  * Gebruik: npx tsx scripts/golden-verify.ts [build-map]
@@ -57,6 +57,18 @@ attempt("Java-kluis te openen met Node (PBKDF2-SHA256 + AES-GCM, AAD vault)", ()
   const key = crypto.pbkdf2Sync(v.passphrase.normalize("NFKC"), b(f.salt), f.iter, 32, "sha256");
   return open(key, b(f.data), "vault").toString("utf8") === v.expected;
 });
+
+// Kluis achter de vingerafdruk met een wachtwoordzin erbij (DeviceVaultTest): de wachtwoordzin opent de sleutel van de kluis.
+if (fs.existsSync(path.join(out, "vault-device.json"))) {
+  const vd = read("vault-device.json");
+  attempt("Java-kluis (vingerafdruk + wachtwoordzin) te openen met Node (PBKDF2 → sleutel, AAD vault-key → vault)", () => {
+    const f = JSON.parse(fs.readFileSync(path.join(out, vd.file), "utf8"));
+    if (f.v !== 1 || f.kdf !== "device" || !f.device || !f.pass?.key) return false;
+    const kek = crypto.pbkdf2Sync(vd.passphrase.normalize("NFKC"), b(f.pass.salt), f.pass.iter, 32, "sha256");
+    const key = open(kek, b(f.pass.key), "vault-key");
+    return key.length === 32 && open(key, b(f.data), "vault").toString("utf8") === vd.expected;
+  });
+}
 
 const sigs = read("signatures.json");
 for (const e of sigs.exo) attempt(`Exoscale-handtekening van Java = TS exoSign (${e.method} ${e.url})`, () => exoSign(e.method, e.url, e.body, e.key, e.secret, e.expires) === e.header);

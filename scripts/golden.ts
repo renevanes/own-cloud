@@ -28,6 +28,7 @@ import { parseMx, unquoteTxt } from "../src/cluster/adapters/http.js";
 import { exoSign } from "../src/cluster/adapters/exoscale.js";
 import { ovhSign } from "../src/cluster/adapters/ovh.js";
 import { ScalewayDns } from "../src/cluster/adapters/scaleway.js";
+import { normalizeSecret, ALPHABET as PW_ALPHABET, PATTERN as PW_PATTERN, GROUPS as PW_GROUPS, GROUP_LENGTH as PW_GROUP_LENGTH } from "../web-console/secrets.js";
 
 const root = path.resolve(import.meta.dirname, "..");
 const outFile = path.resolve(process.argv[2] ?? path.join(root, "android/core/build/golden.json"));
@@ -484,6 +485,17 @@ const dienstBackup = {
   enc: (await encryptBuffer(deriveKey(Buffer.from(dienstSecret, "hex"), "dienst-backup"), zlib.gzipSync(Buffer.from(JSON.stringify({ v: 1, at: 1760000000000, files: { "dienst.sqlite": sqlite.toString("base64"), "aanbieder.key": Buffer.from("sleutel").toString("base64") } }))))).toString("base64"),
 };
 
+// ───────── Wachtwoorden maken en plakken (web-console/secrets.js ↔ Passwords.java), vormen van de console-API ─────────
+const ch = (n: number) => String.fromCharCode(n);
+const pasteInputs = [
+  "  SCWABCDEFGHIJKLMNOPQ  ", "\tabc\t", '"quoted-token"', "'single'", ch(0x201c) + "curly" + ch(0x201d), ch(0x201e) + "nl" + ch(0x201d),
+  "\n\n  first line  \nsecond", "a\r\nb", ch(0xfeff) + "bom" + ch(0x200b) + "zw", "x" + ch(0xa0) + "y" + ch(0x2003), "line1" + ch(0x2028) + "line2",
+  "", "   ", '"', '""', "``", "p@ss w0rd with spaces", "x".repeat(5000), '" inner "', ch(0xad) + "soft", ch(0xab) + "tok" + ch(0xbb),
+  "'mismatch\"", "a" + ch(0x85) + "b", ch(0x3000) + "ideo" + ch(0x3000), "tab\u000Bvt\f",
+];
+const secretsGolden = { alphabet: PW_ALPHABET, pattern: PW_PATTERN.source, groups: PW_GROUPS, groupLength: PW_GROUP_LENGTH, normalize: pasteInputs.map((i) => ({ in: i, out: normalizeSecret(i) })) };
+const consoleShapes = JSON.parse(fs.readFileSync(path.join(root, "test/fixtures/console-shapes.json"), "utf8"));
+
 const out = {
   contractVersion: 1,
   transferPreviews: [
@@ -499,6 +511,7 @@ const out = {
   pickSize: pickCases, presets, apiResponses, fetchSizes: fetchSizesOut, dnsFormat, scalewayDns, signatures, secretFields,
   sheets, sheetDateText: dateText, dates, checklists, pbkdf2, passwords, proofs, sampleConfig,
   aanbieder: aanbiederOut, lijstMerge: lijstCases, branchFor: branchCases, costs: costsOut, dienstUserData: dienstUserDataOut, dienstCheckScript: dienstCheckScript(), updaterScript: updaterScript(), cleanUrl: urlCases, smtpDisplay: smtpCases, bedrijf: bedrijfCases,
+  secrets: secretsGolden, consoleShapes,
 };
 fs.mkdirSync(path.dirname(outFile), { recursive: true });
 fs.writeFileSync(outFile, JSON.stringify(out, null, 1));

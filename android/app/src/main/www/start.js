@@ -42,6 +42,7 @@
   var home = location.hash === "#offline" && info.cloud ? "offline" : "welcome";
   function show(id) {
     $("#welcome").hidden = id !== "welcome";
+    $("#login").hidden = id !== "login";
     $("#offline").hidden = id !== "offline";
     $("#about").hidden = id !== "about";
     $(".foot").hidden = id === "about";
@@ -76,6 +77,16 @@
     $("#autoUpd").checked = !!(info.updates || {}).on;
     $("#cloud").textContent = info.cloud ? info.cloud.replace(/^https:\/\//, "") : "nog niet verbonden";
     $("#beheer").textContent = info.console ? "kluis op deze telefoon" : "nog niet ingesteld";
+    var lg = info.login || {};
+    $("#loginHow").innerHTML = "";
+    $("#loginHow").append(document.createTextNode(lg.fingerprint ? "met je vingerafdruk " : info.cloud ? "met je wachtwoord" : "nog niet"));
+    if (lg.fingerprint && phone.forgetLogin) {
+      var off = document.createElement("button");
+      off.className = "link";
+      off.textContent = "uitzetten";
+      off.onclick = function () { if (confirm("Inloggen met je vingerafdruk uitzetten?\n\nDe app vergeet je bewaarde inlog. Je blijft ingelogd tot je sessie verloopt; daarna typ je je wachtwoord.")) phone.forgetLogin(); };
+      $("#loginHow").append(off);
+    }
     $("#device").textContent = (info.device || "") + (info.android ? " · Android " + info.android : "");
     $("#resetConsole").hidden = !info.console;
   }
@@ -126,6 +137,72 @@
     if (phone.openDienst) phone.openDienst(dienstForm.address.value);
   });
 
+  // ── Inloggen: na Verbinden, of als je sessie verlopen is (dan meteen je vingerafdruk) ──
+  var lf = $("#loginForm");
+  function loginMsg(text) {
+    var m = lf.querySelector(".msg");
+    m.textContent = text || "";
+    m.className = text ? "msg err" : "msg";
+  }
+  function loginBusy(on) {
+    var b = lf.querySelector("button");
+    b.disabled = on;
+    b.textContent = on ? "Bezig…" : "Inloggen";
+    $("#fpLogin").disabled = on;
+  }
+  function showLogin(d, auto) {
+    $("#loginWhere").textContent = "Bij " + (d.host || "je cloud") + ".";
+    $("#userRow").hidden = !d.multiUser;
+    lf.user.required = !!d.multiUser;
+    $("#passRow").hidden = false;
+    lf.password.required = true;
+    $("#codeRow").hidden = true;
+    lf.code.required = false;
+    lf.code.value = "";
+    $("#rememberRow").hidden = !d.remember;
+    lf.remember.checked = true;
+    $("#loginNote").hidden = !d.remember || !!d.fingerprint;
+    $("#fpBox").hidden = !d.fingerprint;
+    lf.hidden = !!d.fingerprint;
+    loginMsg("");
+    loginBusy(false);
+    show("login");
+    if (d.fingerprint && auto) { loginBusy(true); phone.fingerprintLogin(); }
+    else if (!d.fingerprint) (d.multiUser ? lf.user : lf.password).focus();
+  }
+  $("#fpLogin").addEventListener("click", function () { loginMsg(""); loginBusy(true); phone.fingerprintLogin(); });
+  $("#typeInstead").addEventListener("click", function () { $("#fpBox").hidden = true; lf.hidden = false; $("#loginNote").hidden = $("#rememberRow").hidden; lf.password.focus(); });
+  lf.addEventListener("submit", function (e) {
+    e.preventDefault();
+    loginMsg("");
+    loginBusy(true);
+    phone.login(lf.user.value, $("#passRow").hidden ? "" : lf.password.value, lf.code.value, !$("#rememberRow").hidden && lf.remember.checked);
+  });
+  $("#loginOther").addEventListener("click", function () { if (info.cloud) phone.forget(); else show("welcome"); });
+  window.addEventListener("eigenphone", function (e) {
+    var d = e.detail || {};
+    if (d.type === "connect" && d.login) { var b = form.querySelector("button"); b.disabled = false; b.textContent = "Verbinden"; showLogin(d, false); return; }
+    if (d.type !== "login") return;
+    if (d.form || d.login) { showLogin(d, true); return; }
+    loginBusy(false);
+    if (d.noCloud) { show("welcome"); return; }
+    if (d.mfa) {
+      // Wachtwoord klopt; nu de code. Het wachtwoord onthoudt de app zolang dit scherm openstaat.
+      $("#fpBox").hidden = true;
+      lf.hidden = false;
+      $("#passRow").hidden = true;
+      lf.password.required = false;
+      $("#codeRow").hidden = false;
+      lf.code.required = true;
+      lf.code.focus();
+      loginMsg(d.error);
+      return;
+    }
+    if (d.fingerprint === false) { $("#fpBox").hidden = true; lf.hidden = false; }
+    if (d.error) loginMsg(d.error);
+  });
+  if (location.hash === "#inloggen" && phone.loginStart) { show("login"); $("#loginWhere").textContent = "Even kijken…"; lf.hidden = true; phone.loginStart(); }
+
   var form = $("#connect");
   form.addEventListener("submit", function (e) {
     e.preventDefault();
@@ -150,7 +227,7 @@
       $("#dienstOpen").hidden = false;
       return;
     }
-    if (d.type !== "connect") return;
+    if (d.type !== "connect" || d.login) return;
     var btn = form.querySelector("button");
     btn.disabled = false;
     btn.textContent = "Verbinden";
@@ -166,4 +243,10 @@
   $("#manage").addEventListener("click", function () { phone.openConsole(); });
   $("#retry").addEventListener("click", function () { phone.retry(); });
   $("#other").addEventListener("click", function () { phone.forget(); });
+
+  // ── Op deze telefoon: agenda, foto's en opslag (OnPhoneActivity) ──
+  var onPhone = typeof phone.openOnPhone === "function";
+  $("#onPhone").hidden = !onPhone;
+  $("#onPhoneAbout").hidden = !onPhone;
+  document.querySelectorAll("[data-onphone]").forEach(function (b) { b.addEventListener("click", function () { phone.openOnPhone(b.dataset.onphone); }); });
 })();

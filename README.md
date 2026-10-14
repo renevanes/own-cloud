@@ -33,7 +33,7 @@ Techniek: Node.js 22 + TypeScript, Fastify, SQLite (één bestand, makkelijk te 
 1. Installeer [Node.js 22](https://nodejs.org) op je computer.
 2. Pak deze map uit. Op Windows dubbelklik je **`beheer.cmd`**; op Mac/Linux draai je `npm install && npm run beheer`.
 3. Je browser opent de beheerconsole. Volg de stappen:
-   - **Jij en je domein** — domein, e-mailadres, inlogwachtwoord, meldadres en een wachtwoordzin voor de kluis.
+   - **Jij en je domein** — domein, e-mailadres, inlogwachtwoord (of *Genereer een sterk wachtwoord*), meldadres en een wachtwoordzin voor de kluis.
    - **Herstelsleutel** — schrijf hem op of druk het herstelblad af.
    - **Opslag** — koppel een werkkopie en een back-up, bij voorkeur in twee landen. Buckets, versiebeheer en object-lock worden automatisch ingesteld.
    - **Servers** — koppel aanbieders; je kiest daarna *Alles in Nederland*, *Nederland en Duitsland* of *Spreid over Europa*, met de actuele maandprijs erbij.
@@ -46,9 +46,9 @@ Techniek: Node.js 22 + TypeScript, Fastify, SQLite (één bestand, makkelijk te 
 
 **Geen domein of accounts?** Kies in de eerste stap *Gratis adres*: de console maakt dan zelf een gratis account bij [deSEC](https://desec.io) (open source, non-profit) met een naam als `vanes.dedyn.io` — je typt alleen een plaatje over en klikt op de link in je mail. Wil je niets zelf afsluiten, kies dan in de stap *Waar je cloud draait* een abonnement bij de **Eigen Cloud Dienst**: die regelt je domein, DNS, servers, opslag en mail-relay in één bedrag per maand, betaald met iDEAL. Je herstelsleutel blijft ook dan alleen bij jou. Zie [BROKER.md](BROKER.md) voor wie de dienst aanbiedt.
 
-**Liever vanaf je telefoon?** Installeer de [Android-app](android/README.md) en kies *Nieuwe Eigen Cloud opzetten*: dezelfde stappen, en je sleutels staan versleuteld op je telefoon (ontgrendelen met vingerafdruk).
+**Liever vanaf je telefoon?** Installeer de [Android-app](android/README.md) en kies *Nieuwe Eigen Cloud opzetten*: dezelfde stappen, maar zonder wachtwoorden te bedenken of te typen. De kluis met je sleutels zit achter je **vingerafdruk** (vanaf Android 11 ook de pincode van je telefoon); een wachtwoordzin kan nog steeds (*Liever een wachtwoordzin*). Het wachtwoord van je cloud maakt de app zelf, bewaart het in de kluis en logt er na het starten zelf mee in; nodig voor een andere app, dan toon je het met je vingerafdruk. Sleutels van aanbieders plak je met één tik (*Plakken*; de app maakt het klembord daarna leeg). Je herstelsleutel blijft de weg terug: op een nieuwe telefoon, of als je vingerafdrukken veranderen. Zie [TRUST.md](TRUST.md).
 
-Bewaar het bestand `~/.eigen-cloud/kluis.json` gerust in je back-up of synchronisatiemap: het is versleuteld met je wachtwoordzin. Op een andere computer of telefoon kies je in de console **Ik heb al een Eigen Cloud** en vul je je herstelsleutel en de gegevens van één opslag in (de bucketnaam mag je leeg laten; de console zoekt hem zelf). Heb je een abonnement bij de Eigen Cloud Dienst, dan is het nog eenvoudiger: **Herstellen via de Eigen Cloud Dienst** vraagt alleen je e-mailadres, de code uit de mail en je herstelsleutel.
+Bewaar het bestand `~/.eigen-cloud/kluis.json` gerust in je back-up of synchronisatiemap: het is versleuteld met je wachtwoordzin. (Op de computer blijft de wachtwoordzin; inloggen met een vingerafdruk of passkey (WebAuthn) in de browser zit er niet in.) Op een andere computer of telefoon kies je in de console **Ik heb al een Eigen Cloud** en vul je je herstelsleutel en de gegevens van één opslag in (de bucketnaam mag je leeg laten; de console zoekt hem zelf). Heb je een abonnement bij de Eigen Cloud Dienst, dan is het nog eenvoudiger: **Herstellen via de Eigen Cloud Dienst** vraagt alleen je e-mailadres, de code uit de mail en je herstelsleutel.
 
 **Abonnement beheren** doe je in de console zelf (paneel *Abonnement* op het overzicht): facturen bekijken en afdrukken, een andere bundel kiezen (je cloud krijgt meteen de nieuwe aantallen servers), je betaalmethode wijzigen, een mislukte incasso alsnog betalen, opzeggen of het opzeggen terugdraaien, en de verhuiscode van je domein opvragen. In de app opent de betaalpagina van Mollie in de app zelf en springt je bank-app vanzelf open.
 
@@ -65,7 +65,7 @@ verder waar het was. Een gratis adres dat alleen bij je oude aanbieder hoort (`B
 
 **Zelf aanbieder worden?** Kies op het startscherm van de app of de console **Aanbieder worden** (in de console ook
 bovenaan, op elk scherm). Een eigen cloud is daarvoor niet nodig: de console maakt dan een kluis alleen voor je Dienst
-(wachtwoordzin en herstelsleutel, zoals bij een cloud). Vul je bedrijfsgegevens in, koppel je accounts (Scaleway, Mollie,
+(vingerafdruk of wachtwoordzin, en een herstelsleutel, zoals bij een cloud). Vul je bedrijfsgegevens in, koppel je accounts (Scaleway, Mollie,
 deSEC, mail), kies het adres en wie het in de DNS zet (je cloud, een DNS-aanbieder zoals deSEC, Scaleway, Hetzner,
 Exoscale of OVHcloud, waarbij de console het record zelf zet en bijwerkt, of jijzelf), en de console zet je eigen Eigen
 Cloud Dienst op een server bij de aanbieder en in de regio die je kiest (Scaleway, Hetzner, UpCloud, Exoscale of

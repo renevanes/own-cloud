@@ -12,6 +12,8 @@
     <!-- Je cloud-agenda in de agenda-app van de telefoon -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+    <!-- Agenda op deze telefoon: zien of Android je Google-agenda synchroniseert (alleen lezen) -->
+    <uses-permission android:name="android.permission.READ_SYNC_SETTINGS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
@@ -93,6 +95,18 @@
 
         <service
             android:name=".SyncJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <!-- Agenda en foto's op deze telefoon: schermen en achtergrondwerk (reservekopie, foto's, Takeout) -->
+        <activity
+            android:name=".OnPhoneActivity"
+            android:exported="false"
+            android:label="Op deze telefoon"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|smallestScreenSize"
+            android:windowSoftInputMode="adjustResize" />
+        <service
+            android:name=".OnPhoneJob"
             android:exported="false"
             android:permission="android.permission.BIND_JOB_SERVICE" />
 

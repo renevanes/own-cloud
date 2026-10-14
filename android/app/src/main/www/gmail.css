@@ -1,0 +1,82 @@
+/* Gmail op deze telefoon — bouwt op /shared/tokens.css en /console.css */
+.gm { padding-bottom: 96px; }
+.gm-bar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--bg); border-bottom: 1px solid var(--line); }
+.gm-bar h1 { flex: 1; margin: 0; font-size: var(--fs-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.icon { width: 44px; height: 44px; display: grid; place-items: center; border-radius: var(--radius); color: var(--text); }
+.icon svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.icon:active { background: var(--sunk); }
+.gm-main { max-width: 760px; margin: 0 auto; padding: 0 12px; }
+.small { font-size: var(--fs-small); }
+.center-text { text-align: center; }
+.big { font-size: var(--fs-2); margin: 18px 0 8px; }
+.lead { color: var(--muted); }
+
+/* Mappen */
+.drawer { position: fixed; z-index: 40; top: 0; bottom: 0; left: 0; width: min(84vw, 320px); background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto; padding: 12px 0 24px; box-shadow: 0 0 24px rgba(0, 0, 0, .18); }
+.scrim { position: fixed; inset: 0; z-index: 30; background: rgba(0, 0, 0, .3); }
+.boxes { list-style: none; margin: 0; padding: 0; }
+.boxes li button { width: 100%; display: flex; justify-content: space-between; gap: 10px; padding: 12px 18px; text-align: left; color: var(--text); }
+.boxes li button.on { background: var(--accent-soft); font-weight: 700; }
+.boxes li.sep { border-top: 1px solid var(--line); margin: 6px 0; }
+.boxes .count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.drawer-foot { display: grid; gap: 12px; padding: 16px 18px; border-top: 1px solid var(--line); margin-top: 8px; justify-items: start; }
+
+/* Lijst */
+.search { display: flex; gap: 8px; margin: 10px 0; }
+.status { font-size: var(--fs-small); color: var(--muted); padding: 8px 2px; min-height: 1.2em; }
+.status.warn { color: var(--warn); }
+.status.err { color: var(--danger); }
+.status button { margin-left: 6px; }
+.msgs, .outbox { list-style: none; margin: 0; padding: 0; }
+.outbox li { padding: 10px 12px; border: 1px dashed var(--trail); border-radius: var(--radius); margin: 6px 0; font-size: 14px; }
+.outbox li.failed { border-color: var(--danger); }
+.outbox .row-actions { margin-top: 6px; }
+.msg-row { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "who when" "subj star" "snip star"; gap: 0 10px; padding: 11px 4px 11px 10px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.msg-row:active { background: var(--sunk); }
+.msg-row .who { grid-area: who; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg-row .when { grid-area: when; color: var(--muted); font-size: var(--fs-small); font-variant-numeric: tabular-nums; }
+.msg-row .subj { grid-area: subj; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg-row .snip { grid-area: snip; color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg-row .star { grid-area: star; align-self: center; width: 40px; height: 40px; font-size: 20px; color: var(--muted); }
+.msg-row .star.on { color: var(--warn); }
+.msg-row.unread .who, .msg-row.unread .subj { font-weight: 700; }
+.msg-row.unread { border-left: 3px solid var(--accent); padding-left: 7px; }
+.msg-row .tag { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; margin-left: 6px; }
+.empty { text-align: center; padding: 40px 0; }
+.fab { position: fixed; right: 18px; bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 10; padding: 15px 22px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); font-weight: 700; box-shadow: 0 6px 18px rgba(0, 0, 0, .2); }
+
+/* Lezen */
+.actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+.actions.sticky { position: sticky; top: 61px; z-index: 5; background: var(--bg); padding: 6px 0; margin: 0; }
+.actions .btn { padding: 8px 12px; }
+.sheet { display: grid; gap: 6px; padding: 10px; margin: 6px 0; border: 1.5px solid var(--line); border-radius: var(--radius-l); background: var(--panel); }
+.sheet .btn { justify-content: flex-start; }
+.sheet .labels { display: flex; flex-wrap: wrap; gap: 6px; }
+#message h2 { font-size: var(--fs-1); margin: 12px 0 6px; overflow-wrap: anywhere; }
+.meta { font-size: 14px; color: var(--muted); margin-bottom: 10px; overflow-wrap: anywhere; }
+.meta b { color: var(--text); }
+.chips { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.chips li { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 3px 10px; font-size: 13px; }
+.chips li button { margin-left: 6px; color: var(--danger); }
+.atts { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 6px; }
+.atts li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.atts .name { flex: 1 1 140px; overflow-wrap: anywhere; }
+.atts .btn { padding: 6px 10px; font-size: 14px; }
+.note { font-size: 14px; background: var(--warn-soft); border-radius: var(--radius); padding: 8px 10px; margin: 8px 0; }
+.frame { width: 100%; border: 0; min-height: 200px; background: #fff; border-radius: var(--radius); display: block; }
+.thread { list-style: none; padding: 0; margin: 14px 0; border-top: 1px solid var(--line); }
+.thread li { padding: 8px 4px; border-bottom: 1px solid var(--line); font-size: 14px; cursor: pointer; }
+.thread li.cur { font-weight: 700; cursor: default; }
+.reply-bar { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 24px; }
+
+/* Instellingen */
+#settings .block { border-top: 1px solid var(--line); padding: 14px 0 6px; }
+#settings h3 { margin: 0 0 8px; font-size: var(--fs-0); }
+#settings .radios { margin: 8px 0 12px; }
+#settings label { margin: 8px 0; }
+.row-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.steps { padding-left: 22px; display: grid; gap: 18px; }
+.steps li > b { display: block; margin-bottom: 6px; }
+.steps .fields { margin-top: 6px; }
+
+.toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(86px + env(safe-area-inset-bottom)); z-index: 50; background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: var(--radius); max-width: 90vw; font-size: 14px; }

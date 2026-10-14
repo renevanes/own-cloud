@@ -6,6 +6,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -20,11 +21,14 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.WebChromeClient;
 
+import java.io.IOException;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import nl.eigencloud.core.ConsoleApi;
 import nl.eigencloud.core.Json;
+import nl.eigencloud.core.Passwords;
 
 /**
  * De beheerconsole op de telefoon: zelf je cloud opzetten bij Hetzner, Scaleway of UpCloud, opslag en DNS
@@ -55,6 +59,9 @@ public final class ConsoleActivity extends Activity {
         // Geen schermafbeeldingen of voorbeeld in "recente apps": hier staan je herstelsleutel en API-tokens.
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
         backend = ConsoleBackend.get(this);
+        // De kluis achter je vingerafdruk: de vragen verschijnen boven deze activity.
+        Biometrics.LOCK.attach(this);
+        backend.deviceLock = Biometrics.LOCK;
         updateBiometricState(true);
         web = new WebView(this);
         setContentView(web);
@@ -114,7 +121,10 @@ public final class ConsoleActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        Biometrics.LOCK.attach(this);
         paid();
+        // Terug uit bijv. de instellingen van Android (vingerafdruk ingesteld?): de console kijkt opnieuw.
+        web.evaluateJavascript("window.__eigenResume && window.__eigenResume()", null);
         UpdateCheck.resumed(this);
         // Is de kluis intussen op slot gegaan (15 minuten niets gedaan)? Dan meteen het slotscherm.
         if (wasUnlocked && !backend.unlocked()) { autoBio = true; web.reload(); }
@@ -128,6 +138,7 @@ public final class ConsoleActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        Biometrics.LOCK.detach(this);
         pool.shutdown();
         web.destroy();
         super.onDestroy();
@@ -155,7 +166,56 @@ public final class ConsoleActivity extends Activity {
             pool.execute(() -> {
                 if ("GET".equals(method) && "/api/state".equals(path)) { updateBiometricState(autoBio); autoBio = false; }
                 ConsoleApi.Reply r = backend.handle(method, path, body);
+                // Kluis net overgezet naar de vingerafdruk: de oude vingerafdruk-ontgrendeling (wachtwoordzin-kluis) is niet meer nodig.
+                if ("POST".equals(method) && "/api/vault/device".equals(path) && r.status == 200) { Biometrics.forget(ConsoleActivity.this); updateBiometricState(false); }
                 reply(id, r.status, r.body);
+            });
+        }
+
+        /** "Vingerafdruk instellen": de instellingen van Android (daarna kijkt de console opnieuw, zie onResume). */
+        @JavascriptInterface
+        public void openSecuritySettings() {
+            if (!onOurPage()) return;
+            main.post(() -> Biometrics.openSecuritySettings(ConsoleActivity.this));
+        }
+
+        /**
+         * "Plakken" bij een sleutel of token: het klembord lezen en daarna leegmaken (Android 9+), zodat het geheim niet
+         * op het klembord blijft staan. {"text": opgeschoond, "raw": zoals gekopieerd, "cleared": true/false}.
+         */
+        @JavascriptInterface
+        public String takeClipboard() {
+            if (!onOurPage()) return "{\"text\":\"\",\"cleared\":false}";
+            String raw = clipboard();
+            boolean cleared = !raw.isEmpty() && clearClip();
+            String r = raw.length() > 8192 ? raw.substring(0, 8192) : raw;
+            return Json.stringify(Json.obj("text", Passwords.normalizePaste(r), "raw", r, "cleared", cleared));
+        }
+
+        /** Het klembord leegmaken (na automatisch invullen van gekopieerde sleutels). */
+        @JavascriptInterface
+        public boolean clearClipboard() {
+            return onOurPage() && clearClip();
+        }
+
+        /** Een geheim (bijv. het wachtwoord van je cloud) naar het klembord: gemarkeerd als gevoelig, na een minuut weer weg. */
+        @JavascriptInterface
+        public void copySecret(String text) {
+            if (!onOurPage() || text == null) return;
+            main.post(() -> {
+                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm == null) return;
+                ClipData clip = ClipData.newPlainText("Eigen Cloud", text);
+                android.os.PersistableBundle extras = new android.os.PersistableBundle();
+                extras.putBoolean("android.content.extra.IS_SENSITIVE", true); // ClipDescription.EXTRA_IS_SENSITIVE (Android 13+)
+                clip.getDescription().setExtras(extras);
+                cm.setPrimaryClip(clip);
+                main.postDelayed(() -> {
+                    try {
+                        ClipData now = cm.getPrimaryClip();
+                        if (now != null && now.getItemCount() > 0 && text.contentEquals(now.getItemAt(0).coerceToText(ConsoleActivity.this))) clearClip();
+                    } catch (RuntimeException ignored) { /* niet meer bij het klembord */ }
+                }, 60_000);
             });
         }
 
@@ -182,13 +242,29 @@ public final class ConsoleActivity extends Activity {
         @JavascriptInterface
         public void openCloud(String url) {
             if (!onOurPage()) return;
+            final String u;
             try {
-                String u = CloudApi.normalize(url);
-                Prefs.setStr(ConsoleActivity.this, Prefs.CLOUD_URL, u);
-                startActivity(new Intent(ConsoleActivity.this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP));
+                u = CloudApi.normalize(url);
             } catch (IllegalArgumentException e) {
                 openExternal(Uri.parse(url));
+                return;
             }
+            Prefs.setStr(ConsoleActivity.this, Prefs.CLOUD_URL, u);
+            // Opgezet op deze telefoon? Dan logt de app zelf in met het wachtwoord uit de kluis: niets te typen.
+            Map<String, Object> login = backend.appLogin();
+            pool.execute(() -> {
+                if (login != null && CloudApi.sessionToken(u) == null) {
+                    try {
+                        if (u.equals(CloudApi.normalize(Json.str(login, "url")))) {
+                            CloudLogin.login(u, Json.str(login, "user"), Json.str(login, "password"), null);
+                            CloudLogin.remember(ConsoleActivity.this, u, Json.str(login, "user"), Json.str(login, "password"));
+                        }
+                    } catch (IOException | RuntimeException ignored) {
+                        // dan het inlogscherm van de app
+                    }
+                }
+                main.post(() -> startActivity(new Intent(ConsoleActivity.this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)));
+            });
         }
 
         /** Tekst op het klembord (voor "Plakken" bij de Scaleway-sleutels); leeg als er niets is of het niet mag. */
@@ -301,6 +377,19 @@ public final class ConsoleActivity extends Activity {
 
             @Override public void fail(String message) { reply(id, 400, Json.stringify(Json.obj("error", message))); }
         });
+    }
+
+    /** Het klembord leegmaken: Android 9+ kan dat netjes; daarvoor een leeg klembord. */
+    private boolean clearClip() {
+        try {
+            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm == null) return false;
+            if (Build.VERSION.SDK_INT >= 28) cm.clearPrimaryClip();
+            else cm.setPrimaryClip(ClipData.newPlainText("", ""));
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /** Herstelblad via Android-afdrukken (daar kun je ook "Opslaan als pdf" kiezen). */

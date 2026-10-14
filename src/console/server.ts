@@ -125,8 +125,13 @@ function sanitized(c: AdminConfig) {
     overstap: c.console.overstap ? { naar: c.console.overstap.naar, stap: c.console.overstap.stap } : null,
     alleenDienst: !!c.console.alleenDienst,
     keyCheck: c.console.keyConfirmed ? "ok" : c.console.keyCheckLater ? "later" : "open",
+    appLogin: { stored: !!c.console.appPassword, generated: !!c.console.appPasswordGenerated },
   };
 }
+
+/** Een kluis achter de vingerafdruk kan alleen in de app (de telefoon heeft de sleutel in zijn beveiligde hardware). */
+const DEVICE_ONLY = { error: "Met je vingerafdruk kan alleen in de app op je telefoon", unavailable: true };
+const wantsDevice = (b: unknown) => (b as { vault?: string } | undefined)?.vault === "device";
 
 interface Step { id: string; label: string; state: "wait" | "busy" | "done" | "fail"; detail?: string }
 let launch: { steps: Step[]; appUrl: string | null; done: boolean; startedAt: number } | null = null;
@@ -462,6 +467,8 @@ export async function buildConsole() {
 
   app.get("/api/state", async (req) => ({
     vault: vault.exists(),
+    vaultMode: vault.describe()?.mode ?? null,
+    vaultPassphrase: !!vault.describe()?.passphrase,
     unlocked: hasSession(req),
     step: vault.config?.console.step ?? null,
     done: vault.config?.console.done ?? false,
@@ -497,6 +504,7 @@ export async function buildConsole() {
 
   app.post<{ Body: CloudInput & { passphrase: string } }>("/api/setup/create", async (req, reply) => {
     if (vault.exists()) return reply.code(409).send({ error: "Er is al een kluis. Ontgrendel hem." });
+    if (wantsDevice(req.body)) return reply.code(400).send(DEVICE_ONLY);
     let cfg: AdminConfig;
     try { cfg = cloudConfig(req.body ?? ({} as CloudInput)); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     try { vault.create(req.body.passphrase ?? "", cfg); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
@@ -507,6 +515,7 @@ export async function buildConsole() {
   // Aanbieder worden zonder eigen cloud: een kluis alleen voor de Dienst (herstelsleutel zoals bij een cloud).
   app.post<{ Body: { passphrase: string } }>("/api/setup/aanbieder", async (req, reply) => {
     if (vault.exists()) return reply.code(409).send({ error: "Er is al een kluis. Ontgrendel hem." });
+    if (wantsDevice(req.body)) return reply.code(400).send(DEVICE_ONLY);
     try { vault.create(req.body?.passphrase ?? "", dienstConfig()); } catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     newSession(reply);
     return { ok: true };
@@ -514,6 +523,7 @@ export async function buildConsole() {
 
   app.post<{ Body: { passphrase: string; masterKey: string; store: StoreConfig } }>("/api/setup/recover", async (req, reply) => {
     if (vault.exists()) return reply.code(409).send({ error: "Er is al een kluis op deze computer" });
+    if (wantsDevice(req.body)) return reply.code(400).send(DEVICE_ONLY);
     const key = (req.body.masterKey ?? "").replace(/[^0-9a-f]/gi, "").toLowerCase();
     if (key.length !== 64) return reply.code(400).send({ error: "De sleutel bestaat uit 64 tekens (0–9 en a–f)" });
     try {
@@ -545,6 +555,7 @@ export async function buildConsole() {
   app.post<{ Body: { masterKey: string; passphrase: string } }>("/api/setup/recover-dienst", async (req, reply) => {
     if (vault.exists()) return reply.code(409).send({ error: "Er is al een kluis op deze computer" });
     if (!recoverDienst?.token) return reply.code(400).send({ error: "Log eerst in bij de dienst" });
+    if (wantsDevice(req.body)) return reply.code(400).send(DEVICE_ONLY);
     const key = (req.body.masterKey ?? "").replace(/[^0-9a-f]/gi, "").toLowerCase();
     if (key.length !== 64) return reply.code(400).send({ error: "De sleutel bestaat uit 64 tekens (0–9 en a–f)" });
     try {
@@ -584,9 +595,21 @@ export async function buildConsole() {
     newSession(reply);
     return { ok: true };
   });
+  // Ontgrendelen met de vingerafdruk bestaat alleen in de app (ConsoleApi.java); hier dezelfde route met een duidelijke fout.
+  app.post("/api/unlock/device", async (_req, reply) => reply.code(400).send(DEVICE_ONLY));
 
   app.register(async (s) => {
     s.addHook("preHandler", requireUnlocked);
+
+    // ── Kluis (zoals in de app; op de computer altijd met een wachtwoordzin) ──
+    s.post("/api/vault/passphrase", async (_req, reply) => reply.code(409).send({ error: "Je kluis heeft al een wachtwoordzin" }));
+    s.post("/api/vault/device", async (_req, reply) => reply.code(400).send(DEVICE_ONLY));
+    // Het inlogwachtwoord van de cloud bewaart alleen de app (achter de vingerafdruk); de computer heeft alleen de hash.
+    s.post("/api/app-password/show", async (_req, reply) => {
+      const pw = cfg().console.appPassword;
+      if (!pw) return reply.code(404).send({ error: "Het wachtwoord is niet op dit toestel bewaard" });
+      return reply.code(403).send({ error: "Het wachtwoord tonen kan alleen in de app, met je vingerafdruk", passphraseRequired: false });
+    });
 
     s.post("/api/lock", async () => { vault.lock(); session = null; return { ok: true }; });
     s.get("/api/config", async () => sanitized(cfg()));

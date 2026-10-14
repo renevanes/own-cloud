@@ -1,0 +1,10 @@
+{
+  "comment": "Vormen van de console-API die de computer (src/console/server.ts) en de app (ConsoleApi.java) gelijk moeten geven. Getest door test/vingerafdruk.test.ts en DeviceVaultTest.java (via scripts/golden.ts).",
+  "state": ["vault", "vaultMode", "vaultPassphrase", "unlocked", "step", "done", "domain", "offers", "dienst", "aanbieder", "domainMode", "scaleway"],
+  "stateDevice": ["available", "biometric", "pin", "reason", "invalidated"],
+  "vaultModes": ["passphrase", "device"],
+  "appLogin": ["stored", "generated"],
+  "deviceUnavailable": { "status": 400, "keys": ["error", "unavailable"] },
+  "appPasswordNotStored": { "status": 404, "error": "Het wachtwoord is niet op dit toestel bewaard" },
+  "vaultHasPassphrase": { "status": 409, "error": "Je kluis heeft al een wachtwoordzin" }
+}

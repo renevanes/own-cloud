@@ -25,6 +25,32 @@
         <button class="choice" id="setup"><b>Nieuwe Eigen Cloud opzetten</b><span class="muted">Alles vanaf deze telefoon, in ongeveer een kwartier. De app zet servers, opslag en mail voor je klaar.</span></button>
         <button class="choice" id="provider"><b id="providerTitle">Aanbieder worden</b><span class="muted" id="providerText">Draai je eigen Eigen Cloud Dienst, met je eigen naam en prijzen. Mensen nemen dan bij jou een cloud. Een eigen cloud is niet nodig.</span></button>
       </div>
+      <div class="onphone" id="onPhone">
+        <h2>Op deze telefoon</h2>
+        <div class="choices">
+          <button class="choice" data-onphone="#agenda"><b>Agenda op deze telefoon</b><span class="muted">Je Google-agenda bekijken en wijzigen, met een eigen reservekopie. Zonder wachtwoord.</span></button>
+          <button class="choice" data-onphone="#fotos"><b>Foto's op deze telefoon</b><span class="muted">Je galerij, je foto's uit Google Foto's halen, en je foto's uit je cloud.</span></button>
+        </div>
+      </div>
+    </section>
+
+    <section id="login" hidden>
+      <h1>Inloggen</h1>
+      <p class="lead" id="loginWhere">Bij je cloud.</p>
+      <div id="fpBox" hidden>
+        <p><button class="btn primary big" id="fpLogin">Inloggen met je vingerafdruk</button></p>
+        <p><button class="link" id="typeInstead">Wachtwoord intypen</button></p>
+      </div>
+      <form class="fields" id="loginForm">
+        <label id="userRow" hidden>Je e-mailadres<input name="user" type="email" autocomplete="username" autocapitalize="off" spellcheck="false"></label>
+        <label id="passRow">Wachtwoord<input name="password" type="password" autocomplete="current-password"></label>
+        <label id="codeRow" hidden>Code uit je authenticator-app<input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="20"></label>
+        <label class="check" id="rememberRow" hidden><input type="checkbox" name="remember" checked> <span>Voortaan inloggen met je vingerafdruk</span></label>
+        <p class="msg" role="status"></p>
+        <div><button class="btn primary big">Inloggen</button></div>
+      </form>
+      <p class="muted" id="loginNote" hidden><small>Je wachtwoord staat dan alleen versleuteld op deze telefoon, achter je vingerafdruk.</small></p>
+      <p><button class="link" id="loginOther">Ander adres gebruiken</button></p>
     </section>
 
     <section id="offline" hidden>
@@ -59,8 +85,14 @@
         <dl class="facts">
           <dt>Cloud</dt><dd id="cloud"></dd>
           <dt>Beheer</dt><dd id="beheer"></dd>
+          <dt>Inloggen</dt><dd id="loginHow"></dd>
           <dt>Toestel</dt><dd id="device"></dd>
         </dl>
+        <div class="actions" id="onPhoneAbout">
+          <button class="btn" data-onphone="#agenda">Agenda op deze telefoon</button>
+          <button class="btn" data-onphone="#fotos">Foto's op deze telefoon</button>
+          <button class="btn" data-onphone="#opslag">Opslag op deze telefoon</button>
+        </div>
       </div>
 
       <div class="block" id="providers">
@@ -77,6 +109,7 @@
       <div class="block">
         <h2>Privacy</h2>
         <p>De app praat alleen met je eigen cloud, met de aanbieders die je zelf kiest, en met GitHub: voor nieuwe versies en de lijst van aanbieders, en als je aanbieder bent en dat kiest, om je met je eigen GitHub-account aan te melden voor die lijst. Waar de DNS van een domein staat, vraagt de app versleuteld (DNS-over-HTTPS) aan Quad9 (Zwitserland) of DNS4EU (EU); die bewaren je IP-adres niet. Geen Google-diensten, geen advertenties, geen statistieken. De sleutels voor het beheer staan versleuteld op deze telefoon; schermafbeeldingen van het beheer zijn geblokkeerd.</p>
+        <p>Agenda en foto's op deze telefoon: de app leest en schrijft de agenda's op je telefoon, maar praat zelf niet met Google. Staat je Google-account op de telefoon, dan synchroniseert Android je Google-agenda, zoals altijd. Reservekopieën van je agenda en foto's uit je cloud staan alleen in de map van de app (niet in een Google-back-up). Takeout-bestanden leest de app alleen als je ze zelf kiest, en de foto's daaruit gaan alleen naar je eigen cloud. Google Takeout opent in je browser.</p>
         <p><a href="#" id="source">Broncode en alle versies</a> · <a href="#" id="manual">Handleiding</a></p>
       </div>
 

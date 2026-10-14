@@ -101,6 +101,7 @@ jrun DnsTest
 jrun AdaptersTest
 jrun KeyCheckTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
 jrun VaultTest
+jrun DeviceVaultTest MOTO_URL="http://127.0.0.1:$MOTO_PORT"
 run golden-verify.ts npx tsx scripts/golden-verify.ts "$BUILD"
 # Verify time-bound proofs as soon as their three fixture producers have finished.
 jrun SmtpTest SMTP_INFO="$BUILD/smtp-info.json"
@@ -132,6 +133,16 @@ if [ "$DIENST_OK" -eq 1 ]; then
 else
   RESULTS+=("FAIL OverstapTest"); FAILED=1
 fi
+# Agenda en foto's op deze telefoon: ICS gelijk aan de cloud, reservekopie/herstel, Takeout, foto-cache.
+run telefoon-golden.ts npx tsx scripts/telefoon-golden.ts maak "$BUILD/telefoon-golden.json"
+jrun AgendaIcsTest
+run telefoon-golden.ts-controle npx tsx scripts/telefoon-golden.ts controleer "$BUILD"
+jrun AgendaBackupTest
+jrun TakeoutTest
+jrun FotoCacheTest
+# Gmail op deze telefoon: MIME/HTML/opbouw zonder netwerk, daarna sync tegen een nep-Gmail (IMAP + SMTP) met echte SQLite.
+jrun GmailMimeTest
+jrun GmailSyncTest SQLITE_BRIDGE="$HERE/src/test/node/sqlite-bridge.cjs"
 
 echo "== Wachten op de cluster-node (leider)"
 if wait_for 180 test -s "$BUILD/cluster-info.json"; then

@@ -30,6 +30,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import nl.eigencloud.core.Http;
 import nl.eigencloud.core.Json;
 
 /**
@@ -45,6 +46,9 @@ public final class MainActivity extends Activity {
     private ValueCallback<Uri[]> fileCallback;
     private volatile String currentUrl = "";
     private String pendingFlag;
+    /** Inloggen (start.html#inloggen): bij welke cloud, waar daarna naartoe, en (alleen in het geheugen) de inlog voor de code-stap. */
+    private volatile String loginUrl, loginHash = "", mfaUser, mfaPassword;
+    private volatile boolean mfaRemember;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -113,7 +117,63 @@ public final class MainActivity extends Activity {
         String cloud = Prefs.cloudUrl(this);
         if (cloud == null) { web.loadUrl(Assets.ORIGIN + "/start.html"); return; }
         String hash = i != null ? i.getStringExtra(EXTRA_HASH) : null;
-        web.loadUrl(cloud + "/" + (hash != null && hash.startsWith("#") ? hash : ""));
+        String h = hash != null && hash.startsWith("#") ? hash : "";
+        // Niet (meer) ingelogd (bijv. na 30 dagen): het inlogscherm van de app, met je vingerafdruk als je die bewaarde.
+        if (CloudApi.sessionToken(cloud) == null) {
+            loginUrl = cloud;
+            loginHash = h;
+            web.loadUrl(Assets.ORIGIN + "/start.html#inloggen");
+            return;
+        }
+        web.loadUrl(cloud + "/" + h);
+    }
+
+    /** Ingelogd: de cloud openen (en de inlog achter je vingerafdruk bewaren als je dat wilde). */
+    private void loggedIn(String url, String user, String password, boolean remember) {
+        Prefs.setStr(this, Prefs.CLOUD_URL, url);
+        boolean stored = remember && CloudLogin.remember(this, url, user, password);
+        if (!remember) CloudLogin.forget(this);
+        mfaUser = null;
+        mfaPassword = null;
+        String h = loginHash == null ? "" : loginHash;
+        loginHash = "";
+        main.post(() -> {
+            SyncJob.schedule(MainActivity.this);
+            if (stored) Toast.makeText(MainActivity.this, "Voortaan log je in met je vingerafdruk", Toast.LENGTH_SHORT).show();
+            web.loadUrl(url + "/" + h);
+        });
+    }
+
+    /** Inloggen in de achtergrond; fouten als event {type:"login", error, mfa, wrong} voor start.html. */
+    private void tryLogin(String url, String user, String password, String code, boolean remember) {
+        try {
+            CloudLogin.login(url, user, password, code);
+            loggedIn(url, user, password, remember);
+        } catch (CloudLogin.Failed e) {
+            if (e.mfa) { mfaUser = user; mfaPassword = password; mfaRemember = remember; }
+            event(Json.obj("type", "login", "error", e.getMessage(), "mfa", e.mfa, "wrong", e.wrong));
+        } catch (IOException e) {
+            event(Json.obj("type", "login", "error", e.getMessage()));
+        }
+    }
+
+    /** Wat het inlogscherm moet weten; vraagt de cloud of er meer gebruikers zijn (dan ook je adres). Niet op de UI-thread. */
+    private Map<String, Object> loginState(String url, String type) {
+        boolean multi = false;
+        try {
+            Http.Response r = Http.request("GET", url + "/api/login/info", Http.headers("accept", "application/json"), null, 10_000);
+            multi = r.ok() && Json.truthy(Json.path(Json.parse(r.text()), "multiUser"));
+        } catch (IOException | RuntimeException ignored) {
+            // dan alleen het wachtwoord, zoals de cloud zelf
+        }
+        return Json.obj("type", type, "login", true, "url", url, "host", Uri.parse(url).getHost(), "multiUser", multi,
+                "fingerprint", CloudLogin.has(this, url), "remember", CloudLogin.available(this));
+    }
+
+    /** Alleen het startscherm van de app (niet de cloud-pagina's) mag inloggen met het bewaarde wachtwoord. */
+    private boolean startPage() {
+        Uri u = Uri.parse(currentUrl);
+        return Assets.ours(u) && "/start.html".equals(u.getPath());
     }
 
     /**
@@ -302,6 +362,7 @@ public final class MainActivity extends Activity {
                     "updates", Json.obj("on", Prefs.flag(c, Prefs.UPDATES), "status", Updater.status(c)),
                     "sync", Json.obj("last", Prefs.num(c, "sync.last"), "error", Prefs.str(c, "sync.error")),
                     "biometric", Biometrics.available(c), "console", ConsoleBackend.get(c).vault.exists(),
+                    "login", Json.obj("fingerprint", cloud != null && CloudLogin.has(c, cloud), "available", CloudLogin.available(c)),
                     "dienst", Prefs.str(c, Prefs.DIENST_URL),
                     "dienstOwn", Prefs.str(c, Prefs.DIENST_OWN_URL), "dienstName", Prefs.str(c, Prefs.DIENST_OWN_NAME),
                     "dienstOnly", "1".equals(Prefs.str(c, Prefs.DIENST_OWN_ONLY))));
@@ -350,6 +411,13 @@ public final class MainActivity extends Activity {
         public void openConsoleAt(String hash) {
             if (!trusted()) return;
             ConsoleActivity.open(MainActivity.this, hash);
+        }
+
+        /** "Op deze telefoon": "#agenda" (Google-agenda), "#fotos" (foto's en Takeout) of "#opslag" (ruimte). */
+        @JavascriptInterface
+        public void openOnPhone(String hash) {
+            if (!trusted()) return;
+            main.post(() -> OnPhoneActivity.open(MainActivity.this, hash));
         }
 
         /** Voor aanbieders: het beheer van je Eigen Cloud Dienst openen. Bij een fout komt er een event {type:"dienst", error}. */
@@ -410,7 +478,10 @@ public final class MainActivity extends Activity {
             startActivity(Updater.installPermissionIntent(MainActivity.this));
         }
 
-        /** Startscherm: verbinden met een bestaande cloud. Antwoord komt als event {type:"connect"}. */
+        /**
+         * Startscherm: verbinden met een bestaande cloud. Al ingelogd: de cloud gaat open. Anders komt er een event
+         * {type:"connect", login:true, …} en vraagt start.html om in te loggen (zie {@link #loginStart()}).
+         */
         @JavascriptInterface
         public void connect(String address) {
             if (!trusted()) return;
@@ -418,12 +489,97 @@ public final class MainActivity extends Activity {
                 try {
                     String url = CloudApi.normalize(address);
                     CloudApi.probe(url);
-                    Prefs.setStr(MainActivity.this, Prefs.CLOUD_URL, url);
-                    main.post(() -> { SyncJob.schedule(MainActivity.this); web.loadUrl(url + "/"); });
+                    if (CloudApi.sessionToken(url) != null) {
+                        Prefs.setStr(MainActivity.this, Prefs.CLOUD_URL, url);
+                        main.post(() -> { SyncJob.schedule(MainActivity.this); web.loadUrl(url + "/"); });
+                        return;
+                    }
+                    loginUrl = url;
+                    loginHash = "";
+                    event(loginState(url, "connect"));
                 } catch (IOException | IllegalArgumentException e) {
                     event(Json.obj("type", "connect", "error", e.getMessage()));
                 }
             }).start();
+        }
+
+        /** Het inlogscherm (start.html#inloggen) wil weten bij welke cloud en hoe: antwoord als event {type:"login", form:true, …}. */
+        @JavascriptInterface
+        public void loginStart() {
+            if (!startPage()) return;
+            String url = loginUrl != null ? loginUrl : Prefs.cloudUrl(MainActivity.this);
+            if (url == null) { event(Json.obj("type", "login", "error", "Vul eerst het adres van je cloud in", "noCloud", true)); return; }
+            new Thread(() -> {
+                loginUrl = url;
+                // Op deze telefoon opgezet en de kluis is open? Dan logt de app zelf in.
+                Map<String, Object> v = ConsoleBackend.get(MainActivity.this).appLogin();
+                if (v != null && url.equals(Json.str(v, "url"))) {
+                    try {
+                        CloudLogin.login(url, Json.str(v, "user"), Json.str(v, "password"), null);
+                        loggedIn(url, Json.str(v, "user"), Json.str(v, "password"), true);
+                        return;
+                    } catch (IOException e) {
+                        // dan gewoon het formulier
+                    }
+                }
+                event(loginState(url, "login"));
+            }).start();
+        }
+
+        /** Inloggen met wat je typte; met {@code remember} komt de inlog achter je vingerafdruk. */
+        @JavascriptInterface
+        public void login(String user, String password, String code, boolean remember) {
+            if (!startPage()) return;
+            String url = loginUrl;
+            if (url == null) return;
+            String pw = (password == null || password.isEmpty()) && code != null && !code.isEmpty() && mfaPassword != null ? mfaPassword : password;
+            String u = (user == null || user.isEmpty()) && mfaUser != null ? mfaUser : user;
+            boolean keep = (password == null || password.isEmpty()) && mfaPassword != null ? mfaRemember : remember;
+            new Thread(() -> tryLogin(url, u, pw, code, keep)).start();
+        }
+
+        /** Inloggen met je vingerafdruk (de bewaarde inlog voor deze cloud). */
+        @JavascriptInterface
+        public void fingerprintLogin() {
+            if (!startPage()) return;
+            String url = loginUrl;
+            if (url == null) return;
+            CloudLogin.unlock(MainActivity.this, url, new CloudLogin.Unlocked() {
+                @Override public void ok(String user, String password) {
+                    new Thread(() -> {
+                        try {
+                            CloudLogin.login(url, user, password, null);
+                            loggedIn(url, user, password, true);
+                        } catch (CloudLogin.Failed e) {
+                            if (e.mfa) {
+                                mfaUser = user;
+                                mfaPassword = password;
+                                mfaRemember = true;
+                                event(Json.obj("type", "login", "error", e.getMessage(), "mfa", true));
+                            } else if (e.wrong) {
+                                CloudLogin.forget(MainActivity.this);
+                                event(Json.obj("type", "login", "error", "Je wachtwoord is veranderd. Log één keer in met je nieuwe wachtwoord; daarna werkt je vingerafdruk weer.", "fingerprint", false));
+                            } else {
+                                event(Json.obj("type", "login", "error", e.getMessage()));
+                            }
+                        } catch (IOException e) {
+                            event(Json.obj("type", "login", "error", e.getMessage()));
+                        }
+                    }).start();
+                }
+
+                @Override public void fail(String message, boolean cancelled, boolean invalid) {
+                    event(Json.obj("type", "login", "error", cancelled ? null : message, "cancelled", cancelled, "fingerprint", !invalid));
+                }
+            });
+        }
+
+        /** "Inloggen met je vingerafdruk" uitzetten (Over Eigen Cloud). */
+        @JavascriptInterface
+        public void forgetLogin() {
+            if (!trusted()) return;
+            CloudLogin.forget(MainActivity.this);
+            event(Json.obj("type", "changed"));
         }
 
         @JavascriptInterface
@@ -442,10 +598,12 @@ public final class MainActivity extends Activity {
             main.post(() -> {
                 MainActivity c = MainActivity.this;
                 ConsoleBackend.get(c).vault.destroy();
-                Biometrics.forget(c);
+                Biometrics.forgetAll(c);
                 if ("all".equals(scope)) {
+                    CloudLogin.forget(c);
+                    DeviceSecrets.clear(c);
                     c.getSystemService(android.app.job.JobScheduler.class).cancelAll();
-                    new Thread(() -> CalendarSync.remove(c)).start();
+                    new Thread(() -> { CalendarSync.remove(c); OnPhoneStorage.reset(c); }).start();
                     Prefs.get(c).edit().clear().apply();
                     CookieManager.getInstance().removeAllCookies(null);
                     android.webkit.WebStorage.getInstance().deleteAllData();
@@ -463,9 +621,10 @@ public final class MainActivity extends Activity {
             if (!trusted()) return;
             main.post(() -> {
                 Prefs.setStr(MainActivity.this, Prefs.CLOUD_URL, null);
+                CloudLogin.forget(MainActivity.this);
                 Prefs.setFlag(MainActivity.this, Prefs.BACKUP_PHOTOS, false);
                 CookieManager.getInstance().removeAllCookies(null);
-                new Thread(() -> CalendarSync.remove(MainActivity.this)).start();
+                new Thread(() -> { CalendarSync.remove(MainActivity.this); OnPhoneStorage.forgetCloud(MainActivity.this); }).start();
                 Prefs.setFlag(MainActivity.this, Prefs.CALENDAR, false);
                 web.clearHistory();
                 web.loadUrl(Assets.ORIGIN + "/start.html");
